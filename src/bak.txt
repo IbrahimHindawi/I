@@ -1,0 +1,96 @@
+
+#include <Array.h>
+#include "vec3.h"
+
+typedef struct ArchA ArchA;
+struct ArchA {
+    u8 signature;
+    Array_vec3 pos;
+    Array_vec3 vel;
+    Array_vec3 trq;
+};
+
+typedef struct ArchB ArchB;
+struct ArchB {
+    u8 signature;
+    Array_vec3 pos;
+};
+
+typedef struct ArchC ArchC;
+struct ArchC {
+    u8 signature;
+    Array_vec3 pos;
+    Array_vec3 vel;
+};
+
+typedef enum Signature Signature;
+enum Signature {
+    pos = 0b00000001,
+    vel = 0b00000010,
+    trq = 0b00000100,
+};
+#define KindCount 3
+typedef union ArchetypeUnion ArchetypeUnion;
+union ArchetypeUnion {
+    ArchA archa;
+    ArchB archb;
+    ArchC archc;
+};
+typedef struct TaggedArchetype TaggedArchetype;
+struct TaggedArchetype {
+    Signature signature;
+    ArchetypeUnion value;
+};
+
+bool queryTest(u8 a, u8 b) {
+    return (a & b) == b;
+}
+
+Array_TaggedArchetype archetypeGet(Array_TaggedArchetype archs, Signature signature) {
+    Array_TaggedArchetype queryresults = {};
+    for (i32 i = 0; i < archs.length; ++i) {
+        if (queryTest(archs.data[i].signature, signature)) {
+            Array_TaggedArchetype_append(&queryresults, archs.data[i]);
+        }
+    }
+    return queryresults;
+}
+
+void systemIntegrate(Array_vec3 pos, Array_vec3 vel) {
+    printf("ran\n");
+    for (i32 i = 0; i < pos.length; ++i) {
+        pos.data[i].x += vel.data[i].x;
+        pos.data[i].y += vel.data[i].y;
+        pos.data[i].z += vel.data[i].z;
+    }
+}
+
+// need a hashmap here...
+// key: itos/value: arch
+
+void Archetype_test() {
+    ArchA a = {.signature = pos | vel | trq};
+    ArchB b = {.signature = vel};
+    ArchC c = {.signature = pos | vel};
+
+    Array_TaggedArchetype taggedarchetypes = {};
+    Array_TaggedArchetype_append(&taggedarchetypes, (TaggedArchetype){.value.archa = a, .signature = pos | vel | trq });
+    Array_TaggedArchetype_append(&taggedarchetypes, (TaggedArchetype){.value.archb = b, .signature = vel });
+    Array_TaggedArchetype_append(&taggedarchetypes, (TaggedArchetype){.value.archc = c, .signature = pos | vel });
+
+    Array_TaggedArchetype taggedarchetypequery = archetypeGet(taggedarchetypes, pos | vel);
+    for (i32 i = 0; i < taggedarchetypequery.length; ++i) {
+        switch (taggedarchetypequery.data[i].signature) {
+            case pos | vel | trq:
+                systemIntegrate(taggedarchetypequery.data[i].value.archa.pos, taggedarchetypequery.data[i].value.archa.vel);
+            break;
+            case pos | vel:
+                systemIntegrate(taggedarchetypequery.data[i].value.archa.pos, taggedarchetypequery.data[i].value.archa.vel);
+            break;
+            case vel:
+            break;
+        }
+        // systemIntegrate(taggedarchetypequery.data[i].value., )
+    }
+    printf("%llu\n", taggedarchetypequery.length);
+}

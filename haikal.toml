@@ -1,0 +1,8 @@
+[core]
+mainpath = "src/main.c"
+
+# use this path for malloc implementation
+# metapath = "extern/haikal/src/meta/"
+
+# use this path for arena implementation
+metapath = "extern/haikal/src/meta_arena/"
