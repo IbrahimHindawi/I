@@ -16,7 +16,7 @@ I is just C with modern syntax and meta-programming.
 - run `scripts\build.bat -b`
 - run `scripts\build.bat -cr`
 # I language specification:
-```i
+```
 # variable
 num:i32=7;
 
