@@ -31,8 +31,8 @@ bool string8slice_equals_cstr(string8slice s, const char *cstr) {
     return memcmp(s.data, cstr, len) == 0;
 }
 
-char *string8slice_to_cstr_temp(Arena *arena, string8slice s) {
-    char *out = arenaPushArray(arena, char, s.length + 1);
+char *string8slice_to_cstr_temp(memops_arena *arena, string8slice s) {
+    char *out = memops_arena_push_array(arena, char, s.length + 1);
     memcpy(out, s.data, s.length);
     out[s.length] = 0;
     return out;
@@ -42,3 +42,4 @@ char *string8slice_to_cstr_temp(Arena *arena, string8slice s) {
 void string8slice_print(string8slice s) {
     printf("%.*s\n", (int)s.length, s.data);
 }
+

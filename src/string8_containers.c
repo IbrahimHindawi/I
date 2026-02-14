@@ -1,6 +1,6 @@
 #include "string8_containers.h"
 
-Array_string8 string8_split_char(Arena *arena, string8 src, char sep) {
+Array_string8 string8_split_char(memops_arena *arena, string8 src, char sep) {
     i32 count = 1;
     for (i32 i = 0; i < src.length; i++) {
         if (src.data[i] == (u8)sep) count++;
@@ -32,4 +32,5 @@ Array_string8 string8_split_char(Arena *arena, string8 src, char sep) {
 
     return out;
 }
+
 

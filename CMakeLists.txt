@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(c-init VERSION 1.0 LANGUAGES C)
+project(I VERSION 1.0 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # set(CMAKE_C_STANDARD 99)
@@ -9,14 +9,19 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include_directories(extern/haikal/src/meta_arena/gen)
 # include_directories(extern/saha/src)
 add_executable(${PROJECT_NAME}
-    src/fileops.c
-    src/Component.c
     src/main.c
     src/string8.c
     src/string8_containers.c
     src/string8slice.c
     src/string8slice_containers.c
 )
+
+if (WIN32)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+        target_compile_options(${PROJECT_NAME} PRIVATE -Wno-macro-redefined)
+    endif()
+endif()
 # add_subdirectory(extern) # in case of modules...
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")

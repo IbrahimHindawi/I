@@ -6,16 +6,16 @@ static void string8_terminate(string8 *s) {
     s->data[s->length] = 0;
 }
 
-string8 string8_reserve(Arena *arena, u64 capacity) {
+string8 string8_reserve(memops_arena *arena, u64 capacity) {
     string8 s;
-    s.data = arenaPushArray(arena, u8, capacity);
+    s.data = memops_arena_push_array(arena, u8, capacity);
     s.length = 0;
     s.capacity = capacity;
     s.data[0] = 0;
     return s;
 }
 
-string8 string8_from_cstr(Arena *arena, const char *cstr) {
+string8 string8_from_cstr(memops_arena *arena, const char *cstr) {
     u64 len = strlen(cstr);
     string8 s = string8_reserve(arena, len + 1);
     memcpy(s.data, cstr, len + 1);
@@ -23,7 +23,7 @@ string8 string8_from_cstr(Arena *arena, const char *cstr) {
     return s;
 }
 
-string8 string8_copy_from_slice(Arena *arena, u8 *data, u64 length) {
+string8 string8_copy_from_slice(memops_arena *arena, u8 *data, u64 length) {
     string8 s = string8_reserve(arena, length + 1);
     memcpy(s.data, data, length);
     s.data[length] = 0;
@@ -31,14 +31,14 @@ string8 string8_copy_from_slice(Arena *arena, u8 *data, u64 length) {
     return s;
 }
 
-char *string8_to_cstr_temp(Arena *arena, string8 s) {
-    char *out = arenaPushArray(arena, char, s.length + 1);
+char *string8_to_cstr_temp(memops_arena *arena, string8 s) {
+    char *out = memops_arena_push_array(arena, char, s.length + 1);
     memcpy(out, s.data, s.length);
     out[s.length] = 0;
     return out;
 }
 
-static void string8_grow(Arena *arena, string8 *s, u64 min_capacity) {
+static void string8_grow(memops_arena *arena, string8 *s, u64 min_capacity) {
     Array_u8 tmp;
     tmp.data = s->data;
     tmp.length = s->length + 1;
@@ -52,7 +52,7 @@ static void string8_grow(Arena *arena, string8 *s, u64 min_capacity) {
     s->capacity = tmp.border;
 }
 
-void string8_append_byte(Arena *arena, string8 *s, u8 byte) {
+void string8_append_byte(memops_arena *arena, string8 *s, u8 byte) {
     if (s->length + 1 >= s->capacity)
         string8_grow(arena, s, s->length + 2);
 
@@ -61,7 +61,7 @@ void string8_append_byte(Arena *arena, string8 *s, u8 byte) {
     string8_terminate(s);
 }
 
-void string8_append_bytes(Arena *arena, string8 *s, const u8 *src, u64 count) {
+void string8_append_bytes(memops_arena *arena, string8 *s, const u8 *src, u64 count) {
     if (s->length + count >= s->capacity)
         string8_grow(arena, s, s->length + count + 1);
 
@@ -70,7 +70,7 @@ void string8_append_bytes(Arena *arena, string8 *s, const u8 *src, u64 count) {
     string8_terminate(s);
 }
 
-void string8_append_cstr(Arena *arena, string8 *s, const char *cstr) {
+void string8_append_cstr(memops_arena *arena, string8 *s, const char *cstr) {
     string8_append_bytes(arena, s, (const u8*)cstr, strlen(cstr));
 }
 
@@ -79,7 +79,7 @@ void string8_clear(string8 *s) {
     s->data[0] = 0;
 }
 
-string8 string8_read_file(Arena *arena, const char *filename) {
+string8 string8_read_file(memops_arena *arena, const char *filename) {
     FILE *f = fopen(filename, "rb");
     if (!f) return (string8){0};
 
@@ -92,7 +92,7 @@ string8 string8_read_file(Arena *arena, const char *filename) {
         return (string8){0};
     }
 
-    u8 *data = arenaPushArray(arena, u8, size + 1);
+    u8 *data = memops_arena_push_array(arena, u8, size + 1);
     fread(data, 1, size, f);
     fclose(f);
 
@@ -119,3 +119,4 @@ bool string8_equals_cstr(const string8 *a, const char *cstr) {
 void string8_print(const string8 *s) {
     printf("%.*s\n", (int)s->length, s->data);
 }
+

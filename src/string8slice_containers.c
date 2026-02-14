@@ -1,6 +1,6 @@
 #include "string8slice_containers.h"
 
-Array_string8slice string8slice_split(Arena *arena, string8slice src, char sep) {
+Array_string8slice string8slice_split(memops_arena *arena, string8slice src, char sep) {
     u64 count = 1;
     for (u64 i = 0; i < src.length; i++)
         if (src.data[i] == sep) count++;
@@ -24,7 +24,7 @@ Array_string8slice string8slice_split(Arena *arena, string8slice src, char sep) 
     return out;
 }
 
-Array_string8slice string8slice_split_from_string8(Arena *arena, string8 s, char sep) {
+Array_string8slice string8slice_split_from_string8(memops_arena *arena, string8 s, char sep) {
     u64 count = 1;
     for (u64 i = 0; i < s.length; i++) {
         if (s.data[i] == (u8)sep) count++;
@@ -48,4 +48,5 @@ Array_string8slice string8slice_split_from_string8(Arena *arena, string8 s, char
 
     return out;
 }
+
 
