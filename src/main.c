@@ -63,6 +63,8 @@ typedef enum TokenKind {
     Token_Colon,
     Token_Semicolon,
     Token_Equal,
+    Token_EqualEqual,
+    Token_BangEqual,
     Token_PlusEqual,
     Token_MinusEqual,
     Token_StarEqual,
@@ -83,6 +85,7 @@ typedef enum TokenKind {
     Token_Ampersand,
     Token_Caret,
     Token_Pipe,
+    Token_Dot,
     Token_Plus,
     Token_Minus,
     Token_Star,
@@ -91,6 +94,8 @@ typedef enum TokenKind {
     Token_Keyword_Struct,
     Token_Keyword_Ret,
     Token_Keyword_For,
+    Token_Keyword_If,
+    Token_Keyword_Else,
     Token_Keyword_Import,
 } TokenKind;
 
@@ -134,6 +139,9 @@ typedef enum ExprKind {
     Expr_Addr,
     Expr_Binary,
     Expr_Index,
+    Expr_Field,
+    Expr_SizeofType,
+    Expr_AlignofType,
     Expr_ZeroInit,
     Expr_Cast,
 } ExprKind;
@@ -162,18 +170,24 @@ typedef enum StmtKind {
     Stmt_Expr,
     Stmt_Assign,
     Stmt_For,
+    Stmt_If,
 } StmtKind;
 
 struct Stmt {
     StmtKind kind;
     string8 name;
     TypeExpr *type;
+    Expr *lhs;
     Expr *expr;
     TokenKind assign_op;
     Stmt *for_init;
     Expr *for_cond;
     Stmt *for_step;
     Array_voidptr for_body; // Stmt*
+    Expr *if_cond;
+    Array_voidptr if_then_body; // Stmt*
+    Array_voidptr if_else_body; // Stmt*
+    Stmt *if_else_if;           // nested else-if
     i32 line;
     i32 col;
 };
@@ -215,6 +229,7 @@ struct ProcDecl {
 };
 
 typedef struct Program {
+    Array_string8 defines; // macro name
     Array_string8 imports; // string literal include path token text
     Array_voidptr structs; // StructDecl*
     Array_voidptr procs;   // ProcDecl*
@@ -293,8 +308,10 @@ static void lex_tokens(memops_arena *arena, string8 src, Array_Token *out_tokens
             TokenKind kind = Token_Identifier;
             if (string8slice_equals_cstr(text, "proc")) kind = Token_Keyword_Proc;
             else if (string8slice_equals_cstr(text, "struct")) kind = Token_Keyword_Struct;
-            else if (string8slice_equals_cstr(text, "ret")) kind = Token_Keyword_Ret;
+            else if (string8slice_equals_cstr(text, "return")) kind = Token_Keyword_Ret;
             else if (string8slice_equals_cstr(text, "for")) kind = Token_Keyword_For;
+            else if (string8slice_equals_cstr(text, "if")) kind = Token_Keyword_If;
+            else if (string8slice_equals_cstr(text, "else")) kind = Token_Keyword_Else;
             else if (string8slice_equals_cstr(text, "import")) kind = Token_Keyword_Import;
             Array_Token_append(arena, out_tokens, token_make(kind, text, line, start_col));
             continue;
@@ -347,6 +364,18 @@ static void lex_tokens(memops_arena *arena, string8 src, Array_Token *out_tokens
         }
 
         if ((p + 1) < end) {
+            if (c == '=' && p[1] == '=') {
+                Array_Token_append(arena, out_tokens, token_make(Token_EqualEqual, string8slice_from_parts(p, 2), line, col));
+                p += 2;
+                col += 2;
+                continue;
+            }
+            if (c == '!' && p[1] == '=') {
+                Array_Token_append(arena, out_tokens, token_make(Token_BangEqual, string8slice_from_parts(p, 2), line, col));
+                p += 2;
+                col += 2;
+                continue;
+            }
             if (c == '+' && p[1] == '=') {
                 Array_Token_append(arena, out_tokens, token_make(Token_PlusEqual, string8slice_from_parts(p, 2), line, col));
                 p += 2;
@@ -414,6 +443,7 @@ static void lex_tokens(memops_arena *arena, string8 src, Array_Token *out_tokens
             case '&': kind = Token_Ampersand; break;
             case '^': kind = Token_Caret; break;
             case '|': kind = Token_Pipe; break;
+            case '.': kind = Token_Dot; break;
             case '+': kind = Token_Plus; break;
             case '-': kind = Token_Minus; break;
             case '*': kind = Token_Star; break;
@@ -510,6 +540,36 @@ static bool parser_next_is_generic_qualified_call(Parser *p) {
             }
         }
         idx++;
+    }
+    return false;
+}
+
+static bool parser_paren_operand_looks_like_type(Parser *p) {
+    i32 idx = p->index;
+    i32 angle_depth = 0;
+    bool saw_any = false;
+    while (idx < p->tokens.length) {
+        TokenKind kind = p->tokens.data[idx].kind;
+        if (kind == Token_RParen && angle_depth == 0) {
+            return saw_any;
+        }
+        if (kind == Token_LAngle) {
+            angle_depth++;
+            idx++;
+            continue;
+        }
+        if (kind == Token_RAngle) {
+            if (angle_depth <= 0) return false;
+            angle_depth--;
+            idx++;
+            continue;
+        }
+        if (kind == Token_Identifier || kind == Token_Star || kind == Token_Comma) {
+            saw_any = true;
+            idx++;
+            continue;
+        }
+        return false;
     }
     return false;
 }
@@ -686,6 +746,7 @@ static Expr *parse_unary(Parser *p);
 static Expr *parse_multiplicative(Parser *p);
 static Expr *parse_additive(Parser *p);
 static Expr *parse_relational(Parser *p);
+static Expr *parse_equality(Parser *p);
 static Expr *parse_postfix(Parser *p, Expr *base);
 
 static Expr *parse_primary(Parser *p) {
@@ -734,6 +795,38 @@ static Expr *parse_primary(Parser *p) {
             cast->line = t->line;
             cast->col = t->col;
             return parse_postfix(p, cast);
+        }
+
+        if ((string8_equals_cstr(&name, "sizeof") || string8_equals_cstr(&name, "alignof")) &&
+            parser_match(p, Token_LParen)) {
+            bool type_form = parser_paren_operand_looks_like_type(p);
+            if (type_form) {
+                TypeExpr *target = parse_type(p);
+                parser_expect(p, Token_RParen, "expected ')' after type");
+                Expr *e = expr_new(
+                    p->arena,
+                    string8_equals_cstr(&name, "sizeof") ? Expr_SizeofType : Expr_AlignofType
+                );
+                e->cast_type = target;
+                e->line = t->line;
+                e->col = t->col;
+                return parse_postfix(p, e);
+            }
+
+            Array_voidptr args = ptr_array_reserve(p->arena, 2);
+            if (!parser_match(p, Token_RParen)) {
+                do {
+                    Expr *arg = parse_expr(p);
+                    ptr_array_append(p->arena, &args, arg);
+                } while (parser_match(p, Token_Comma));
+                parser_expect(p, Token_RParen, "expected ')'");
+            }
+            Expr *call = expr_new(p->arena, Expr_Call);
+            call->name = name;
+            call->args = args;
+            call->line = t->line;
+            call->col = t->col;
+            return parse_postfix(p, call);
         }
 
         if ((parser_next_is_generic_call(p) || parser_next_is_generic_qualified_call(p)) &&
@@ -810,16 +903,31 @@ static Expr *parse_primary(Parser *p) {
 
 static Expr *parse_postfix(Parser *p, Expr *base) {
     Expr *result = base;
-    while (parser_match(p, Token_LBracket)) {
-        Token *lb = parser_prev(p);
-        Expr *index = parse_expr(p);
-        parser_expect(p, Token_RBracket, "expected ']'");
-        Expr *idx = expr_new(p->arena, Expr_Index);
-        idx->base = result;
-        idx->index_expr = index;
-        idx->line = lb->line;
-        idx->col = lb->col;
-        result = idx;
+    for (;;) {
+        if (parser_match(p, Token_LBracket)) {
+            Token *lb = parser_prev(p);
+            Expr *index = parse_expr(p);
+            parser_expect(p, Token_RBracket, "expected ']'");
+            Expr *idx = expr_new(p->arena, Expr_Index);
+            idx->base = result;
+            idx->index_expr = index;
+            idx->line = lb->line;
+            idx->col = lb->col;
+            result = idx;
+            continue;
+        }
+        if (parser_match(p, Token_Dot)) {
+            Token *dot = parser_prev(p);
+            Token *field_tok = parser_expect(p, Token_Identifier, "expected field name after '.'");
+            Expr *field = expr_new(p->arena, Expr_Field);
+            field->base = result;
+            field->name = token_to_string8(p->arena, field_tok);
+            field->line = dot->line;
+            field->col = dot->col;
+            result = field;
+            continue;
+        }
+        break;
     }
     return result;
 }
@@ -890,8 +998,26 @@ static Expr *parse_relational(Parser *p) {
     return left;
 }
 
+static Expr *parse_equality(Parser *p) {
+    Expr *left = parse_relational(p);
+    while (parser_peek(p)->kind == Token_EqualEqual || parser_peek(p)->kind == Token_BangEqual) {
+        Token *op_tok = parser_peek(p);
+        TokenKind op = op_tok->kind;
+        parser_next(p);
+        Expr *right = parse_relational(p);
+        Expr *bin = expr_new(p->arena, Expr_Binary);
+        bin->left = left;
+        bin->right = right;
+        bin->op = op;
+        bin->line = op_tok->line;
+        bin->col = op_tok->col;
+        left = bin;
+    }
+    return left;
+}
+
 static Expr *parse_expr(Parser *p) {
-    return parse_relational(p);
+    return parse_equality(p);
 }
 
 static Stmt *stmt_new(memops_arena *arena, StmtKind kind) {
@@ -948,6 +1074,11 @@ static Stmt *parse_for_clause_stmt(Parser *p, bool allow_var_decl) {
         TokenKind op = parser_match_assign_op(p);
         Stmt *s = stmt_new(p->arena, Stmt_Assign);
         s->name = token_to_string8(p->arena, name_tok);
+        Expr *lhs = expr_new(p->arena, Expr_Name);
+        lhs->name = s->name;
+        lhs->line = name_tok->line;
+        lhs->col = name_tok->col;
+        s->lhs = lhs;
         s->assign_op = op;
         s->expr = parse_expr(p);
         s->line = name_tok->line;
@@ -963,6 +1094,37 @@ static Stmt *parse_for_clause_stmt(Parser *p, bool allow_var_decl) {
 }
 
 static Stmt *parse_stmt(Parser *p) {
+    if (parser_match(p, Token_Keyword_If)) {
+        Token *if_tok = parser_prev(p);
+        Stmt *s = stmt_new(p->arena, Stmt_If);
+        s->line = if_tok->line;
+        s->col = if_tok->col;
+        s->if_then_body = ptr_array_reserve(p->arena, 8);
+        s->if_else_body = ptr_array_reserve(p->arena, 8);
+
+        parser_expect(p, Token_LParen, "expected '(' after if");
+        s->if_cond = parse_expr(p);
+        parser_expect(p, Token_RParen, "expected ')' after if condition");
+        parser_expect(p, Token_LBrace, "expected '{' in if body");
+        while (!parser_match(p, Token_RBrace)) {
+            Stmt *body_stmt = parse_stmt(p);
+            ptr_array_append(p->arena, &s->if_then_body, body_stmt);
+        }
+
+        if (parser_match(p, Token_Keyword_Else)) {
+            if (parser_peek(p)->kind == Token_Keyword_If) {
+                s->if_else_if = parse_stmt(p);
+            } else {
+                parser_expect(p, Token_LBrace, "expected '{' in else body");
+                while (!parser_match(p, Token_RBrace)) {
+                    Stmt *else_stmt = parse_stmt(p);
+                    ptr_array_append(p->arena, &s->if_else_body, else_stmt);
+                }
+            }
+        }
+        return s;
+    }
+
     if (parser_match(p, Token_Keyword_For)) {
         Token *for_tok = parser_prev(p);
         Stmt *s = stmt_new(p->arena, Stmt_For);
@@ -1017,21 +1179,26 @@ static Stmt *parse_stmt(Parser *p) {
             parser_expect(p, Token_Semicolon, "expected ';' after var decl");
             return s;
         }
+
+        p->index--;
+        Expr *lhs = parse_expr(p);
         TokenKind assign_op = parser_match_assign_op(p);
         if (assign_op != Token_EOF) {
             Stmt *s = stmt_new(p->arena, Stmt_Assign);
-            s->name = token_to_string8(p->arena, name_tok);
+            s->lhs = lhs;
+            if (lhs && lhs->kind == Expr_Name) {
+                s->name = lhs->name;
+            }
             s->assign_op = assign_op;
             s->expr = parse_expr(p);
-            s->line = name_tok->line;
-            s->col = name_tok->col;
+            s->line = lhs ? lhs->line : name_tok->line;
+            s->col = lhs ? lhs->col : name_tok->col;
             parser_expect(p, Token_Semicolon, "expected ';' after assignment");
             return s;
         }
 
-        p->index--;
         Stmt *s = stmt_new(p->arena, Stmt_Expr);
-        s->expr = parse_expr(p);
+        s->expr = lhs;
         s->line = s->expr ? s->expr->line : name_tok->line;
         s->col = s->expr ? s->expr->col : name_tok->col;
         parser_expect(p, Token_Semicolon, "expected ';' after expression");
@@ -1159,12 +1326,24 @@ static ProcDecl *parse_proc_decl(Parser *p, Token *name_tok) {
 
 static Program parse_program(Parser *p) {
     Program prog = {0};
+    prog.defines = Array_string8_reserve(p->arena, 8);
     prog.imports = Array_string8_reserve(p->arena, 8);
     prog.structs = ptr_array_reserve(p->arena, 8);
     prog.procs = ptr_array_reserve(p->arena, 8);
     prog.globals = ptr_array_reserve(p->arena, 8);
 
     while (parser_peek(p)->kind != Token_EOF) {
+        if (parser_peek(p)->kind == Token_Identifier &&
+            string8slice_equals_cstr(parser_peek(p)->text, "define")) {
+            parser_next(p); // define
+            parser_expect(p, Token_LParen, "expected '(' after define");
+            Token *name_tok = parser_expect(p, Token_String, "expected string literal in define");
+            parser_expect(p, Token_RParen, "expected ')' after define");
+            Array_string8_append(p->arena, &prog.defines, token_to_string8(p->arena, name_tok));
+            parser_match(p, Token_Semicolon); // optional
+            continue;
+        }
+
         if (parser_match(p, Token_Keyword_Import)) {
             Token *path_tok = parser_expect(p, Token_String, "expected string literal after import");
             string8 path = token_to_string8(p->arena, path_tok);
@@ -1246,8 +1425,11 @@ static void semantic_check_expr(Expr *e, Scope *scope) {
     if (!e) return;
     if (e->kind == Expr_Number) return;
     if (e->kind == Expr_String) return;
+    if (e->kind == Expr_SizeofType) return;
+    if (e->kind == Expr_AlignofType) return;
     if (e->kind == Expr_ZeroInit) return;
     if (e->kind == Expr_Name) {
+        if (string8_equals_cstr(&e->name, "null")) return;
         if (scope_has(&scope->locals, e->name)) return;
         if (scope_has(&scope->globals, e->name)) return;
         semantic_error_name("use of undeclared identifier", e->name, e->line, e->col);
@@ -1259,6 +1441,10 @@ static void semantic_check_expr(Expr *e, Scope *scope) {
     if (e->kind == Expr_Index) {
         semantic_check_expr(e->base, scope);
         semantic_check_expr(e->index_expr, scope);
+        return;
+    }
+    if (e->kind == Expr_Field) {
+        semantic_check_expr(e->base, scope);
         return;
     }
     if (e->kind == Expr_Cast) {
@@ -1280,6 +1466,13 @@ static void semantic_check_expr(Expr *e, Scope *scope) {
         if (string8_equals_cstr(&e->name, "sizeof")) {
             if (e->args.length != 1) {
                 semantic_error("sizeof expects exactly 1 argument", e->line, e->col);
+            }
+            semantic_check_expr((Expr *)e->args.data[0], scope);
+            return;
+        }
+        if (string8_equals_cstr(&e->name, "alignof")) {
+            if (e->args.length != 1) {
+                semantic_error("alignof expects exactly 1 argument", e->line, e->col);
             }
             semantic_check_expr((Expr *)e->args.data[0], scope);
             return;
@@ -1306,9 +1499,12 @@ static void semantic_check_stmt(Stmt *stmt, Scope *scope, memops_arena *arena) {
         return;
     }
     if (stmt->kind == Stmt_Assign) {
-        if (!scope_has(&scope->locals, stmt->name) && !scope_has(&scope->globals, stmt->name)) {
-            semantic_error_name("assignment to undeclared identifier", stmt->name, stmt->line, stmt->col);
+        if (stmt->lhs && stmt->lhs->kind == Expr_Name) {
+            if (!scope_has(&scope->locals, stmt->name) && !scope_has(&scope->globals, stmt->name)) {
+                semantic_error_name("assignment to undeclared identifier", stmt->name, stmt->line, stmt->col);
+            }
         }
+        semantic_check_expr(stmt->lhs, scope);
         semantic_check_expr(stmt->expr, scope);
         return;
     }
@@ -1327,6 +1523,37 @@ static void semantic_check_stmt(Stmt *stmt, Scope *scope, memops_arena *arena) {
         if (stmt->for_step) semantic_check_stmt(stmt->for_step, &loop_scope, arena);
         for (i32 i = 0; i < stmt->for_body.length; i++) {
             semantic_check_stmt((Stmt *)stmt->for_body.data[i], &loop_scope, arena);
+        }
+        return;
+    }
+    if (stmt->kind == Stmt_If) {
+        semantic_check_expr(stmt->if_cond, scope);
+
+        Scope then_scope = *scope;
+        then_scope.locals = Array_string8_reserve(arena, scope->locals.length + 16);
+        for (i32 i = 0; i < scope->locals.length; i++) {
+            Array_string8_append(arena, &then_scope.locals, scope->locals.data[i]);
+        }
+        for (i32 i = 0; i < stmt->if_then_body.length; i++) {
+            semantic_check_stmt((Stmt *)stmt->if_then_body.data[i], &then_scope, arena);
+        }
+
+        if (stmt->if_else_if) {
+            Scope else_if_scope = *scope;
+            else_if_scope.locals = Array_string8_reserve(arena, scope->locals.length + 16);
+            for (i32 i = 0; i < scope->locals.length; i++) {
+                Array_string8_append(arena, &else_if_scope.locals, scope->locals.data[i]);
+            }
+            semantic_check_stmt(stmt->if_else_if, &else_if_scope, arena);
+        } else {
+            Scope else_scope = *scope;
+            else_scope.locals = Array_string8_reserve(arena, scope->locals.length + 16);
+            for (i32 i = 0; i < scope->locals.length; i++) {
+                Array_string8_append(arena, &else_scope.locals, scope->locals.data[i]);
+            }
+            for (i32 i = 0; i < stmt->if_else_body.length; i++) {
+                semantic_check_stmt((Stmt *)stmt->if_else_body.data[i], &else_scope, arena);
+            }
         }
         return;
     }
@@ -1549,10 +1776,32 @@ static void collect_type_instances_from_stmt(Stmt *s, string8 base, Array_string
     if (s->kind == Stmt_Var) {
         collect_type_instances(s->type, base, out, arena);
         collect_type_instances_from_expr(s->expr, base, out, arena);
+    } else if (s->kind == Stmt_Assign) {
+        collect_type_instances_from_expr(s->lhs, base, out, arena);
+        collect_type_instances_from_expr(s->expr, base, out, arena);
     } else if (s->kind == Stmt_Return) {
         collect_type_instances_from_expr(s->expr, base, out, arena);
     } else if (s->kind == Stmt_Expr) {
         collect_type_instances_from_expr(s->expr, base, out, arena);
+    } else if (s->kind == Stmt_For) {
+        collect_type_instances_from_stmt(s->for_init, base, out, arena);
+        collect_type_instances_from_expr(s->for_cond, base, out, arena);
+        collect_type_instances_from_stmt(s->for_step, base, out, arena);
+        for (i32 i = 0; i < s->for_body.length; i++) {
+            collect_type_instances_from_stmt((Stmt *)s->for_body.data[i], base, out, arena);
+        }
+    } else if (s->kind == Stmt_If) {
+        collect_type_instances_from_expr(s->if_cond, base, out, arena);
+        for (i32 i = 0; i < s->if_then_body.length; i++) {
+            collect_type_instances_from_stmt((Stmt *)s->if_then_body.data[i], base, out, arena);
+        }
+        if (s->if_else_if) {
+            collect_type_instances_from_stmt(s->if_else_if, base, out, arena);
+        } else {
+            for (i32 i = 0; i < s->if_else_body.length; i++) {
+                collect_type_instances_from_stmt((Stmt *)s->if_else_body.data[i], base, out, arena);
+            }
+        }
     }
 }
 
@@ -1565,6 +1814,10 @@ static void collect_type_instances_from_expr(Expr *e, string8 base, Array_string
         for (i32 i = 0; i < e->args.length; i++) {
             collect_type_instances_from_expr((Expr *)e->args.data[i], base, out, arena);
         }
+    } else if (e->kind == Expr_Field) {
+        collect_type_instances_from_expr(e->base, base, out, arena);
+    } else if (e->kind == Expr_SizeofType || e->kind == Expr_AlignofType) {
+        collect_type_instances(e->cast_type, base, out, arena);
     } else if (e->kind == Expr_Addr) {
         collect_type_instances_from_expr(e->inner, base, out, arena);
     }
@@ -1605,30 +1858,210 @@ static string8 find_proc_generic_instantiation(Expr *e, string8 proc_name, memop
             string8 found = find_proc_generic_instantiation((Expr *)e->args.data[i], proc_name, arena);
             if (found.data) return found;
         }
+    } else if (e->kind == Expr_Field) {
+        return find_proc_generic_instantiation(e->base, proc_name, arena);
     } else if (e->kind == Expr_Addr) {
+        return find_proc_generic_instantiation(e->inner, proc_name, arena);
+    } else if (e->kind == Expr_Binary) {
+        string8 found = find_proc_generic_instantiation(e->left, proc_name, arena);
+        if (found.data) return found;
+        return find_proc_generic_instantiation(e->right, proc_name, arena);
+    } else if (e->kind == Expr_Index) {
+        string8 found = find_proc_generic_instantiation(e->base, proc_name, arena);
+        if (found.data) return found;
+        return find_proc_generic_instantiation(e->index_expr, proc_name, arena);
+    } else if (e->kind == Expr_Cast) {
         return find_proc_generic_instantiation(e->inner, proc_name, arena);
     }
 
     return (string8){0};
 }
 
+typedef struct GenericProcEntry {
+    ProcDecl *decl;
+    Array_string8 instances; // mangled concrete type args
+} GenericProcEntry;
+
+static GenericProcEntry *generic_entry_from_name(Array_voidptr *entries, string8 name) {
+    for (i32 i = 0; i < entries->length; i++) {
+        GenericProcEntry *e = (GenericProcEntry *)entries->data[i];
+        if (string8_equals(&e->decl->name, &name)) return e;
+    }
+    return null;
+}
+
+static bool type_is_concrete_under_sub(TypeExpr *type, TypeSub sub) {
+    if (!type) return false;
+    if (type->kind == Type_Name) {
+        if (sub.has && string8_equals(&type->name, &sub.param)) {
+            return type_is_concrete_under_sub(sub.arg, (TypeSub){0});
+        }
+        return !string8_is_symbolic_type_name(type->name);
+    }
+    if (type->kind == Type_Ptr) {
+        return type_is_concrete_under_sub(type->elem, sub);
+    }
+    if (type->kind == Type_Generic) {
+        for (i32 i = 0; i < type->args.length; i++) {
+            if (!type_is_concrete_under_sub((TypeExpr *)type->args.data[i], sub)) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool generic_entry_add_instance(memops_arena *arena, GenericProcEntry *entry, string8 mangle) {
+    if (array_string8_contains(&entry->instances, mangle)) return false;
+    Array_string8_append(arena, &entry->instances, mangle);
+    return true;
+}
+
+static bool collect_generic_calls_from_expr(
+    Expr *e,
+    TypeSub sub,
+    Array_voidptr *entries,
+    memops_arena *arena
+) {
+    bool changed = false;
+    if (!e) return false;
+    if (e->kind == Expr_Call) {
+        if (e->type_args.length == 1) {
+            GenericProcEntry *target = generic_entry_from_name(entries, e->name);
+            if (target) {
+                TypeExpr *arg = (TypeExpr *)e->type_args.data[0];
+                if (type_is_concrete_under_sub(arg, sub)) {
+                    string8 mangle = type_mangle(arena, arg, sub);
+                    if (generic_entry_add_instance(arena, target, mangle)) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        for (i32 i = 0; i < e->args.length; i++) {
+            if (collect_generic_calls_from_expr((Expr *)e->args.data[i], sub, entries, arena)) changed = true;
+        }
+        return changed;
+    }
+    if (e->kind == Expr_Addr || e->kind == Expr_Cast) {
+        return collect_generic_calls_from_expr(e->inner, sub, entries, arena);
+    }
+    if (e->kind == Expr_Field) {
+        return collect_generic_calls_from_expr(e->base, sub, entries, arena);
+    }
+    if (e->kind == Expr_Index) {
+        bool c0 = collect_generic_calls_from_expr(e->base, sub, entries, arena);
+        bool c1 = collect_generic_calls_from_expr(e->index_expr, sub, entries, arena);
+        return c0 || c1;
+    }
+    if (e->kind == Expr_Binary) {
+        bool c0 = collect_generic_calls_from_expr(e->left, sub, entries, arena);
+        bool c1 = collect_generic_calls_from_expr(e->right, sub, entries, arena);
+        return c0 || c1;
+    }
+    return false;
+}
+
+static bool collect_generic_calls_from_stmt(
+    Stmt *s,
+    TypeSub sub,
+    Array_voidptr *entries,
+    memops_arena *arena
+) {
+    if (!s) return false;
+    bool changed = false;
+    if (s->kind == Stmt_Var) {
+        if (collect_generic_calls_from_expr(s->expr, sub, entries, arena)) changed = true;
+        return changed;
+    }
+    if (s->kind == Stmt_Assign) {
+        if (collect_generic_calls_from_expr(s->lhs, sub, entries, arena)) changed = true;
+        if (collect_generic_calls_from_expr(s->expr, sub, entries, arena)) changed = true;
+        return changed;
+    }
+    if (s->kind == Stmt_Return || s->kind == Stmt_Expr) {
+        return collect_generic_calls_from_expr(s->expr, sub, entries, arena);
+    }
+    if (s->kind == Stmt_For) {
+        if (collect_generic_calls_from_stmt(s->for_init, sub, entries, arena)) changed = true;
+        if (collect_generic_calls_from_expr(s->for_cond, sub, entries, arena)) changed = true;
+        if (collect_generic_calls_from_stmt(s->for_step, sub, entries, arena)) changed = true;
+        for (i32 i = 0; i < s->for_body.length; i++) {
+            if (collect_generic_calls_from_stmt((Stmt *)s->for_body.data[i], sub, entries, arena)) changed = true;
+        }
+        return changed;
+    }
+    if (s->kind == Stmt_If) {
+        if (collect_generic_calls_from_expr(s->if_cond, sub, entries, arena)) changed = true;
+        for (i32 i = 0; i < s->if_then_body.length; i++) {
+            if (collect_generic_calls_from_stmt((Stmt *)s->if_then_body.data[i], sub, entries, arena)) changed = true;
+        }
+        if (s->if_else_if) {
+            if (collect_generic_calls_from_stmt(s->if_else_if, sub, entries, arena)) changed = true;
+        } else {
+            for (i32 i = 0; i < s->if_else_body.length; i++) {
+                if (collect_generic_calls_from_stmt((Stmt *)s->if_else_body.data[i], sub, entries, arena)) changed = true;
+            }
+        }
+        return changed;
+    }
+    return false;
+}
+
 static void collect_generic_proc_instances(Program *prog, ProcDecl *decl, Array_string8 *out, memops_arena *arena) {
+    Array_voidptr entries = ptr_array_reserve(arena, 32);
+    for (i32 i = 0; i < prog->procs.length; i++) {
+        ProcDecl *p = (ProcDecl *)prog->procs.data[i];
+        if (!p->is_generic) continue;
+        GenericProcEntry *entry = memops_arena_push_struct(arena, GenericProcEntry);
+        memset(entry, 0, sizeof(*entry));
+        entry->decl = p;
+        entry->instances = Array_string8_reserve(arena, 4);
+        ptr_array_append(arena, &entries, entry);
+    }
+
+    // Seed from non-generic contexts only.
     for (i32 i = 0; i < prog->globals.length; i++) {
         Stmt *s = (Stmt *)prog->globals.data[i];
-        string8 found = find_proc_generic_instantiation(s->expr, decl->name, arena);
-        if (found.data && !array_string8_contains(out, found)) {
-            Array_string8_append(arena, out, found);
+        collect_generic_calls_from_stmt(s, (TypeSub){0}, &entries, arena);
+    }
+    for (i32 i = 0; i < prog->procs.length; i++) {
+        ProcDecl *p = (ProcDecl *)prog->procs.data[i];
+        if (p->is_generic) continue;
+        for (i32 j = 0; j < p->body.length; j++) {
+            Stmt *s = (Stmt *)p->body.data[j];
+            collect_generic_calls_from_stmt(s, (TypeSub){0}, &entries, arena);
         }
     }
 
-    for (i32 i = 0; i < prog->procs.length; i++) {
-        ProcDecl *p = (ProcDecl *)prog->procs.data[i];
-        for (i32 j = 0; j < p->body.length; j++) {
-            Stmt *s = (Stmt *)p->body.data[j];
-            string8 found = find_proc_generic_instantiation(s->expr, decl->name, arena);
-            if (found.data && !array_string8_contains(out, found)) {
-                Array_string8_append(arena, out, found);
+    // Closure: discovered generic instances can induce further generic calls.
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (i32 i = 0; i < entries.length; i++) {
+            GenericProcEntry *entry = (GenericProcEntry *)entries.data[i];
+            for (i32 j = 0; j < entry->instances.length; j++) {
+                TypeExpr *arg = type_new(arena, Type_Name);
+                arg->name = entry->instances.data[j];
+                TypeSub sub = {0};
+                sub.has = true;
+                sub.param = entry->decl->type_param;
+                sub.arg = arg;
+                for (i32 k = 0; k < entry->decl->body.length; k++) {
+                    Stmt *s = (Stmt *)entry->decl->body.data[k];
+                    if (collect_generic_calls_from_stmt(s, sub, &entries, arena)) {
+                        changed = true;
+                    }
+                }
             }
+        }
+    }
+
+    GenericProcEntry *target = generic_entry_from_name(&entries, decl->name);
+    if (!target) return;
+    for (i32 i = 0; i < target->instances.length; i++) {
+        string8 mangle = target->instances.data[i];
+        if (!array_string8_contains(out, mangle)) {
+            Array_string8_append(arena, out, mangle);
         }
     }
 }
@@ -1738,9 +2171,79 @@ static TypeExpr *type_name_expr(memops_arena *arena, const char *name) {
     return t;
 }
 
-static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, memops_arena *arena) {
+static TypeExpr *clone_type_expr(memops_arena *arena, TypeExpr *src) {
+    if (!src) return null;
+    TypeExpr *dst = type_new(arena, src->kind);
+    dst->name = src->name;
+    if (src->elem) {
+        dst->elem = clone_type_expr(arena, src->elem);
+    }
+    if (src->args.length > 0) {
+        dst->args = ptr_array_reserve(arena, src->args.length);
+        for (i32 i = 0; i < src->args.length; i++) {
+            ptr_array_append(arena, &dst->args, clone_type_expr(arena, (TypeExpr *)src->args.data[i]));
+        }
+    }
+    return dst;
+}
+
+static TypeExpr *substitute_type_param(memops_arena *arena, TypeExpr *src, string8 param, TypeExpr *arg) {
+    if (!src) return null;
+    if (src->kind == Type_Name && string8_equals(&src->name, &param)) {
+        return clone_type_expr(arena, arg);
+    }
+    TypeExpr *dst = type_new(arena, src->kind);
+    dst->name = src->name;
+    if (src->elem) {
+        dst->elem = substitute_type_param(arena, src->elem, param, arg);
+    }
+    if (src->args.length > 0) {
+        dst->args = ptr_array_reserve(arena, src->args.length);
+        for (i32 i = 0; i < src->args.length; i++) {
+            TypeExpr *in = (TypeExpr *)src->args.data[i];
+            ptr_array_append(arena, &dst->args, substitute_type_param(arena, in, param, arg));
+        }
+    }
+    return dst;
+}
+
+static TypeExpr *lookup_field_type(Program *prog, TypeExpr *base_type, string8 field_name, memops_arena *arena) {
+    if (!base_type) return null;
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (base_type->kind == Type_Name && !decl->is_generic) {
+            if (!string8_equals(&decl->name, &base_type->name)) continue;
+            for (i32 f = 0; f < decl->fields.length; f++) {
+                Field *field = (Field *)decl->fields.data[f];
+                if (string8_equals(&field->name, &field_name)) {
+                    return clone_type_expr(arena, field->type);
+                }
+            }
+        }
+        if (base_type->kind == Type_Generic && decl->is_generic) {
+            if (!string8_equals(&decl->name, &base_type->name)) continue;
+            if (base_type->args.length != 1) return null;
+            TypeExpr *arg = (TypeExpr *)base_type->args.data[0];
+            for (i32 f = 0; f < decl->fields.length; f++) {
+                Field *field = (Field *)decl->fields.data[f];
+                if (string8_equals(&field->name, &field_name)) {
+                    return substitute_type_param(arena, field->type, decl->type_param, arg);
+                }
+            }
+        }
+    }
+    return null;
+}
+
+static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, Program *prog, memops_arena *arena) {
     if (!e) return null;
     if (e->kind == Expr_Name) {
+        if (string8_equals_cstr(&e->name, "null")) {
+            TypeExpr *void_t = type_name_expr(arena, "void");
+            TypeExpr *ptr_t = type_new(arena, Type_Ptr);
+            ptr_t->elem = void_t;
+            return ptr_t;
+        }
         return type_scope_lookup(scope, e->name);
     }
     if (e->kind == Expr_Number) {
@@ -1759,8 +2262,11 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, memops_arena *arena)
         ptr_t->elem = char_t;
         return ptr_t;
     }
+    if (e->kind == Expr_SizeofType || e->kind == Expr_AlignofType) {
+        return type_name_expr(arena, "usize");
+    }
     if (e->kind == Expr_Addr) {
-        TypeExpr *inner = infer_expr_type(e->inner, scope, arena);
+        TypeExpr *inner = infer_expr_type(e->inner, scope, prog, arena);
         if (!inner) return null;
         TypeExpr *ptr_t = type_new(arena, Type_Ptr);
         ptr_t->elem = inner;
@@ -1770,12 +2276,21 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, memops_arena *arena)
         return e->cast_type;
     }
     if (e->kind == Expr_Index) {
-        TypeExpr *base = infer_expr_type(e->base, scope, arena);
+        TypeExpr *base = infer_expr_type(e->base, scope, prog, arena);
         if (base && base->kind == Type_Ptr) return base->elem;
         return null;
     }
+    if (e->kind == Expr_Field) {
+        TypeExpr *base = infer_expr_type(e->base, scope, prog, arena);
+        return lookup_field_type(prog, base, e->name, arena);
+    }
+    if (e->kind == Expr_Call) {
+        if (string8_equals_cstr(&e->name, "sizeof") || string8_equals_cstr(&e->name, "alignof")) {
+            return type_name_expr(arena, "usize");
+        }
+    }
     if (e->kind == Expr_Binary) {
-        return infer_expr_type(e->left, scope, arena);
+        return infer_expr_type(e->left, scope, prog, arena);
     }
     return null;
 }
@@ -1800,7 +2315,7 @@ static const char *printf_spec_for_type(TypeExpr *type) {
     return null;
 }
 
-static void rewrite_printf_call(Expr *call, TypeScope *scope, memops_arena *arena) {
+static void rewrite_printf_call(Expr *call, TypeScope *scope, Program *prog, memops_arena *arena) {
     if (!call || call->kind != Expr_Call || call->args.length < 1) return;
     if (!string8_equals_cstr(&call->name, "printf")) return;
 
@@ -1815,7 +2330,7 @@ static void rewrite_printf_call(Expr *call, TypeScope *scope, memops_arena *aren
     );
     for (i32 i = 0; i < value_count; i++) {
         Expr *arg = (Expr *)call->args.data[i + 1];
-        TypeExpr *ty = infer_expr_type(arg, scope, arena);
+        TypeExpr *ty = infer_expr_type(arg, scope, prog, arena);
         const char *spec = printf_spec_for_type(ty);
         if (!spec) {
             printf("format error at %d:%d: cannot infer '{}' format for printf arg %d\n", arg->line, arg->col, (int)(i + 1));
@@ -1856,52 +2371,73 @@ static void rewrite_printf_call(Expr *call, TypeScope *scope, memops_arena *aren
     fmt->string_lit = out;
 }
 
-static void rewrite_printf_in_expr(Expr *e, TypeScope *scope, memops_arena *arena);
-static void rewrite_printf_in_stmt(Stmt *s, TypeScope *scope, memops_arena *arena);
+static void rewrite_printf_in_expr(Expr *e, TypeScope *scope, Program *prog, memops_arena *arena);
+static void rewrite_printf_in_stmt(Stmt *s, TypeScope *scope, Program *prog, memops_arena *arena);
 
-static void rewrite_printf_in_expr(Expr *e, TypeScope *scope, memops_arena *arena) {
+static void rewrite_printf_in_expr(Expr *e, TypeScope *scope, Program *prog, memops_arena *arena) {
     if (!e) return;
     if (e->kind == Expr_Call) {
-        rewrite_printf_call(e, scope, arena);
+        rewrite_printf_call(e, scope, prog, arena);
         for (i32 i = 0; i < e->args.length; i++) {
-            rewrite_printf_in_expr((Expr *)e->args.data[i], scope, arena);
+            rewrite_printf_in_expr((Expr *)e->args.data[i], scope, prog, arena);
         }
         return;
     }
     if (e->kind == Expr_Binary) {
-        rewrite_printf_in_expr(e->left, scope, arena);
-        rewrite_printf_in_expr(e->right, scope, arena);
+        rewrite_printf_in_expr(e->left, scope, prog, arena);
+        rewrite_printf_in_expr(e->right, scope, prog, arena);
         return;
     }
     if (e->kind == Expr_Addr || e->kind == Expr_Cast) {
-        rewrite_printf_in_expr(e->inner, scope, arena);
+        rewrite_printf_in_expr(e->inner, scope, prog, arena);
         return;
     }
     if (e->kind == Expr_Index) {
-        rewrite_printf_in_expr(e->base, scope, arena);
-        rewrite_printf_in_expr(e->index_expr, scope, arena);
+        rewrite_printf_in_expr(e->base, scope, prog, arena);
+        rewrite_printf_in_expr(e->index_expr, scope, prog, arena);
+        return;
+    }
+    if (e->kind == Expr_Field) {
+        rewrite_printf_in_expr(e->base, scope, prog, arena);
         return;
     }
 }
 
-static void rewrite_printf_in_stmt(Stmt *s, TypeScope *scope, memops_arena *arena) {
+static void rewrite_printf_in_stmt(Stmt *s, TypeScope *scope, Program *prog, memops_arena *arena) {
     if (!s) return;
     if (s->kind == Stmt_Var) {
-        rewrite_printf_in_expr(s->expr, scope, arena);
+        rewrite_printf_in_expr(s->expr, scope, prog, arena);
         type_scope_add(arena, scope, s->name, s->type);
         return;
     }
     if (s->kind == Stmt_Assign || s->kind == Stmt_Expr || s->kind == Stmt_Return) {
-        rewrite_printf_in_expr(s->expr, scope, arena);
+        rewrite_printf_in_expr(s->expr, scope, prog, arena);
         return;
     }
     if (s->kind == Stmt_For) {
         TypeScope loop_scope = type_scope_copy(arena, scope);
-        if (s->for_init) rewrite_printf_in_stmt(s->for_init, &loop_scope, arena);
-        if (s->for_cond) rewrite_printf_in_expr(s->for_cond, &loop_scope, arena);
-        if (s->for_step) rewrite_printf_in_stmt(s->for_step, &loop_scope, arena);
+        if (s->for_init) rewrite_printf_in_stmt(s->for_init, &loop_scope, prog, arena);
+        if (s->for_cond) rewrite_printf_in_expr(s->for_cond, &loop_scope, prog, arena);
+        if (s->for_step) rewrite_printf_in_stmt(s->for_step, &loop_scope, prog, arena);
         for (i32 i = 0; i < s->for_body.length; i++) {
-            rewrite_printf_in_stmt((Stmt *)s->for_body.data[i], &loop_scope, arena);
+            rewrite_printf_in_stmt((Stmt *)s->for_body.data[i], &loop_scope, prog, arena);
+        }
+        return;
+    }
+    if (s->kind == Stmt_If) {
+        rewrite_printf_in_expr(s->if_cond, scope, prog, arena);
+        TypeScope then_scope = type_scope_copy(arena, scope);
+        for (i32 i = 0; i < s->if_then_body.length; i++) {
+            rewrite_printf_in_stmt((Stmt *)s->if_then_body.data[i], &then_scope, prog, arena);
+        }
+        if (s->if_else_if) {
+            TypeScope else_if_scope = type_scope_copy(arena, scope);
+            rewrite_printf_in_stmt(s->if_else_if, &else_if_scope, prog, arena);
+        } else {
+            TypeScope else_scope = type_scope_copy(arena, scope);
+            for (i32 i = 0; i < s->if_else_body.length; i++) {
+                rewrite_printf_in_stmt((Stmt *)s->if_else_body.data[i], &else_scope, prog, arena);
+            }
         }
         return;
     }
@@ -1911,7 +2447,7 @@ static void rewrite_printf_formats(Program *prog, memops_arena *arena) {
     TypeScope globals = type_scope_make(arena, 64);
     for (i32 i = 0; i < prog->globals.length; i++) {
         Stmt *g = (Stmt *)prog->globals.data[i];
-        rewrite_printf_in_expr(g->expr, &globals, arena);
+        rewrite_printf_in_expr(g->expr, &globals, prog, arena);
         type_scope_add(arena, &globals, g->name, g->type);
     }
 
@@ -1923,12 +2459,39 @@ static void rewrite_printf_formats(Program *prog, memops_arena *arena) {
             type_scope_add(arena, &scope, param->name, param->type);
         }
         for (i32 j = 0; j < p->body.length; j++) {
-            rewrite_printf_in_stmt((Stmt *)p->body.data[j], &scope, arena);
+            rewrite_printf_in_stmt((Stmt *)p->body.data[j], &scope, prog, arena);
         }
     }
 }
 
 static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, string8 generic_name);
+static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, string8 generic_name);
+
+static void emit_if_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, string8 generic_name) {
+    emit_cstr(arena, out, "if (");
+    emit_expr(arena, out, s->if_cond, sub, generic_name);
+    emit_cstr(arena, out, ") {\n");
+    for (i32 i = 0; i < s->if_then_body.length; i++) {
+        emit_cstr(arena, out, "        ");
+        emit_stmt(arena, out, (Stmt *)s->if_then_body.data[i], sub, generic_name);
+    }
+    emit_cstr(arena, out, "    }");
+    if (s->if_else_if) {
+        emit_cstr(arena, out, " else ");
+        emit_if_stmt(arena, out, s->if_else_if, sub, generic_name);
+        return;
+    }
+    if (s->if_else_body.length > 0) {
+        emit_cstr(arena, out, " else {\n");
+        for (i32 i = 0; i < s->if_else_body.length; i++) {
+            emit_cstr(arena, out, "        ");
+            emit_stmt(arena, out, (Stmt *)s->if_else_body.data[i], sub, generic_name);
+        }
+        emit_cstr(arena, out, "    }\n");
+        return;
+    }
+    emit_cstr(arena, out, "\n");
+}
 
 static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, string8 generic_name) {
     if (!e) return;
@@ -1951,11 +2514,27 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
         emit_string8(arena, out, e->string_lit);
         return;
     }
+    if (e->kind == Expr_SizeofType) {
+        emit_cstr(arena, out, "sizeof(");
+        emit_type(arena, out, e->cast_type, sub);
+        emit_cstr(arena, out, ")");
+        return;
+    }
+    if (e->kind == Expr_AlignofType) {
+        emit_cstr(arena, out, "_Alignof(");
+        emit_type(arena, out, e->cast_type, sub);
+        emit_cstr(arena, out, ")");
+        return;
+    }
     if (e->kind == Expr_ZeroInit) {
         emit_cstr(arena, out, "{}");
         return;
     }
     if (e->kind == Expr_Name) {
+        if (string8_equals_cstr(&e->name, "null")) {
+            emit_cstr(arena, out, "0");
+            return;
+        }
         emit_string8(arena, out, e->name);
         return;
     }
@@ -1979,6 +2558,12 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
         emit_cstr(arena, out, "]");
         return;
     }
+    if (e->kind == Expr_Field) {
+        emit_expr(arena, out, e->base, sub, generic_name);
+        emit_cstr(arena, out, ".");
+        emit_string8(arena, out, e->name);
+        return;
+    }
     if (e->kind == Expr_Binary) {
         emit_expr(arena, out, e->left, sub, generic_name);
         if (e->op == Token_Plus) {
@@ -1993,6 +2578,10 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
             emit_cstr(arena, out, " < ");
         } else if (e->op == Token_RAngle) {
             emit_cstr(arena, out, " > ");
+        } else if (e->op == Token_EqualEqual) {
+            emit_cstr(arena, out, " == ");
+        } else if (e->op == Token_BangEqual) {
+            emit_cstr(arena, out, " != ");
         } else {
             emit_cstr(arena, out, " /* unsupported op */ ");
         }
@@ -2043,7 +2632,8 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
         return;
     }
     if (s->kind == Stmt_Assign) {
-        emit_string8(arena, out, s->name);
+        if (s->lhs) emit_expr(arena, out, s->lhs, sub, generic_name);
+        else emit_string8(arena, out, s->name);
         if (s->assign_op == Token_Equal) emit_cstr(arena, out, " = ");
         else if (s->assign_op == Token_PlusEqual) emit_cstr(arena, out, " += ");
         else if (s->assign_op == Token_MinusEqual) emit_cstr(arena, out, " -= ");
@@ -2088,7 +2678,8 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
         emit_cstr(arena, out, "; ");
         if (s->for_step) {
             if (s->for_step->kind == Stmt_Assign) {
-                emit_string8(arena, out, s->for_step->name);
+                if (s->for_step->lhs) emit_expr(arena, out, s->for_step->lhs, sub, generic_name);
+                else emit_string8(arena, out, s->for_step->name);
                 if (s->for_step->assign_op == Token_Equal) emit_cstr(arena, out, " = ");
                 else if (s->for_step->assign_op == Token_PlusEqual) emit_cstr(arena, out, " += ");
                 else if (s->for_step->assign_op == Token_MinusEqual) emit_cstr(arena, out, " -= ");
@@ -2109,6 +2700,10 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
             emit_stmt(arena, out, (Stmt *)s->for_body.data[i], sub, generic_name);
         }
         emit_cstr(arena, out, "    }\n");
+        return;
+    }
+    if (s->kind == Stmt_If) {
+        emit_if_stmt(arena, out, s, sub, generic_name);
         return;
     }
 }
@@ -2240,6 +2835,19 @@ static void emit_proc_proto_mono(memops_arena *arena, string8 *out, ProcDecl *de
 
 static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
     emit_cstr(arena, out, "#include <core.h>\n\n");
+    for (i32 i = 0; i < prog->defines.length; i++) {
+        string8 macro_lit = prog->defines.data[i];
+        string8 macro = macro_lit;
+        if (macro.length >= 2 && macro.data[0] == '"' && macro.data[macro.length - 1] == '"') {
+            macro = string8_copy_from_slice(arena, macro.data + 1, macro.length - 2);
+        }
+        emit_cstr(arena, out, "#define ");
+        emit_string8(arena, out, macro);
+        emit_cstr(arena, out, "\n");
+    }
+    if (prog->defines.length > 0) {
+        emit_cstr(arena, out, "\n");
+    }
     for (i32 i = 0; i < prog->imports.length; i++) {
         emit_cstr(arena, out, "#include ");
         emit_string8(arena, out, prog->imports.data[i]);

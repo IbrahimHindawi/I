@@ -11,13 +11,13 @@ syn case match
 syn match iComment "#.*$"
 
 " Keywords
-syn keyword iKeyword proc struct ret for import external
+syn keyword iKeyword proc struct return for if else import external define
 
 " Built-in types / primitives
 syn keyword iType i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 usize b32 bool void char
 
 " Built-ins
-syn keyword iBuiltin cast sizeof printf
+syn keyword iBuiltin cast sizeof alignof printf null
 
 " Qualified generic sugar: array<T>reserve
 syn match iIdentifier "\<[A-Za-z_][A-Za-z0-9_]*\s*<[^>]\+>[A-Za-z_][A-Za-z0-9_]*\>"
@@ -35,8 +35,9 @@ syn region iString start=+"+ skip=+\\\\\|\\"+ end=+"+
 
 " Operators and punctuation
 syn match iOperator "->"
+syn match iOperator "==\|!="
 syn match iOperator "+=\|-=\|\*=\|/=\|&=\|\^=\||="
-syn match iOperator "[:=,;@&|^*/+-]"
+syn match iOperator "[:=,;.@&|^*/!+-]"
 syn match iDelimiter "[(){}\[\]<>]"
 
 " Highlight links
