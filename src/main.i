@@ -24,13 +24,12 @@ array:struct<T> = {
     border:u64; 
     data:*T;
 }
-
 array<T>reserve:proc<T>(arena: *memops_arena, length:u64)->array<T>={
     arr:array<T> = {};
     if (length == 0) {
         return arr;
     }
-    arr.data = memops_arena_push_array_i<T>(arena, length);
+    arr.data = memops_arena_push_array<T>(arena, length);
     if (arr.data == null) {
         printf("memops arena allocation failure!\n");
         arr.data = 0;
@@ -95,7 +94,11 @@ main:proc()->i32={
     a: array<i32> = {};
     memops_arena_push_array_i<f32>(&arena, 128);
     a = array<i32>reserve(&arena, 128);
-    for (i:i32=0; i<128; i+=1) { a.data[i] = i; }
-    for (i:i32=0; i<128; i+=1) { printf("i = {}, ", a.data[i]); }
+    for (i:i32=0; i<128; i+=1) { 
+        a.data[i] = i; 
+    }
+    for (i:i32=0; i<128; i+=1) {
+        printf("i = {}, ", a.data[i]); 
+    }
     return 0;
 }
