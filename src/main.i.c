@@ -48,9 +48,8 @@ u64 hash_fnv1a(void * data, u64 length);
 u64 hash_i32(i32 * x);
 void test_(memops_arena * arena);
 i32 main();
-void * memops_arena_push_array_i_f32(memops_arena * arena, u64 count);
-void * memops_arena_push_array_i_ptr_i32(memops_arena * arena, u64 count);
 void * memops_arena_push_array_i_i32(memops_arena * arena, u64 count);
+void * memops_arena_push_array_i_ptr_i32(memops_arena * arena, u64 count);
 array_ptr_i32 array_ptr_i32_reserve(memops_arena * arena, u64 length);
 array_i32 array_i32_reserve(memops_arena * arena, u64 length);
 i32 makeg_i32(i32 x);
@@ -95,7 +94,7 @@ i32 main() {
     memops_arena arena = {};
     memops_arena_initialize(&arena);
     array_i32 a = {};
-    memops_arena_push_array_i_f32(&arena, 128);
+    memops_arena_push_array_i_i32(&arena, 128);
     a = array_i32_reserve(&arena, 128);
     for (i32 i = 0; i < 128; i += 1) {
         a.data[i] = i;
@@ -106,9 +105,9 @@ i32 main() {
     return 0;
 }
 
-void * memops_arena_push_array_i_f32(memops_arena * arena, u64 count) {
-    u64 alloc_size = sizeof(f32) * count;
-    u64 alignment = _Alignof(f32);
+void * memops_arena_push_array_i_i32(memops_arena * arena, u64 count) {
+    u64 alloc_size = sizeof(i32) * count;
+    u64 alignment = _Alignof(i32);
     void * alloc_ptr = memops_arena_push(arena, alloc_size, alignment);
     return alloc_ptr;
 }
@@ -116,13 +115,6 @@ void * memops_arena_push_array_i_f32(memops_arena * arena, u64 count) {
 void * memops_arena_push_array_i_ptr_i32(memops_arena * arena, u64 count) {
     u64 alloc_size = sizeof(ptr_i32) * count;
     u64 alignment = _Alignof(ptr_i32);
-    void * alloc_ptr = memops_arena_push(arena, alloc_size, alignment);
-    return alloc_ptr;
-}
-
-void * memops_arena_push_array_i_i32(memops_arena * arena, u64 count) {
-    u64 alloc_size = sizeof(i32) * count;
-    u64 alignment = _Alignof(i32);
     void * alloc_ptr = memops_arena_push(arena, alloc_size, alignment);
     return alloc_ptr;
 }
