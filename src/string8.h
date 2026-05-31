@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "Array_u8.h"
+#include "Vec_u8.h"
 #include "core.h"
 #include "saha.h"
 

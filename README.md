@@ -4,17 +4,10 @@ I is just C with modern syntax and meta-programming.
 ## how to run:
 ### Modules
 - run `git submodule update --init --recursive`
-### MSVC
-- initalize `cl.exe` using `x64 Native Tools Command Prompt for VS 2019`
-- run `scripts\build.bat -mb`
-- run `scripts\build.bat -mc`
-- run `scripts\build.bat -b`
-- run `scripts\build.bat -cr`
-### Clang
-- run `scripts\build.bat -mb`
-- run `scripts\build.bat -mc`
-- run `scripts\build.bat -b`
-- run `scripts\build.bat -cr`
+### Bunyan
+- run `python bunyan.py build debug`
+- run `python bunyan.py run debug`
+- run `i.bat` to build `I.exe`, generate `src\main.i.c`, compile it, and run it
 # I language specification:
 ```
 # variable

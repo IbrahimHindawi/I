@@ -2,7 +2,6 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "Array_u8.h"
 #include "core.h"
 #include "saha.h"
 #include "string8.h"
@@ -21,8 +20,8 @@ bool string8slice_equals_cstr(string8slice s, const char *cstr);
 
 char *string8slice_to_cstr_temp(memops_arena *arena, string8slice s);
 
-// Array_string8slice string8slice_split(memops_arena *arena, string8slice s, char sep);
-// Array_string8slice string8slice_split_from_string8(memops_arena *arena, string8 s, char sep);
+// Vec_string8slice string8slice_split(memops_arena *arena, string8slice s, char sep);
+// Vec_string8slice string8slice_split_from_string8(memops_arena *arena, string8 s, char sep);
 
 void string8slice_print(string8slice s);
 

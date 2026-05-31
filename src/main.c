@@ -11,19 +11,19 @@
 // this is because the container has `T` forward declared.
 // Warning: can be recursive type
 //
-// for types that include a container of themselves eg `struct T { Array_T arr; };`
+// for types that include a container of themselves eg `struct T { Vec_T arr; };`
 // the type must be included after the generated header.
 // this is because the type needs to know the container definition.
 // Warning: can be recursive type with `T *` but not `T`
 //---------------------------------------------------------------------------------------------------
 // primitives
 //---------------------------------------------------------------------------------------------------
-// haikal@Array:voidptr:p
-// haikal@Array:i8:p
-// haikal@Array:i32:p
-// haikal@Array:f32:p
-// haikal@Array:char:p
-// haikal@Array:u8:p
+// haikal@Vec:voidptr:p
+// haikal@Vec:i8:p
+// haikal@Vec:i32:p
+// haikal@Vec:f32:p
+// haikal@Vec:char:p
+// haikal@Vec:u8:p
 // haikal@Map:i32:p
 // haikal@Map:u64:p
 // haikal@Node:i32:p
@@ -35,9 +35,9 @@
 //---------------------------------------------------------------------------------------------------
 // structs
 //---------------------------------------------------------------------------------------------------
-// haikal@Array:string8:s
-// haikal@Array:string8slice:s
-// haikal@Array:Token:s
+// haikal@Vec:string8:s
+// haikal@Vec:string8slice:s
+// haikal@Vec:Token:s
 //---------------------------------------------------------------------------------------------------
 // unions
 //---------------------------------------------------------------------------------------------------
@@ -54,6 +54,15 @@ bool i32_eq(i32 a, i32 b) { return a == b; }
 
 #include "string8.h"
 #include "string8slice.h"
+
+template(Vec(voidptr));
+template(Vec(i8));
+template(Vec(i32));
+template(Vec(f32));
+template(Vec(char));
+template(Vec(u8));
+template(Vec(string8));
+template(Vec(string8slice));
 
 typedef enum TokenKind {
     Token_EOF = 0,
@@ -107,8 +116,9 @@ struct Token {
     i32 col;
 };
 
-// add codegen
-#include <Array.h>
+template(Vec(Token));
+
+#include <Vec.h>
 
 typedef struct TypeExpr TypeExpr;
 typedef struct Expr Expr;
@@ -128,7 +138,7 @@ struct TypeExpr {
     TypeKind kind;
     string8 name;
     TypeExpr *elem;
-    Array_voidptr args; // TypeExpr*
+    Vec_voidptr args; // TypeExpr*
 };
 
 typedef enum ExprKind {
@@ -151,8 +161,8 @@ struct Expr {
     string8 name;
     string8 number;
     string8 string_lit;
-    Array_voidptr args;      // Expr*
-    Array_voidptr type_args; // TypeExpr*
+    Vec_voidptr args;      // Expr*
+    Vec_voidptr type_args; // TypeExpr*
     Expr *inner;
     Expr *left;
     Expr *right;
@@ -183,10 +193,10 @@ struct Stmt {
     Stmt *for_init;
     Expr *for_cond;
     Stmt *for_step;
-    Array_voidptr for_body; // Stmt*
+    Vec_voidptr for_body; // Stmt*
     Expr *if_cond;
-    Array_voidptr if_then_body; // Stmt*
-    Array_voidptr if_else_body; // Stmt*
+    Vec_voidptr if_then_body; // Stmt*
+    Vec_voidptr if_else_body; // Stmt*
     Stmt *if_else_if;           // nested else-if
     i32 line;
     i32 col;
@@ -210,7 +220,7 @@ struct StructDecl {
     string8 name;
     bool is_generic;
     string8 type_param;
-    Array_voidptr fields; // Field*
+    Vec_voidptr fields; // Field*
     i32 line;
     i32 col;
 };
@@ -221,30 +231,30 @@ struct ProcDecl {
     bool is_external;
     string8 type_param;
     string8 constraint;
-    Array_voidptr params; // Param*
+    Vec_voidptr params; // Param*
     TypeExpr *ret_type;
-    Array_voidptr body; // Stmt*
+    Vec_voidptr body; // Stmt*
     i32 line;
     i32 col;
 };
 
 typedef struct Program {
-    Array_string8 defines; // macro name
-    Array_string8 imports; // string literal include path token text
-    Array_voidptr structs; // StructDecl*
-    Array_voidptr procs;   // ProcDecl*
-    Array_voidptr globals; // Stmt* (var decl)
+    Vec_string8 defines; // macro name
+    Vec_string8 imports; // string literal include path token text
+    Vec_voidptr structs; // StructDecl*
+    Vec_voidptr procs;   // ProcDecl*
+    Vec_voidptr globals; // Stmt* (var decl)
 } Program;
 
 typedef struct Scope {
-    Array_string8 locals;
-    Array_string8 globals;
-    Array_string8 procs;
+    Vec_string8 locals;
+    Vec_string8 globals;
+    Vec_string8 procs;
 } Scope;
 
 typedef struct Parser {
     memops_arena *arena;
-    Array_Token tokens;
+    Vec_Token tokens;
     i32 index;
 } Parser;
 
@@ -269,13 +279,13 @@ static Token token_make(TokenKind kind, string8slice text, i32 line, i32 col) {
     return t;
 }
 
-static void lex_tokens(memops_arena *arena, string8 src, Array_Token *out_tokens) {
+static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) {
     i32 line = 1;
     i32 col = 1;
     u8 *p = src.data;
     u8 *end = src.data + src.length;
 
-    *out_tokens = Array_Token_reserve(arena, 256);
+    *out_tokens = Vec_Token_reserve(arena, 256);
 
     while (p < end) {
         u8 c = *p;
@@ -313,7 +323,7 @@ static void lex_tokens(memops_arena *arena, string8 src, Array_Token *out_tokens
             else if (string8slice_equals_cstr(text, "if")) kind = Token_Keyword_If;
             else if (string8slice_equals_cstr(text, "else")) kind = Token_Keyword_Else;
             else if (string8slice_equals_cstr(text, "import")) kind = Token_Keyword_Import;
-            Array_Token_append(arena, out_tokens, token_make(kind, text, line, start_col));
+            Vec_Token_append(arena, out_tokens, token_make(kind, text, line, start_col));
             continue;
         }
         if (is_digit(c)) {
@@ -328,7 +338,7 @@ static void lex_tokens(memops_arena *arena, string8 src, Array_Token *out_tokens
                 col++;
             }
             string8slice text = string8slice_from_parts(start, (u64)(p - start));
-            Array_Token_append(arena, out_tokens, token_make(Token_Number, text, line, start_col));
+            Vec_Token_append(arena, out_tokens, token_make(Token_Number, text, line, start_col));
             continue;
         }
         if (c == '"') {
@@ -359,67 +369,67 @@ static void lex_tokens(memops_arena *arena, string8 src, Array_Token *out_tokens
                 exit(1);
             }
             string8slice text = string8slice_from_parts(start, (u64)(p - start));
-            Array_Token_append(arena, out_tokens, token_make(Token_String, text, line, start_col));
+            Vec_Token_append(arena, out_tokens, token_make(Token_String, text, line, start_col));
             continue;
         }
 
         if ((p + 1) < end) {
             if (c == '=' && p[1] == '=') {
-                Array_Token_append(arena, out_tokens, token_make(Token_EqualEqual, string8slice_from_parts(p, 2), line, col));
+                Vec_Token_append(arena, out_tokens, token_make(Token_EqualEqual, string8slice_from_parts(p, 2), line, col));
                 p += 2;
                 col += 2;
                 continue;
             }
             if (c == '!' && p[1] == '=') {
-                Array_Token_append(arena, out_tokens, token_make(Token_BangEqual, string8slice_from_parts(p, 2), line, col));
+                Vec_Token_append(arena, out_tokens, token_make(Token_BangEqual, string8slice_from_parts(p, 2), line, col));
                 p += 2;
                 col += 2;
                 continue;
             }
             if (c == '+' && p[1] == '=') {
-                Array_Token_append(arena, out_tokens, token_make(Token_PlusEqual, string8slice_from_parts(p, 2), line, col));
+                Vec_Token_append(arena, out_tokens, token_make(Token_PlusEqual, string8slice_from_parts(p, 2), line, col));
                 p += 2;
                 col += 2;
                 continue;
             }
             if (c == '-' && p[1] == '=') {
-                Array_Token_append(arena, out_tokens, token_make(Token_MinusEqual, string8slice_from_parts(p, 2), line, col));
+                Vec_Token_append(arena, out_tokens, token_make(Token_MinusEqual, string8slice_from_parts(p, 2), line, col));
                 p += 2;
                 col += 2;
                 continue;
             }
             if (c == '*' && p[1] == '=') {
-                Array_Token_append(arena, out_tokens, token_make(Token_StarEqual, string8slice_from_parts(p, 2), line, col));
+                Vec_Token_append(arena, out_tokens, token_make(Token_StarEqual, string8slice_from_parts(p, 2), line, col));
                 p += 2;
                 col += 2;
                 continue;
             }
             if (c == '/' && p[1] == '=') {
-                Array_Token_append(arena, out_tokens, token_make(Token_SlashEqual, string8slice_from_parts(p, 2), line, col));
+                Vec_Token_append(arena, out_tokens, token_make(Token_SlashEqual, string8slice_from_parts(p, 2), line, col));
                 p += 2;
                 col += 2;
                 continue;
             }
             if (c == '&' && p[1] == '=') {
-                Array_Token_append(arena, out_tokens, token_make(Token_AmpersandEqual, string8slice_from_parts(p, 2), line, col));
+                Vec_Token_append(arena, out_tokens, token_make(Token_AmpersandEqual, string8slice_from_parts(p, 2), line, col));
                 p += 2;
                 col += 2;
                 continue;
             }
             if (c == '^' && p[1] == '=') {
-                Array_Token_append(arena, out_tokens, token_make(Token_CaretEqual, string8slice_from_parts(p, 2), line, col));
+                Vec_Token_append(arena, out_tokens, token_make(Token_CaretEqual, string8slice_from_parts(p, 2), line, col));
                 p += 2;
                 col += 2;
                 continue;
             }
             if (c == '|' && p[1] == '=') {
-                Array_Token_append(arena, out_tokens, token_make(Token_PipeEqual, string8slice_from_parts(p, 2), line, col));
+                Vec_Token_append(arena, out_tokens, token_make(Token_PipeEqual, string8slice_from_parts(p, 2), line, col));
                 p += 2;
                 col += 2;
                 continue;
             }
             if (c == '-' && p[1] == '>') {
-                Array_Token_append(arena, out_tokens, token_make(Token_Arrow, string8slice_from_parts(p, 2), line, col));
+                Vec_Token_append(arena, out_tokens, token_make(Token_Arrow, string8slice_from_parts(p, 2), line, col));
                 p += 2;
                 col += 2;
                 continue;
@@ -452,7 +462,7 @@ static void lex_tokens(memops_arena *arena, string8 src, Array_Token *out_tokens
         }
 
         if (kind != Token_EOF) {
-            Array_Token_append(arena, out_tokens, token_make(kind, string8slice_from_parts(p, 1), line, col));
+            Vec_Token_append(arena, out_tokens, token_make(kind, string8slice_from_parts(p, 1), line, col));
             p++;
             col++;
             continue;
@@ -462,7 +472,7 @@ static void lex_tokens(memops_arena *arena, string8 src, Array_Token *out_tokens
         exit(1);
     }
 
-    Array_Token_append(arena, out_tokens, token_make(Token_EOF, string8slice_from_parts(end, 0), line, col));
+    Vec_Token_append(arena, out_tokens, token_make(Token_EOF, string8slice_from_parts(end, 0), line, col));
 }
 
 static Token *parser_peek(Parser *p) {
@@ -587,12 +597,12 @@ static string8 token_to_string8(memops_arena *arena, Token *t) {
     return string8_copy_from_slice(arena, t->text.data, t->text.length);
 }
 
-static Array_voidptr ptr_array_reserve(memops_arena *arena, i32 capacity) {
-    return Array_voidptr_reserve(arena, capacity);
+static Vec_voidptr ptr_array_reserve(memops_arena *arena, i32 capacity) {
+    return Vec_voidptr_reserve(arena, capacity);
 }
 
-static void ptr_array_append(memops_arena *arena, Array_voidptr *arr, void *ptr) {
-    Array_voidptr_append(arena, arr, ptr);
+static void ptr_array_append(memops_arena *arena, Vec_voidptr *arr, void *ptr) {
+    Vec_voidptr_append(arena, arr, ptr);
 }
 
 static TypeExpr *type_new(memops_arena *arena, TypeKind kind) {
@@ -648,7 +658,7 @@ static TypeExpr *parse_type(Parser *p) {
     string8 name = token_to_string8(p->arena, name_tok);
 
     if (parser_match(p, Token_LAngle)) {
-        Array_voidptr args = ptr_array_reserve(p->arena, 4);
+        Vec_voidptr args = ptr_array_reserve(p->arena, 4);
         do {
             TypeExpr *arg = parse_type(p);
             ptr_array_append(p->arena, &args, arg);
@@ -813,7 +823,7 @@ static Expr *parse_primary(Parser *p) {
                 return parse_postfix(p, e);
             }
 
-            Array_voidptr args = ptr_array_reserve(p->arena, 2);
+            Vec_voidptr args = ptr_array_reserve(p->arena, 2);
             if (!parser_match(p, Token_RParen)) {
                 do {
                     Expr *arg = parse_expr(p);
@@ -831,7 +841,7 @@ static Expr *parse_primary(Parser *p) {
 
         if ((parser_next_is_generic_call(p) || parser_next_is_generic_qualified_call(p)) &&
             parser_match(p, Token_LAngle)) {
-            Array_voidptr type_args = ptr_array_reserve(p->arena, 2);
+            Vec_voidptr type_args = ptr_array_reserve(p->arena, 2);
             do {
                 TypeExpr *arg = parse_type(p);
                 ptr_array_append(p->arena, &type_args, arg);
@@ -847,7 +857,7 @@ static Expr *parse_primary(Parser *p) {
             }
 
             parser_expect(p, Token_LParen, "expected '(' after type args");
-            Array_voidptr args = ptr_array_reserve(p->arena, 4);
+            Vec_voidptr args = ptr_array_reserve(p->arena, 4);
             if (!parser_match(p, Token_RParen)) {
                 do {
                     Expr *arg = parse_expr(p);
@@ -866,7 +876,7 @@ static Expr *parse_primary(Parser *p) {
         }
 
         if (parser_match(p, Token_LParen)) {
-            Array_voidptr args = ptr_array_reserve(p->arena, 4);
+            Vec_voidptr args = ptr_array_reserve(p->arena, 4);
             if (!parser_match(p, Token_RParen)) {
                 do {
                     Expr *arg = parse_expr(p);
@@ -1326,8 +1336,8 @@ static ProcDecl *parse_proc_decl(Parser *p, Token *name_tok) {
 
 static Program parse_program(Parser *p) {
     Program prog = {0};
-    prog.defines = Array_string8_reserve(p->arena, 8);
-    prog.imports = Array_string8_reserve(p->arena, 8);
+    prog.defines = Vec_string8_reserve(p->arena, 8);
+    prog.imports = Vec_string8_reserve(p->arena, 8);
     prog.structs = ptr_array_reserve(p->arena, 8);
     prog.procs = ptr_array_reserve(p->arena, 8);
     prog.globals = ptr_array_reserve(p->arena, 8);
@@ -1339,7 +1349,7 @@ static Program parse_program(Parser *p) {
             parser_expect(p, Token_LParen, "expected '(' after define");
             Token *name_tok = parser_expect(p, Token_String, "expected string literal in define");
             parser_expect(p, Token_RParen, "expected ')' after define");
-            Array_string8_append(p->arena, &prog.defines, token_to_string8(p->arena, name_tok));
+            Vec_string8_append(p->arena, &prog.defines, token_to_string8(p->arena, name_tok));
             parser_match(p, Token_Semicolon); // optional
             continue;
         }
@@ -1347,7 +1357,7 @@ static Program parse_program(Parser *p) {
         if (parser_match(p, Token_Keyword_Import)) {
             Token *path_tok = parser_expect(p, Token_String, "expected string literal after import");
             string8 path = token_to_string8(p->arena, path_tok);
-            Array_string8_append(p->arena, &prog.imports, path);
+            Vec_string8_append(p->arena, &prog.imports, path);
             parser_match(p, Token_Semicolon);
             continue;
         }
@@ -1390,7 +1400,7 @@ static Program parse_program(Parser *p) {
     return prog;
 }
 
-static bool scope_has(Array_string8 *names, string8 name) {
+static bool scope_has(Vec_string8 *names, string8 name) {
     for (i32 i = 0; i < names->length; i++) {
         if (string8_equals(&names->data[i], &name)) return true;
     }
@@ -1495,7 +1505,7 @@ static void semantic_check_stmt(Stmt *stmt, Scope *scope, memops_arena *arena) {
         if (scope_has(&scope->locals, stmt->name)) {
             semantic_error_name("duplicate local declaration", stmt->name, stmt->line, stmt->col);
         }
-        Array_string8_append(arena, &scope->locals, stmt->name);
+        Vec_string8_append(arena, &scope->locals, stmt->name);
         return;
     }
     if (stmt->kind == Stmt_Assign) {
@@ -1514,9 +1524,9 @@ static void semantic_check_stmt(Stmt *stmt, Scope *scope, memops_arena *arena) {
     }
     if (stmt->kind == Stmt_For) {
         Scope loop_scope = *scope;
-        loop_scope.locals = Array_string8_reserve(arena, scope->locals.length + 16);
+        loop_scope.locals = Vec_string8_reserve(arena, scope->locals.length + 16);
         for (i32 i = 0; i < scope->locals.length; i++) {
-            Array_string8_append(arena, &loop_scope.locals, scope->locals.data[i]);
+            Vec_string8_append(arena, &loop_scope.locals, scope->locals.data[i]);
         }
         if (stmt->for_init) semantic_check_stmt(stmt->for_init, &loop_scope, arena);
         if (stmt->for_cond) semantic_check_expr(stmt->for_cond, &loop_scope);
@@ -1530,9 +1540,9 @@ static void semantic_check_stmt(Stmt *stmt, Scope *scope, memops_arena *arena) {
         semantic_check_expr(stmt->if_cond, scope);
 
         Scope then_scope = *scope;
-        then_scope.locals = Array_string8_reserve(arena, scope->locals.length + 16);
+        then_scope.locals = Vec_string8_reserve(arena, scope->locals.length + 16);
         for (i32 i = 0; i < scope->locals.length; i++) {
-            Array_string8_append(arena, &then_scope.locals, scope->locals.data[i]);
+            Vec_string8_append(arena, &then_scope.locals, scope->locals.data[i]);
         }
         for (i32 i = 0; i < stmt->if_then_body.length; i++) {
             semantic_check_stmt((Stmt *)stmt->if_then_body.data[i], &then_scope, arena);
@@ -1540,16 +1550,16 @@ static void semantic_check_stmt(Stmt *stmt, Scope *scope, memops_arena *arena) {
 
         if (stmt->if_else_if) {
             Scope else_if_scope = *scope;
-            else_if_scope.locals = Array_string8_reserve(arena, scope->locals.length + 16);
+            else_if_scope.locals = Vec_string8_reserve(arena, scope->locals.length + 16);
             for (i32 i = 0; i < scope->locals.length; i++) {
-                Array_string8_append(arena, &else_if_scope.locals, scope->locals.data[i]);
+                Vec_string8_append(arena, &else_if_scope.locals, scope->locals.data[i]);
             }
             semantic_check_stmt(stmt->if_else_if, &else_if_scope, arena);
         } else {
             Scope else_scope = *scope;
-            else_scope.locals = Array_string8_reserve(arena, scope->locals.length + 16);
+            else_scope.locals = Vec_string8_reserve(arena, scope->locals.length + 16);
             for (i32 i = 0; i < scope->locals.length; i++) {
-                Array_string8_append(arena, &else_scope.locals, scope->locals.data[i]);
+                Vec_string8_append(arena, &else_scope.locals, scope->locals.data[i]);
             }
             for (i32 i = 0; i < stmt->if_else_body.length; i++) {
                 semantic_check_stmt((Stmt *)stmt->if_else_body.data[i], &else_scope, arena);
@@ -1562,7 +1572,7 @@ static void semantic_check_stmt(Stmt *stmt, Scope *scope, memops_arena *arena) {
 
 static void semantic_check_proc(ProcDecl *proc, Scope *base_scope, memops_arena *arena) {
     Scope scope = *base_scope;
-    scope.locals = Array_string8_reserve(arena, 32);
+    scope.locals = Vec_string8_reserve(arena, 32);
 
     for (i32 i = 0; i < proc->params.length; i++) {
         Param *param = (Param *)proc->params.data[i];
@@ -1580,7 +1590,7 @@ static void semantic_check_proc(ProcDecl *proc, Scope *base_scope, memops_arena 
             }
             semantic_error_name_dup("duplicate proc parameter", param->name, param->line, param->col, prev_line, prev_col);
         }
-        Array_string8_append(arena, &scope.locals, param->name);
+        Vec_string8_append(arena, &scope.locals, param->name);
     }
 
     for (i32 i = 0; i < proc->body.length; i++) {
@@ -1591,9 +1601,9 @@ static void semantic_check_proc(ProcDecl *proc, Scope *base_scope, memops_arena 
 
 static void semantic_check_program(Program *prog, memops_arena *arena) {
     Scope base = {0};
-    base.globals = Array_string8_reserve(arena, 64);
-    base.procs = Array_string8_reserve(arena, 64);
-    Array_string8 structs = Array_string8_reserve(arena, 64);
+    base.globals = Vec_string8_reserve(arena, 64);
+    base.procs = Vec_string8_reserve(arena, 64);
+    Vec_string8 structs = Vec_string8_reserve(arena, 64);
 
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
@@ -1610,7 +1620,7 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
             }
             semantic_error_name_dup("duplicate struct declaration", decl->name, decl->line, decl->col, prev_line, prev_col);
         }
-        Array_string8_append(arena, &structs, decl->name);
+        Vec_string8_append(arena, &structs, decl->name);
     }
 
     for (i32 i = 0; i < prog->procs.length; i++) {
@@ -1628,7 +1638,7 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
             }
             semantic_error_name_dup("duplicate proc declaration", decl->name, decl->line, decl->col, prev_line, prev_col);
         }
-        Array_string8_append(arena, &base.procs, decl->name);
+        Vec_string8_append(arena, &base.procs, decl->name);
     }
 
     for (i32 i = 0; i < prog->globals.length; i++) {
@@ -1646,7 +1656,7 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
             }
             semantic_error_name_dup("duplicate global declaration", decl->name, decl->line, decl->col, prev_line, prev_col);
         }
-        Array_string8_append(arena, &base.globals, decl->name);
+        Vec_string8_append(arena, &base.globals, decl->name);
     }
 
     for (i32 i = 0; i < prog->globals.length; i++) {
@@ -1734,7 +1744,7 @@ static string8 type_mangle(memops_arena *arena, TypeExpr *type, TypeSub sub) {
     return out;
 }
 
-static bool array_string8_contains(Array_string8 *arr, string8 value) {
+static bool array_string8_contains(Vec_string8 *arr, string8 value) {
     for (i32 i = 0; i < arr->length; i++) {
         if (string8_equals(&arr->data[i], &value)) {
             return true;
@@ -1743,7 +1753,7 @@ static bool array_string8_contains(Array_string8 *arr, string8 value) {
     return false;
 }
 
-static void collect_type_instances(TypeExpr *type, string8 base, Array_string8 *out, memops_arena *arena) {
+static void collect_type_instances(TypeExpr *type, string8 base, Vec_string8 *out, memops_arena *arena) {
     if (!type) return;
     if (type->kind == Type_Generic && string8_equals_name(type->name, base)) {
         if (type->args.length == 1) {
@@ -1753,7 +1763,7 @@ static void collect_type_instances(TypeExpr *type, string8 base, Array_string8 *
             }
             string8 mangle = type_mangle(arena, arg, (TypeSub){0});
             if (!array_string8_contains(out, mangle)) {
-                Array_string8_append(arena, out, mangle);
+                Vec_string8_append(arena, out, mangle);
             }
         }
     }
@@ -1768,10 +1778,10 @@ static void collect_type_instances(TypeExpr *type, string8 base, Array_string8 *
     }
 }
 
-static void collect_type_instances_from_stmt(Stmt *s, string8 base, Array_string8 *out, memops_arena *arena);
-static void collect_type_instances_from_expr(Expr *e, string8 base, Array_string8 *out, memops_arena *arena);
+static void collect_type_instances_from_stmt(Stmt *s, string8 base, Vec_string8 *out, memops_arena *arena);
+static void collect_type_instances_from_expr(Expr *e, string8 base, Vec_string8 *out, memops_arena *arena);
 
-static void collect_type_instances_from_stmt(Stmt *s, string8 base, Array_string8 *out, memops_arena *arena) {
+static void collect_type_instances_from_stmt(Stmt *s, string8 base, Vec_string8 *out, memops_arena *arena) {
     if (!s) return;
     if (s->kind == Stmt_Var) {
         collect_type_instances(s->type, base, out, arena);
@@ -1805,7 +1815,7 @@ static void collect_type_instances_from_stmt(Stmt *s, string8 base, Array_string
     }
 }
 
-static void collect_type_instances_from_expr(Expr *e, string8 base, Array_string8 *out, memops_arena *arena) {
+static void collect_type_instances_from_expr(Expr *e, string8 base, Vec_string8 *out, memops_arena *arena) {
     if (!e) return;
     if (e->kind == Expr_Call) {
         for (i32 i = 0; i < e->type_args.length; i++) {
@@ -1823,7 +1833,7 @@ static void collect_type_instances_from_expr(Expr *e, string8 base, Array_string
     }
 }
 
-static void collect_generic_struct_instances(Program *prog, StructDecl *decl, Array_string8 *out, memops_arena *arena) {
+static void collect_generic_struct_instances(Program *prog, StructDecl *decl, Vec_string8 *out, memops_arena *arena) {
     for (i32 i = 0; i < prog->globals.length; i++) {
         Stmt *s = (Stmt *)prog->globals.data[i];
         collect_type_instances(s->type, decl->name, out, arena);
@@ -1879,10 +1889,10 @@ static string8 find_proc_generic_instantiation(Expr *e, string8 proc_name, memop
 
 typedef struct GenericProcEntry {
     ProcDecl *decl;
-    Array_string8 instances; // mangled concrete type args
+    Vec_string8 instances; // mangled concrete type args
 } GenericProcEntry;
 
-static GenericProcEntry *generic_entry_from_name(Array_voidptr *entries, string8 name) {
+static GenericProcEntry *generic_entry_from_name(Vec_voidptr *entries, string8 name) {
     for (i32 i = 0; i < entries->length; i++) {
         GenericProcEntry *e = (GenericProcEntry *)entries->data[i];
         if (string8_equals(&e->decl->name, &name)) return e;
@@ -1912,14 +1922,14 @@ static bool type_is_concrete_under_sub(TypeExpr *type, TypeSub sub) {
 
 static bool generic_entry_add_instance(memops_arena *arena, GenericProcEntry *entry, string8 mangle) {
     if (array_string8_contains(&entry->instances, mangle)) return false;
-    Array_string8_append(arena, &entry->instances, mangle);
+    Vec_string8_append(arena, &entry->instances, mangle);
     return true;
 }
 
 static bool collect_generic_calls_from_expr(
     Expr *e,
     TypeSub sub,
-    Array_voidptr *entries,
+    Vec_voidptr *entries,
     memops_arena *arena
 ) {
     bool changed = false;
@@ -1964,7 +1974,7 @@ static bool collect_generic_calls_from_expr(
 static bool collect_generic_calls_from_stmt(
     Stmt *s,
     TypeSub sub,
-    Array_voidptr *entries,
+    Vec_voidptr *entries,
     memops_arena *arena
 ) {
     if (!s) return false;
@@ -2007,15 +2017,15 @@ static bool collect_generic_calls_from_stmt(
     return false;
 }
 
-static void collect_generic_proc_instances(Program *prog, ProcDecl *decl, Array_string8 *out, memops_arena *arena) {
-    Array_voidptr entries = ptr_array_reserve(arena, 32);
+static void collect_generic_proc_instances(Program *prog, ProcDecl *decl, Vec_string8 *out, memops_arena *arena) {
+    Vec_voidptr entries = ptr_array_reserve(arena, 32);
     for (i32 i = 0; i < prog->procs.length; i++) {
         ProcDecl *p = (ProcDecl *)prog->procs.data[i];
         if (!p->is_generic) continue;
         GenericProcEntry *entry = memops_arena_push_struct(arena, GenericProcEntry);
         memset(entry, 0, sizeof(*entry));
         entry->decl = p;
-        entry->instances = Array_string8_reserve(arena, 4);
+        entry->instances = Vec_string8_reserve(arena, 4);
         ptr_array_append(arena, &entries, entry);
     }
 
@@ -2061,7 +2071,7 @@ static void collect_generic_proc_instances(Program *prog, ProcDecl *decl, Array_
     for (i32 i = 0; i < target->instances.length; i++) {
         string8 mangle = target->instances.data[i];
         if (!array_string8_contains(out, mangle)) {
-            Array_string8_append(arena, out, mangle);
+            Vec_string8_append(arena, out, mangle);
         }
     }
 }
@@ -2105,7 +2115,7 @@ static void validate_generic_constraints(Program *prog, memops_arena *arena) {
             continue;
         }
 
-        Array_string8 instances = Array_string8_reserve(arena, 4);
+        Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_proc_instances(prog, decl, &instances, arena);
         for (i32 j = 0; j < instances.length; j++) {
             string8 mangle = instances.data[j];
@@ -2131,13 +2141,13 @@ static void validate_generic_constraints(Program *prog, memops_arena *arena) {
 }
 
 typedef struct TypeScope {
-    Array_string8 names;
-    Array_voidptr types; // TypeExpr*
+    Vec_string8 names;
+    Vec_voidptr types; // TypeExpr*
 } TypeScope;
 
 static TypeScope type_scope_make(memops_arena *arena, i32 cap) {
     TypeScope s = {0};
-    s.names = Array_string8_reserve(arena, cap);
+    s.names = Vec_string8_reserve(arena, cap);
     s.types = ptr_array_reserve(arena, cap);
     return s;
 }
@@ -2145,14 +2155,14 @@ static TypeScope type_scope_make(memops_arena *arena, i32 cap) {
 static TypeScope type_scope_copy(memops_arena *arena, TypeScope *src) {
     TypeScope dst = type_scope_make(arena, src->names.length + 8);
     for (i32 i = 0; i < src->names.length; i++) {
-        Array_string8_append(arena, &dst.names, src->names.data[i]);
+        Vec_string8_append(arena, &dst.names, src->names.data[i]);
         ptr_array_append(arena, &dst.types, src->types.data[i]);
     }
     return dst;
 }
 
 static void type_scope_add(memops_arena *arena, TypeScope *s, string8 name, TypeExpr *type) {
-    Array_string8_append(arena, &s->names, name);
+    Vec_string8_append(arena, &s->names, name);
     ptr_array_append(arena, &s->types, type);
 }
 
@@ -2868,7 +2878,7 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
         if (!decl->is_generic) continue;
 
-        Array_string8 instances = Array_string8_reserve(arena, 4);
+        Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_struct_instances(prog, decl, &instances, arena);
         for (i32 j = 0; j < instances.length; j++) {
             string8 mono = string8_reserve(arena, decl->name.length + 1 + instances.data[j].length);
@@ -2891,7 +2901,7 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
         if (!decl->is_generic) continue;
 
-        Array_string8 instances = Array_string8_reserve(arena, 4);
+        Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_struct_instances(prog, decl, &instances, arena);
 
         for (i32 j = 0; j < instances.length; j++) {
@@ -2921,7 +2931,7 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
         ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
         if (!decl->is_generic) continue;
 
-        Array_string8 instances = Array_string8_reserve(arena, 4);
+        Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_proc_instances(prog, decl, &instances, arena);
         for (i32 j = 0; j < instances.length; j++) {
             string8 mangle = instances.data[j];
@@ -2946,7 +2956,7 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
         ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
         if (!decl->is_generic) continue;
 
-        Array_string8 instances = Array_string8_reserve(arena, 4);
+        Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_proc_instances(prog, decl, &instances, arena);
         for (i32 j = 0; j < instances.length; j++) {
             string8 mangle = instances.data[j];
@@ -2977,7 +2987,7 @@ i32 main(i32 argc, char *argv[]) {
         return 1;
     }
 
-    Array_Token tokens = {0};
+    Vec_Token tokens = {0};
     lex_tokens(&arena, input, &tokens);
 
     Parser parser = {0};
@@ -3002,5 +3012,5 @@ i32 main(i32 argc, char *argv[]) {
     return 0;
 }
 
-#include <Array.c>
+#include <Vec.c>
 

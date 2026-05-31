@@ -1,1 +1,1 @@
-scripts\build.bat -c && build\I.exe && clang.exe src\main.i.c -I extern\haikal\src\meta_arena\gen && a.exe
+python bunyan.py run debug && clang.exe src\main.i.c -I src -I extern\haikal\src\runtime -o build\main_i.exe && build\main_i.exe

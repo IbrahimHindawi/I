@@ -39,13 +39,13 @@ char *string8_to_cstr_temp(memops_arena *arena, string8 s) {
 }
 
 static void string8_grow(memops_arena *arena, string8 *s, u64 min_capacity) {
-    Array_u8 tmp;
+    Vec_u8 tmp;
     tmp.data = s->data;
     tmp.length = s->length + 1;
     tmp.border = s->capacity;
 
     while (tmp.border < min_capacity) {
-        Array_u8_resize(arena, &tmp);
+        Vec_u8_resize(arena, &tmp);
     }
 
     s->data = tmp.data;
