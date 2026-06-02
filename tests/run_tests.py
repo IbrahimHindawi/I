@@ -25,9 +25,9 @@ CASES = (
     Case(
         name="basic_generics",
         source=r'''
-import "stdio.h"
+cinclude "stdio.h"
 define("SAHA_IMPLEMENTATION")
-import "saha.i.h"
+cinclude "saha.i.h"
 
 memops_arena_initialize:proc(arena:*memops_arena)->void={external_emit;}
 memops_arena_push:proc(arena:*memops_arena, alloc_size:u64, align:u64)->*void={external;}
@@ -72,7 +72,7 @@ main:proc()->i32={
     Case(
         name="enum_reflect_preprocessor",
         source=r'''
-import "stdio.h"
+cinclude "stdio.h"
 #define I_TEST_HP 77
 
 Color:enum = {
@@ -109,7 +109,7 @@ main:proc()->i32={
     Case(
         name="boring_c_surface",
         source=r'''
-import "stdio.h"
+cinclude "stdio.h"
 #define WINCALL
 #define TWICE(x) ((x) * 2)
 
@@ -173,7 +173,7 @@ main:proc()->i32={
     Case(
         name="gin_c_surface",
         source=r'''
-import "stdio.h"
+cinclude "stdio.h"
 #define WINCALL
 
 I32:alias = i32;
@@ -222,7 +222,7 @@ main:proc()->i32 = {
     Case(
         name="initializer_lists",
         source=r'''
-import "stdio.h"
+cinclude "stdio.h"
 
 Pair:struct = {
     a:i32;
@@ -253,7 +253,7 @@ main:proc()->i32 = {
     Case(
         name="postfix_address_deref",
         source=r'''
-import "stdio.h"
+cinclude "stdio.h"
 
 Node:struct = {
     value:i32;
@@ -284,7 +284,7 @@ main:proc()->i32 = {
     Case(
         name="external_globals",
         source=r'''
-import "stdio.h"
+cinclude "stdio.h"
 
 State:struct = {
     value:i32;
@@ -323,7 +323,7 @@ shared_sum:proc(p:*SharedPayload)->i32 = {
 
 
 MODULE_APP_SOURCE = r'''
-import "stdio.h"
+cinclude "stdio.h"
 import "module.i"
 
 main:proc()->i32 = {
@@ -424,14 +424,13 @@ def main() -> int:
         print("module_import: generated headers missing")
         return 1
     app_generated = app_c.read_text(encoding="utf-8")
-    if '#include "module.h"' not in app_generated:
-        print("module_import: app C did not include generated module header")
+    if "shared_sum(" not in app_generated or "SharedPayload_reflect" not in app_generated:
+        print("module_import: app C did not aggregate imported module definitions")
         return 1
 
     compile_result = run([
         "clang.exe",
         str(app_c),
-        str(module_c),
         "-I",
         str(TEST_DIR),
         "-I",

@@ -283,6 +283,7 @@ struct StructDecl {
     string8 name;
     bool is_generic;
     bool is_union;
+    bool is_external;
     string8 type_param;
     Vec_voidptr fields; // Field*
     i32 line;
@@ -329,7 +330,8 @@ typedef struct AliasDecl {
 typedef struct Program {
     Vec_string8 preprocessor_lines;
     Vec_string8 defines; // macro name
-    Vec_string8 imports; // string literal include path token text
+    Vec_string8 imports; // string literal I import path token text
+    Vec_string8 c_imports; // string literal C include path token text
     Vec_string8 i_imports; // string literal import paths ending in .i
     Vec_voidptr structs; // StructDecl*
     Vec_voidptr enums;   // EnumDecl*
@@ -776,18 +778,6 @@ static bool string8_ends_with_cstr(string8 s, const char *suffix) {
     u64 suffix_len = (u64)strlen(suffix);
     if (s.length < suffix_len) return false;
     return strncmp((const char *)(s.data + s.length - suffix_len), suffix, suffix_len) == 0;
-}
-
-static string8 i_import_to_h_import(memops_arena *arena, string8 lit) {
-    string8 path = string_lit_inner(arena, lit);
-    if (!string8_ends_with_cstr(path, ".i")) {
-        return lit;
-    }
-    string8 out = string8_reserve(arena, path.length + 3);
-    string8_append_byte(arena, &out, '"');
-    string8_append_bytes(arena, &out, path.data, path.length - 2);
-    string8_append_cstr(arena, &out, ".h\"");
-    return out;
 }
 
 static Vec_voidptr ptr_array_reserve(memops_arena *arena, i32 capacity) {
@@ -1822,7 +1812,26 @@ static StructDecl *parse_struct_decl(Parser *p, Token *name_tok, bool is_union) 
 
     parser_expect(p, Token_Equal, is_union ? "expected '=' after union" : "expected '=' after struct");
     parser_expect(p, Token_LBrace, is_union ? "expected '{' in union" : "expected '{' in struct");
+    if (parser_peek(p)->kind == Token_Identifier &&
+        string8slice_equals_cstr(parser_peek(p)->text, "external") &&
+        parser_peek_n(p, 1)->kind == Token_Semicolon &&
+        parser_peek_n(p, 2)->kind == Token_RBrace) {
+        parser_next(p);
+        parser_next(p);
+        parser_next(p);
+        decl->is_external = true;
+        parser_match(p, Token_Semicolon);
+        return decl;
+    }
     while (!parser_match(p, Token_RBrace)) {
+        if (parser_peek(p)->kind == Token_Identifier &&
+            string8slice_equals_cstr(parser_peek(p)->text, "external") &&
+            parser_peek_n(p, 1)->kind == Token_Semicolon) {
+            parser_next(p);
+            parser_next(p);
+            decl->is_external = true;
+            continue;
+        }
         Token *field_tok = parser_expect(p, Token_Identifier, "expected field name");
         parser_expect(p, Token_Colon, "expected ':' after field name");
         Field *f = memops_arena_push_struct(p->arena, Field);
@@ -1986,6 +1995,7 @@ static Program parse_program(Parser *p) {
     prog.preprocessor_lines = Vec_string8_reserve(p->arena, 8);
     prog.defines = Vec_string8_reserve(p->arena, 8);
     prog.imports = Vec_string8_reserve(p->arena, 8);
+    prog.c_imports = Vec_string8_reserve(p->arena, 8);
     prog.i_imports = Vec_string8_reserve(p->arena, 8);
     prog.structs = ptr_array_reserve(p->arena, 8);
     prog.enums = ptr_array_reserve(p->arena, 8);
@@ -2009,10 +2019,21 @@ static Program parse_program(Parser *p) {
             Token *path_tok = parser_expect(p, Token_String, "expected string literal after import");
             string8 path = token_to_string8(p->arena, path_tok);
             string8 inner = string_lit_inner(p->arena, path);
-            if (string8_ends_with_cstr(inner, ".i")) {
-                Vec_string8_append(p->arena, &prog.i_imports, path);
+            if (!string8_ends_with_cstr(inner, ".i")) {
+                printf("%s:%d:%d: parse error: import expects an .i module; use cinclude for C headers\n", g_source_path, path_tok->line, path_tok->col);
+                exit(1);
             }
+            Vec_string8_append(p->arena, &prog.i_imports, path);
             Vec_string8_append(p->arena, &prog.imports, path);
+            parser_match(p, Token_Semicolon);
+            continue;
+        }
+
+        if (parser_peek(p)->kind == Token_Identifier &&
+            string8slice_equals_cstr(parser_peek(p)->text, "cinclude")) {
+            parser_next(p);
+            Token *path_tok = parser_expect(p, Token_String, "expected string literal after cinclude");
+            Vec_string8_append(p->arena, &prog.c_imports, token_to_string8(p->arena, path_tok));
             parser_match(p, Token_Semicolon);
             continue;
         }
@@ -2210,7 +2231,9 @@ static void semantic_add_program_symbols(Program *prog, Scope *base, Vec_string8
         if (!scope_has(structs, decl->name)) {
             Vec_string8_append(arena, structs, decl->name);
         }
-        Vec_string8_append(arena, &base->globals, concat_name2(arena, decl->name, "_", string8_from_cstr(arena, "reflect")));
+        if (!decl->is_external) {
+            Vec_string8_append(arena, &base->globals, concat_name2(arena, decl->name, "_", string8_from_cstr(arena, "reflect")));
+        }
     }
 
     for (i32 i = 0; i < prog->enums.length; i++) {
@@ -2828,6 +2851,19 @@ static void collect_type_instances_from_stmt(Stmt *s, string8 base, Vec_string8 
 static void collect_type_instances_from_expr(Expr *e, string8 base, Vec_string8 *out, memops_arena *arena) {
     if (!e) return;
     if (e->kind == Expr_Call) {
+        string8 owner = {0};
+        string8 member = {0};
+        if (split_qualified_name(e->name, &owner, &member) &&
+            string8_equals(&owner, &base) &&
+            e->type_args.length == 1) {
+            TypeExpr *arg = (TypeExpr *)e->type_args.data[0];
+            if (arg->kind != Type_Name || !string8_is_symbolic_type_name(arg->name)) {
+                string8 mangle = type_mangle(arena, arg, (TypeSub){0});
+                if (!array_string8_contains(out, mangle)) {
+                    Vec_string8_append(arena, out, mangle);
+                }
+            }
+        }
         for (i32 i = 0; i < e->type_args.length; i++) {
             collect_type_instances((TypeExpr *)e->type_args.data[i], base, out, arena);
         }
@@ -4347,12 +4383,12 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
     if (prog->defines.length > 0) {
         emit_cstr(arena, out, "\n");
     }
-    for (i32 i = 0; i < prog->imports.length; i++) {
+    for (i32 i = 0; i < prog->c_imports.length; i++) {
         emit_cstr(arena, out, "#include ");
-        emit_string8(arena, out, i_import_to_h_import(arena, prog->imports.data[i]));
+        emit_string8(arena, out, prog->c_imports.data[i]);
         emit_cstr(arena, out, "\n");
     }
-    if (prog->imports.length > 0) {
+    if (prog->c_imports.length > 0) {
         emit_cstr(arena, out, "\n");
     }
 
@@ -4362,13 +4398,13 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
     // Forward declarations for all structs (non-generic + monomorphized)
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_generic) {
+        if (!decl->is_generic && !decl->is_external) {
             emit_struct_fwd_decl(arena, out, decl->name, decl->is_union);
         }
     }
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_generic) continue;
+        if (!decl->is_generic || decl->is_external) continue;
 
         Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_struct_instances(prog, decl, &instances, arena);
@@ -4392,14 +4428,14 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
 
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_generic) {
+        if (!decl->is_generic && !decl->is_external) {
             emit_struct_decl(arena, out, decl);
         }
     }
 
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_generic) continue;
+        if (!decl->is_generic || decl->is_external) continue;
 
         Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_struct_instances(prog, decl, &instances, arena);
@@ -4418,14 +4454,14 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
 
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_generic) {
+        if (!decl->is_generic && !decl->is_external) {
             emit_struct_reflection(arena, out, decl, decl->name, (TypeSub){0});
         }
     }
 
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_generic) continue;
+        if (!decl->is_generic || decl->is_external) continue;
 
         Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_struct_instances(prog, decl, &instances, arena);
@@ -4525,22 +4561,22 @@ static void emit_header_program(memops_arena *arena, Program *prog, string8 *out
         emit_cstr(arena, out, "\n");
     }
     if (prog->defines.length > 0) emit_cstr(arena, out, "\n");
-    for (i32 i = 0; i < prog->imports.length; i++) {
+    for (i32 i = 0; i < prog->c_imports.length; i++) {
         emit_cstr(arena, out, "#include ");
-        emit_string8(arena, out, i_import_to_h_import(arena, prog->imports.data[i]));
+        emit_string8(arena, out, prog->c_imports.data[i]);
         emit_cstr(arena, out, "\n");
     }
-    if (prog->imports.length > 0) emit_cstr(arena, out, "\n");
+    if (prog->c_imports.length > 0) emit_cstr(arena, out, "\n");
 
     emit_reflection_runtime_types(arena, out);
 
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_generic) emit_struct_fwd_decl(arena, out, decl->name, decl->is_union);
+        if (!decl->is_generic && !decl->is_external) emit_struct_fwd_decl(arena, out, decl->name, decl->is_union);
     }
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_generic) continue;
+        if (!decl->is_generic || decl->is_external) continue;
         Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_struct_instances(prog, decl, &instances, arena);
         for (i32 j = 0; j < instances.length; j++) {
@@ -4562,11 +4598,11 @@ static void emit_header_program(memops_arena *arena, Program *prog, string8 *out
     }
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_generic) emit_struct_decl(arena, out, decl);
+        if (!decl->is_generic && !decl->is_external) emit_struct_decl(arena, out, decl);
     }
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_generic) continue;
+        if (!decl->is_generic || decl->is_external) continue;
         Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_struct_instances(prog, decl, &instances, arena);
         for (i32 j = 0; j < instances.length; j++) {
@@ -4581,11 +4617,11 @@ static void emit_header_program(memops_arena *arena, Program *prog, string8 *out
     }
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_generic) emit_struct_reflection_extern(arena, out, decl->name);
+        if (!decl->is_generic && !decl->is_external) emit_struct_reflection_extern(arena, out, decl->name);
     }
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_generic) continue;
+        if (!decl->is_generic || decl->is_external) continue;
         Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_struct_instances(prog, decl, &instances, arena);
         for (i32 j = 0; j < instances.length; j++) {
@@ -4667,6 +4703,105 @@ static Vec_string8 collect_preprocessor_lines(memops_arena *arena, string8 src) 
     return lines;
 }
 
+static void program_init_lists(memops_arena *arena, Program *prog) {
+    memset(prog, 0, sizeof(*prog));
+    prog->preprocessor_lines = Vec_string8_reserve(arena, 8);
+    prog->defines = Vec_string8_reserve(arena, 8);
+    prog->imports = Vec_string8_reserve(arena, 8);
+    prog->c_imports = Vec_string8_reserve(arena, 8);
+    prog->i_imports = Vec_string8_reserve(arena, 8);
+    prog->structs = ptr_array_reserve(arena, 8);
+    prog->enums = ptr_array_reserve(arena, 8);
+    prog->aliases = ptr_array_reserve(arena, 8);
+    prog->procs = ptr_array_reserve(arena, 8);
+    prog->globals = ptr_array_reserve(arena, 8);
+}
+
+static void program_append_string_unique(memops_arena *arena, Vec_string8 *dst, string8 value) {
+    if (!array_string8_contains(dst, value)) {
+        Vec_string8_append(arena, dst, value);
+    }
+}
+
+static void program_append_program(memops_arena *arena, Program *dst, Program *src) {
+    for (i32 i = 0; i < src->preprocessor_lines.length; i++) {
+        program_append_string_unique(arena, &dst->preprocessor_lines, src->preprocessor_lines.data[i]);
+    }
+    for (i32 i = 0; i < src->defines.length; i++) {
+        program_append_string_unique(arena, &dst->defines, src->defines.data[i]);
+    }
+    for (i32 i = 0; i < src->c_imports.length; i++) {
+        program_append_string_unique(arena, &dst->c_imports, src->c_imports.data[i]);
+    }
+    for (i32 i = 0; i < src->structs.length; i++) {
+        ptr_array_append(arena, &dst->structs, src->structs.data[i]);
+    }
+    for (i32 i = 0; i < src->enums.length; i++) {
+        ptr_array_append(arena, &dst->enums, src->enums.data[i]);
+    }
+    for (i32 i = 0; i < src->aliases.length; i++) {
+        ptr_array_append(arena, &dst->aliases, src->aliases.data[i]);
+    }
+    for (i32 i = 0; i < src->procs.length; i++) {
+        ptr_array_append(arena, &dst->procs, src->procs.data[i]);
+    }
+    for (i32 i = 0; i < src->globals.length; i++) {
+        ptr_array_append(arena, &dst->globals, src->globals.data[i]);
+    }
+}
+
+static Program parse_i_file(memops_arena *arena, const char *path) {
+    string8 input = string8_read_file(arena, path);
+    if (!input.data) {
+        printf("%s:0:0: semantic error: failed to read import %s\n", g_source_path, path);
+        exit(1);
+    }
+
+    const char *prev_source_path = g_source_path;
+    g_source_path = path;
+
+    Vec_Token tokens = {0};
+    lex_tokens(arena, input, &tokens);
+
+    Parser parser = {0};
+    parser.arena = arena;
+    parser.tokens = tokens;
+    parser.index = 0;
+
+    Program prog = parse_program(&parser);
+    prog.preprocessor_lines = collect_preprocessor_lines(arena, input);
+
+    g_source_path = prev_source_path;
+    return prog;
+}
+
+static Program expand_i_imports(memops_arena *arena, Program *prog, Vec_string8 *visited) {
+    Program expanded;
+    program_init_lists(arena, &expanded);
+
+    for (i32 i = 0; i < prog->i_imports.length; i++) {
+        const char *path = resolve_import_path(arena, prog->i_imports.data[i]);
+        string8 path_s = string8_from_cstr(arena, path);
+        if (array_string8_contains(visited, path_s)) {
+            continue;
+        }
+        Vec_string8_append(arena, visited, path_s);
+
+        const char *prev_source_path = g_source_path;
+        g_source_path = path;
+        Program imported = parse_i_file(arena, path);
+        Program imported_expanded = expand_i_imports(arena, &imported, visited);
+        g_source_path = prev_source_path;
+
+        program_append_program(arena, &expanded, &imported_expanded);
+    }
+
+    program_append_program(arena, &expanded, prog);
+    expanded.imports = Vec_string8_reserve(arena, 1);
+    expanded.i_imports = Vec_string8_reserve(arena, 1);
+    return expanded;
+}
+
 static bool write_string8_to_file(const char *path, string8 data) {
     FILE *f = fopen(path, "wb");
     if (!f) return false;
@@ -4697,6 +4832,137 @@ static const char *derive_header_path(memops_arena *arena, const char *output_pa
     return (const char *)out.data;
 }
 
+static const char *derive_output_dir(memops_arena *arena, const char *output_path) {
+    u64 len = (u64)strlen(output_path);
+    u64 dir_len = 0;
+    for (u64 i = len; i > 0; i--) {
+        char c = output_path[i - 1];
+        if (c == '/' || c == '\\') {
+            dir_len = i;
+            break;
+        }
+    }
+    string8 out = string8_reserve(arena, dir_len + 1);
+    if (dir_len > 0) {
+        string8_append_bytes(arena, &out, (u8 *)output_path, dir_len);
+    }
+    string8_append_byte(arena, &out, 0);
+    return (const char *)out.data;
+}
+
+static const char *join_output_path(memops_arena *arena, const char *dir, string8 file_name) {
+    u64 dir_len = (u64)strlen(dir);
+    string8 out = string8_reserve(arena, dir_len + file_name.length + 1);
+    string8_append_bytes(arena, &out, (u8 *)dir, dir_len);
+    string8_append_bytes(arena, &out, file_name.data, file_name.length);
+    string8_append_byte(arena, &out, 0);
+    return (const char *)out.data;
+}
+
+static ProcDecl *find_generic_owner_proc(Program *prog, string8 owner, string8 member) {
+    for (i32 i = 0; i < prog->procs.length; i++) {
+        ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
+        if (!decl->is_generic) continue;
+        string8 proc_owner = {0};
+        string8 proc_member = {0};
+        if (!split_qualified_name(decl->name, &proc_owner, &proc_member)) continue;
+        if (string8_equals(&proc_owner, &owner) && string8_equals(&proc_member, &member)) {
+            return decl;
+        }
+    }
+    return null;
+}
+
+static void emit_monomorph_header_protos(memops_arena *arena, Program *prog, string8 owner, string8 mangle, TypeExpr *arg, string8 *out) {
+    static const char *members[] = {"reserve", "resize", "append", "destroy", "at", "is_empty"};
+    for (i32 i = 0; i < (i32)(sizeof(members) / sizeof(members[0])); i++) {
+        string8 member = string8_from_cstr(arena, members[i]);
+        ProcDecl *decl = find_generic_owner_proc(prog, owner, member);
+        if (decl) {
+            emit_proc_proto_mono(arena, out, decl, mangle, arg);
+        }
+    }
+}
+
+static bool c_type_name_needs_structdecl(string8 name) {
+    static const char *skip[] = {
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+        "f32", "f64", "usize", "b32", "bool", "void", "char",
+        "float", "double", "int", "long", "short",
+        "vec2", "vec3", "vec4", "mat4", "vec2s", "vec3s", "vec4s", "mat4s"
+    };
+    for (i32 i = 0; i < (i32)(sizeof(skip) / sizeof(skip[0])); i++) {
+        if (string8_equals_cstr(&name, skip[i])) return false;
+    }
+    return true;
+}
+
+static void emit_monomorph_arg_forward_decl(memops_arena *arena, string8 *out, TypeExpr *arg) {
+    if (!arg || arg->kind != Type_Name) return;
+    if (!c_type_name_needs_structdecl(arg->name)) return;
+    emit_cstr(arena, out, "structdecl(");
+    emit_string8(arena, out, arg->name);
+    emit_cstr(arena, out, ");\n\n");
+}
+
+static bool emit_native_monomorph_headers(memops_arena *arena, Program *prog, const char *output_path) {
+    const char *out_dir = derive_output_dir(arena, output_path);
+
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (!decl->is_generic || !decl->is_external) continue;
+
+        Vec_string8 instances = Vec_string8_reserve(arena, 8);
+        collect_generic_struct_instances(prog, decl, &instances, arena);
+        if (instances.length == 0) continue;
+
+        string8 umbrella = string8_reserve(arena, 256);
+        emit_cstr(arena, &umbrella, "#pragma once\n");
+
+        for (i32 j = 0; j < instances.length; j++) {
+            string8 mangle = instances.data[j];
+            string8 concrete_name = string8_reserve(arena, decl->name.length + 1 + mangle.length);
+            string8_append_bytes(arena, &concrete_name, decl->name.data, decl->name.length);
+            string8_append_cstr(arena, &concrete_name, "_");
+            string8_append_bytes(arena, &concrete_name, mangle.data, mangle.length);
+
+            TypeExpr *arg = type_new(arena, Type_Name);
+            arg->name = mangle;
+
+            string8 file_name = string8_reserve(arena, concrete_name.length + 3);
+            string8_append_bytes(arena, &file_name, concrete_name.data, concrete_name.length);
+            string8_append_cstr(arena, &file_name, ".h");
+
+            emit_cstr(arena, &umbrella, "#include \"");
+            emit_string8(arena, &umbrella, file_name);
+            emit_cstr(arena, &umbrella, "\"\n");
+
+            string8 header = string8_reserve(arena, 1024);
+            emit_cstr(arena, &header, "#pragma once\n#include <core.h>\n#include <saha.h>\n\n");
+            emit_monomorph_arg_forward_decl(arena, &header, arg);
+            emit_struct_decl_mono(arena, &header, decl, mangle, arg);
+            emit_monomorph_header_protos(arena, prog, decl->name, mangle, arg, &header);
+
+            const char *path = join_output_path(arena, out_dir, file_name);
+            if (!write_string8_to_file(path, header)) {
+                printf("i: error: failed to write %s\n", path);
+                return false;
+            }
+        }
+
+        string8 umbrella_file = string8_reserve(arena, decl->name.length + 3);
+        string8_append_bytes(arena, &umbrella_file, decl->name.data, decl->name.length);
+        string8_append_cstr(arena, &umbrella_file, ".h");
+        const char *umbrella_path = join_output_path(arena, out_dir, umbrella_file);
+        if (!write_string8_to_file(umbrella_path, umbrella)) {
+            printf("i: error: failed to write %s\n", umbrella_path);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 i32 main(i32 argc, char *argv[]) {
     const char *input_path = argc > 1 ? argv[1] : "src/main.i";
     const char *output_path = argc > 2 ? argv[2] : "src/main.i.c";
@@ -4722,6 +4988,8 @@ i32 main(i32 argc, char *argv[]) {
 
     Program prog = parse_program(&parser);
     prog.preprocessor_lines = collect_preprocessor_lines(&arena, input);
+    Vec_string8 visited_imports = Vec_string8_reserve(&arena, 8);
+    prog = expand_i_imports(&arena, &prog, &visited_imports);
     semantic_check_program(&prog, &arena);
     validate_generic_constraints(&prog, &arena);
     rewrite_printf_formats(&prog, &arena);
@@ -4741,6 +5009,9 @@ i32 main(i32 argc, char *argv[]) {
     }
     if (!write_string8_to_file(header_path, header_output)) {
         printf("i: error: failed to write %s\n", header_path);
+        return 1;
+    }
+    if (!emit_native_monomorph_headers(&arena, &prog, output_path)) {
         return 1;
     }
 

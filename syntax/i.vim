@@ -14,7 +14,7 @@ syn match iComment "^\s*#.*$" contains=iTodo
 syn keyword iTodo TODO FIXME NOTE contained
 
 " Keywords
-syn keyword iKeyword proc return import define
+syn keyword iKeyword proc return import cinclude define
 syn keyword iStructure struct enum union alias
 syn keyword iStorageClass const
 syn keyword iExternal external external_emit
