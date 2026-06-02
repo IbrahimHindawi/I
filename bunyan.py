@@ -12,7 +12,7 @@ def build_haikal(ctx: BuildContext) -> None:
         build_dir=haikal_build_dir,
         generator=ctx.generator,
         c_compiler=ctx.c_compiler,
-        build_type="Debug",
+        build_type="Release",
     )
     cmake_build(haikal_build_dir)
     run_cmd(
