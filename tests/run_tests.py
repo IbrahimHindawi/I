@@ -29,7 +29,7 @@ import "stdio.h"
 define("SAHA_IMPLEMENTATION")
 import "saha.i.h"
 
-memops_arena_initialize:proc(arena:*memops_arena)->void={external;}
+memops_arena_initialize:proc(arena:*memops_arena)->void={external_emit;}
 memops_arena_push:proc(arena:*memops_arena, alloc_size:u64, align:u64)->*void={external;}
 
 memops_arena_push_array:proc<T>(arena:*memops_arena, count:u64)->*void={
@@ -67,6 +67,7 @@ main:proc()->i32={
 ''',
         expected_stdout="10 11 12 13\n",
         generated_contains=("array_i32_reflect", "memops_arena_push_array_i32"),
+        header_contains=("void memops_arena_initialize(memops_arena * arena);",),
     ),
     Case(
         name="enum_reflect_preprocessor",
@@ -166,7 +167,7 @@ main:proc()->i32={
 }
 ''',
         expected_stdout="18 2 16 2 0 11\n",
-        generated_contains=("i32 values[4];", "while (", "switch (", "WINCALL platform_add", "TWICE(4)", "#line 1 ", "&nodes[2] - nodes"),
+        generated_contains=("i32 values[4];", "while (", "switch (", "WINCALL platform_add", "TWICE(4)", "#line 1 ", "&(nodes[2]) - nodes"),
         header_contains=("extern const i_reflect_type Packet_reflect;", "i32 values[4];", "WINCALL platform_add"),
     ),
     Case(
@@ -248,6 +249,37 @@ main:proc()->i32 = {
             "const u32 g_map[2][3] = {[1] = {[2] = 9}};",
         ),
         header_contains=("extern Pair g_pairs[3];", "extern const u32 g_map[2][3];"),
+    ),
+    Case(
+        name="postfix_address_deref",
+        source=r'''
+import "stdio.h"
+
+Node:struct = {
+    value:i32;
+    next:*Node;
+}
+
+main:proc()->i32 = {
+    nodes:[2]Node = {};
+    nodes[0].value = 10;
+    nodes[1].value = 20;
+    nodes[0].next = nodes[1].&;
+    nodes[0].next.*.value += 5;
+    roundtrip:*Node = nodes[0].next.*.&;
+    roundtrip.*.value += 2;
+    printf("%d %d %d\n", nodes[0].value, nodes[1].value, roundtrip.*.value);
+    return 0;
+}
+''',
+        expected_stdout="10 27 27\n",
+        generated_contains=(
+            "nodes[0].next = &(nodes[1]);",
+            "nodes[0].next[0].value += 5;",
+            "Node * roundtrip = &(nodes[0].next[0]);",
+            "roundtrip[0].value += 2;",
+        ),
+        header_contains=("structdecl(Node);", "structdef(Node)"),
     ),
     Case(
         name="external_globals",

@@ -307,6 +307,7 @@ struct ProcDecl {
     string8 name;
     bool is_generic;
     bool is_external;
+    bool emit_external_proto;
     bool is_variadic;
     string8 type_param;
     string8 constraint;
@@ -1020,6 +1021,14 @@ static Expr *expr_new(memops_arena *arena, ExprKind kind) {
     return e;
 }
 
+static Expr *expr_number_zero(memops_arena *arena, i32 line, i32 col) {
+    Expr *e = expr_new(arena, Expr_Number);
+    e->number = string8_from_cstr(arena, "0");
+    e->line = line;
+    e->col = col;
+    return e;
+}
+
 static Expr *parse_expr(Parser *p);
 static Expr *parse_unary(Parser *p);
 static Expr *parse_multiplicative(Parser *p);
@@ -1237,6 +1246,23 @@ static Expr *parse_postfix(Parser *p, Expr *base) {
         }
         if (parser_match(p, Token_Dot)) {
             Token *dot = parser_prev(p);
+            if (parser_match(p, Token_Star)) {
+                Expr *idx = expr_new(p->arena, Expr_Index);
+                idx->base = result;
+                idx->index_expr = expr_number_zero(p->arena, dot->line, dot->col);
+                idx->line = dot->line;
+                idx->col = dot->col;
+                result = idx;
+                continue;
+            }
+            if (parser_match(p, Token_Ampersand)) {
+                Expr *addr = expr_new(p->arena, Expr_Addr);
+                addr->inner = result;
+                addr->line = dot->line;
+                addr->col = dot->col;
+                result = addr;
+                continue;
+            }
             Token *field_tok = parser_expect(p, Token_Identifier, "expected field name after '.'");
             Expr *field = expr_new(p->arena, Expr_Field);
             field->base = result;
@@ -1934,13 +1960,15 @@ static ProcDecl *parse_proc_decl(Parser *p, Token *name_tok) {
 
     parser_expect(p, Token_LBrace, "expected '{' in proc body");
     if (parser_peek(p)->kind == Token_Identifier &&
-        string8slice_equals_cstr(parser_peek(p)->text, "external") &&
+        (string8slice_equals_cstr(parser_peek(p)->text, "external") ||
+         string8slice_equals_cstr(parser_peek(p)->text, "external_emit")) &&
         parser_peek_n(p, 1)->kind == Token_Semicolon &&
         parser_peek_n(p, 2)->kind == Token_RBrace) {
-        parser_next(p); // external
+        Token *external_tok = parser_next(p); // external/external_emit
         parser_next(p); // ;
         parser_next(p); // }
         decl->is_external = true;
+        decl->emit_external_proto = string8slice_equals_cstr(external_tok->text, "external_emit");
         parser_match(p, Token_Semicolon); // optional ';' after proc decl
         return decl;
     }
@@ -3707,8 +3735,9 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
         return;
     }
     if (e->kind == Expr_Addr) {
-        emit_cstr(arena, out, "&");
+        emit_cstr(arena, out, "&(");
         emit_expr(arena, out, e->inner, sub, generic_name);
+        emit_cstr(arena, out, ")");
         return;
     }
     if (e->kind == Expr_Unary) {
@@ -4067,7 +4096,7 @@ static void emit_proc_decl(memops_arena *arena, string8 *out, ProcDecl *decl) {
 }
 
 static void emit_proc_proto(memops_arena *arena, string8 *out, ProcDecl *decl) {
-    if (decl->is_external) return;
+    if (decl->is_external && !decl->emit_external_proto) return;
     emit_type(arena, out, decl->ret_type, (TypeSub){0});
     emit_cstr(arena, out, " ");
     if (decl->callconv.data) {
@@ -4129,7 +4158,7 @@ static void emit_proc_decl_mono(memops_arena *arena, string8 *out, ProcDecl *dec
 }
 
 static void emit_proc_proto_mono(memops_arena *arena, string8 *out, ProcDecl *decl, string8 type_mangled, TypeExpr *arg) {
-    if (decl->is_external) return;
+    if (decl->is_external && !decl->emit_external_proto) return;
     TypeSub sub = {0};
     sub.has = true;
     sub.param = decl->type_param;

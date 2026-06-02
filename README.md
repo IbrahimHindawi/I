@@ -47,6 +47,12 @@ array:struct<T> = {
 # proc
 make:proc(x:i32)->i32 = { return x; }
 
+# semantic-only C declaration, used when an imported C header already declares it
+puts:proc(text:*const char)->i32 = { external; }
+
+# emitted C prototype, used when I owns the type surface for a linked C module
+fx_step:proc(dt:f32)->void = { external_emit; }
+
 # generic proc
 makeg:proc<T>(x:T)->T = { return x; }
 
