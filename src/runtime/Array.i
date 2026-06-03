@@ -1,13 +1,13 @@
 import "memops.i"
 
-Array:struct<T> = {
-    data:*T;
-    length:u64;
+Array: struct<T> = {
+    data: *T;
+    length: u64;
     external;
 }
 
-Array<T>reserve:proc<T>(arena:*memops_arena, length:u64)->Array<T> = {
-    arr:Array<T> = {};
+Array<T>reserve: proc<T>(arena: *memops_arena, length: u64)->Array<T> = {
+    arr: Array<T> = {};
     if (length == 0) {
         return arr;
     }

@@ -18,6 +18,34 @@ add_executable(${PROJECT_NAME}
 )
 add_dependencies(${PROJECT_NAME} haikal)
 
+set(LLVM_ROOT "C:/Program Files/LLVM" CACHE PATH "LLVM install root")
+find_path(LIBCLANG_INCLUDE_DIR clang-c/Index.h
+    PATHS "${LLVM_ROOT}/include"
+    NO_DEFAULT_PATH
+)
+find_library(LIBCLANG_LIBRARY libclang
+    PATHS "${LLVM_ROOT}/lib"
+    NO_DEFAULT_PATH
+)
+
+if (LIBCLANG_INCLUDE_DIR AND LIBCLANG_LIBRARY)
+    add_executable(ibind src/ibind.c)
+    target_include_directories(ibind PRIVATE ${LIBCLANG_INCLUDE_DIR})
+    target_link_libraries(ibind PRIVATE ${LIBCLANG_LIBRARY})
+    if (WIN32)
+        target_compile_definitions(ibind PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    if (WIN32)
+        add_custom_command(TARGET ibind POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${LLVM_ROOT}/bin/libclang.dll"
+                "$<TARGET_FILE_DIR:ibind>/libclang.dll"
+        )
+    endif()
+else()
+    message(WARNING "libclang not found; ibind will not be built")
+endif()
+
 if (WIN32)
     target_compile_definitions(${PROJECT_NAME} PRIVATE _CRT_SECURE_NO_WARNINGS)
     if (CMAKE_C_COMPILER_ID MATCHES "Clang")

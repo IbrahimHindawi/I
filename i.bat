@@ -10,5 +10,5 @@ if "%I_OUTPUT%"=="" set "I_OUTPUT=build\i_gen\main.i.c"
 python bunyan.py build debug || exit /b %errorlevel%
 if not exist build\i_gen mkdir build\i_gen || exit /b %errorlevel%
 build\I.exe "%I_SOURCE%" "%I_OUTPUT%" || exit /b %errorlevel%
-clang.exe "%I_OUTPUT%" -I src -I extern\haikal\src\runtime -o build\main_i.exe || exit /b %errorlevel%
+clang.exe "%I_OUTPUT%" -I src -I src\runtime -o build\main_i.exe || exit /b %errorlevel%
 build\main_i.exe

@@ -22,6 +22,7 @@ I is C-shaped code with a smaller syntax surface and compile-time metaprogrammin
 
 ### Tests
 - run `python tests\run_tests.py`
+- `tests\run_tests.py` also runs the `gcc.c-torture/compile` hook. By default it compiles the tiny local smoke fixture in `tests\gcc.c-torture\compile`; set `I_GCC_TORTURE` or pass `--suite` to `tests\run_c_torture.py` to point at a full GCC checkout.
 
 ## Language Sketch
 ```i

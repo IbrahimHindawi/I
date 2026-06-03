@@ -85,7 +85,10 @@ syn keyword iCoreTypeInType i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 usize b32 bool
 syn match iTypeName "\%(\<proc\>\|\<struct\>\|\<enum\>\|\<union\>\|\<alias\>\|\<external\>\|\<external_emit\>\)\@!\<[A-Za-z_][A-Za-z0-9_]*\>\%(\s*<\)\@!" contained
 syn match iTypePrefix ":\|->" nextgroup=iTypePointerPrefix,iFixedArrayPrefix,iCoreTypeInType,iTypeName skipwhite
 syn match iTypePointerPrefix "\*" contained nextgroup=iTypePointerPrefix,iFixedArrayPrefix,iCoreTypeInType,iTypeName skipwhite
-syn match iFixedArrayPrefix "\[[0-9]*]" contained nextgroup=iTypePointerPrefix,iCoreTypeInType,iTypeName skipwhite
+syn match iArrayIndexNumber "\[\s*\zs[0-9]\+\ze\s*]"
+syn match iFixedArrayPrefix "\[\s*[0-9]*\s*]" contained contains=iFixedArrayNumber,iFixedArrayDelimiter transparent nextgroup=iTypePointerPrefix,iCoreTypeInType,iTypeName skipwhite
+syn match iFixedArrayNumber "[0-9]\+" contained
+syn match iFixedArrayDelimiter "[\[\]]" contained
 
 " Highlight links
 hi def link iPreProc PreProc
@@ -110,6 +113,9 @@ hi def link iTypeName Structure
 hi def link iTypePrefix Operator
 hi def link iTypePointerPrefix Operator
 hi def link iFixedArrayPrefix Delimiter
+hi def link iFixedArrayNumber Number
+hi def link iFixedArrayDelimiter Delimiter
+hi def link iArrayIndexNumber Number
 hi def link iFieldName Identifier
 hi def link iCallConv Special
 hi def link iCallConvName Special
