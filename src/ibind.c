@@ -17,6 +17,13 @@ static const char *g_symbol_prefix = 0;
 static int g_preprocess = 0;
 static int g_print_cmd = 0;
 
+typedef struct emitted_name_node {
+    char *name;
+    struct emitted_name_node *next;
+} emitted_name_node;
+
+static emitted_name_node *g_emitted_opaque_records = 0;
+
 static char *cxstr_dup(CXString s) {
     const char *c = clang_getCString(s);
     char *out = 0;
@@ -79,6 +86,41 @@ static int starts_with(const char *s, const char *prefix) {
     return strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
+static const char *builtin_typedef_type(const char *name) {
+    if (streq(name, "size_t")) return "usize";
+    return 0;
+}
+
+static int path_has_separator(const char *s) {
+    for (const char *p = s; *p; p++) {
+        if (*p == '/' || *p == '\\') return 1;
+    }
+    return 0;
+}
+
+static const char *path_basename_const(const char *s) {
+    const char *base = s;
+    for (const char *p = s; *p; p++) {
+        if (*p == '/' || *p == '\\') base = p + 1;
+    }
+    return base;
+}
+
+static int path_matches_filter(const char *path, const char *filter) {
+    if (!filter || !filter[0]) return 1;
+    if (!path || !path[0]) return 0;
+    if (!path_has_separator(filter)) {
+        return streq(path_basename_const(path), filter);
+    }
+
+    size_t path_len = strlen(path);
+    size_t filter_len = strlen(filter);
+    if (path_len < filter_len) return 0;
+    const char *tail = path + path_len - filter_len;
+    if (!streq(tail, filter)) return 0;
+    return tail == path || tail[-1] == '/' || tail[-1] == '\\';
+}
+
 static char *strip_tag_prefix(char *s) {
     if (starts_with(s, "const ")) s += 6;
     if (starts_with(s, "struct ")) return s + 7;
@@ -103,13 +145,36 @@ static char *sanitize_ident(const char *s) {
     return out;
 }
 
+static int emitted_name_contains(emitted_name_node *head, const char *name) {
+    for (emitted_name_node *node = head; node; node = node->next) {
+        if (streq(node->name, name)) return 1;
+    }
+    return 0;
+}
+
+static void emitted_name_add(emitted_name_node **head, const char *name) {
+    if (emitted_name_contains(*head, name)) return;
+    emitted_name_node *node = (emitted_name_node *)calloc(1, sizeof(*node));
+    if (!node) {
+        fprintf(stderr, "ibind: out of memory\n");
+        exit(1);
+    }
+    node->name = _strdup(name);
+    node->next = *head;
+    *head = node;
+}
+
 static const char *builtin_type(enum CXTypeKind kind) {
     switch (kind) {
         case CXType_Void: return "void";
         case CXType_Bool: return "b32";
+        case CXType_Char_U:
         case CXType_Char_S:
         case CXType_SChar: return "char";
         case CXType_UChar: return "u8";
+        case CXType_WChar:
+        case CXType_Char16: return "u16";
+        case CXType_Char32: return "u32";
         case CXType_Short: return "i16";
         case CXType_UShort: return "u16";
         case CXType_Int: return "i32";
@@ -182,6 +247,26 @@ static char *emit_proc_type(CXType fn_type, int as_pointer) {
 static char *emit_type(CXType type) {
     int is_const = clang_isConstQualifiedType(type);
     CXType canonical = clang_getCanonicalType(type);
+    if (type.kind == CXType_Typedef) {
+        char *s = cxstr_dup(clang_getTypeSpelling(type));
+        char *clean = sanitize_ident(strip_tag_prefix(s));
+        const char *builtin_typedef = builtin_typedef_type(clean);
+        if (builtin_typedef) {
+            string_builder builtin_sb = {0};
+            if (is_const) sb_append(&builtin_sb, "const ");
+            sb_append(&builtin_sb, builtin_typedef);
+            free(clean);
+            free(s);
+            return builtin_sb.data;
+        }
+        string_builder sb = {0};
+        if (is_const) sb_append(&sb, "const ");
+        sb_append(&sb, clean);
+        free(clean);
+        free(s);
+        return sb.data;
+    }
+
     const char *builtin = builtin_type(type.kind);
     if (!builtin) builtin = builtin_type(canonical.kind);
     if (builtin) {
@@ -215,6 +300,16 @@ static char *emit_type(CXType type) {
         return sb.data;
     }
 
+    if (type.kind == CXType_IncompleteArray) {
+        CXType elem = clang_getArrayElementType(type);
+        char *elem_s = emit_type(elem);
+        string_builder sb = {0};
+        sb_append(&sb, "*");
+        sb_append(&sb, elem_s);
+        free(elem_s);
+        return sb.data;
+    }
+
     if (type.kind == CXType_ConstantArray) {
         CXType elem = clang_getArrayElementType(type);
         long long count = clang_getArraySize(type);
@@ -227,13 +322,6 @@ static char *emit_type(CXType type) {
 
     if (type.kind == CXType_FunctionProto || canonical.kind == CXType_FunctionProto) {
         return emit_proc_type(type.kind == CXType_FunctionProto ? type : canonical, 0);
-    }
-
-    if (type.kind == CXType_Typedef) {
-        char *s = cxstr_dup(clang_getTypeSpelling(type));
-        char *clean = sanitize_ident(strip_tag_prefix(s));
-        free(s);
-        return clean;
     }
 
     if (type.kind == CXType_Record || type.kind == CXType_Enum ||
@@ -259,7 +347,7 @@ static int cursor_is_from_main_file(CXCursor c) {
         clang_getSpellingLocation(loc, &file, 0, 0, 0);
         if (!file) return 0;
         char *path = cxstr_dup(clang_getFileName(file));
-        int ok = strstr(path, g_filter_path) != 0;
+        int ok = path_matches_filter(path, g_filter_path);
         free(path);
         return ok;
     }
@@ -355,6 +443,10 @@ static enum CXChildVisitResult enum_item_visitor(CXCursor child, CXCursor parent
     FILE *f = (FILE *)data;
     if (clang_getCursorKind(child) != CXCursor_EnumConstantDecl) return CXChildVisit_Continue;
     char *item = cxstr_dup(clang_getCursorSpelling(child));
+    if (item[0] == 0 || (g_symbol_prefix && !starts_with(item, g_symbol_prefix))) {
+        free(item);
+        return CXChildVisit_Continue;
+    }
     char *item_clean = sanitize_ident(item);
     long long value = clang_getEnumConstantDeclValue(child);
     fprintf(f, "    %s = %lld,\n", item_clean, value);
@@ -413,19 +505,110 @@ typedef struct record_emit_ctx {
 
 static void emit_record_named(CXCursor c, FILE *out, int is_union, const char *forced_name);
 
-static int cursor_is_anonymous_record(CXCursor c) {
+typedef struct param_name_ctx {
+    char **names;
+    int count;
+    int capacity;
+} param_name_ctx;
+
+static enum CXChildVisitResult param_name_visitor(CXCursor child, CXCursor parent, CXClientData data) {
+    (void)parent;
+    param_name_ctx *ctx = (param_name_ctx *)data;
+    if (clang_getCursorKind(child) != CXCursor_ParmDecl) return CXChildVisit_Continue;
+    if (ctx->count >= ctx->capacity) return CXChildVisit_Break;
+    ctx->names[ctx->count++] = cxstr_dup(clang_getCursorSpelling(child));
+    return CXChildVisit_Continue;
+}
+
+static char *emit_cursor_proc_type_if_available(CXCursor c, CXType type) {
+    CXType canonical = clang_getCanonicalType(type);
+    CXType fn_type = (CXType){0};
+    int fn_pointer = 0;
+    if (type.kind == CXType_FunctionProto || canonical.kind == CXType_FunctionProto) {
+        fn_type = type.kind == CXType_FunctionProto ? type : canonical;
+    } else if (type.kind == CXType_Pointer) {
+        CXType pointee = clang_getPointeeType(type);
+        CXType pointee_canon = clang_getCanonicalType(pointee);
+        if (pointee.kind == CXType_FunctionProto || pointee_canon.kind == CXType_FunctionProto) {
+            fn_type = pointee.kind == CXType_FunctionProto ? pointee : pointee_canon;
+            fn_pointer = 1;
+        }
+    }
+    if (fn_type.kind != CXType_FunctionProto) return 0;
+
+    int argc = clang_getNumArgTypes(fn_type);
+    char **param_names = 0;
+    param_name_ctx ctx = {0};
+    if (argc > 0) {
+        param_names = (char **)calloc((size_t)argc, sizeof(char *));
+        if (!param_names) exit(1);
+        ctx.names = param_names;
+        ctx.capacity = argc;
+        clang_visitChildren(c, param_name_visitor, &ctx);
+    }
+    char *type_s = emit_proc_type_with_names(fn_type, fn_pointer, param_names, ctx.count);
+    for (int i = 0; i < ctx.count; i++) free(param_names[i]);
+    free(param_names);
+    return type_s;
+}
+
+static void emit_opaque_record_decl_for_type(CXType type, FILE *out) {
+    if (type.kind == CXType_Pointer) {
+        emit_opaque_record_decl_for_type(clang_getPointeeType(type), out);
+        return;
+    }
+    if (type.kind == CXType_ConstantArray || type.kind == CXType_IncompleteArray) {
+        emit_opaque_record_decl_for_type(clang_getArrayElementType(type), out);
+        return;
+    }
+
+    CXType canonical = clang_getCanonicalType(type);
+    if (type.kind != CXType_Record &&
+        type.kind != CXType_Elaborated &&
+        canonical.kind != CXType_Record) {
+        return;
+    }
+
+    CXCursor decl = clang_getTypeDeclaration(type);
+    if (clang_Cursor_isNull(decl)) decl = clang_getTypeDeclaration(canonical);
+    if (clang_Cursor_isNull(decl)) return;
+    if (clang_isCursorDefinition(decl)) return;
+    CXCursor definition = clang_getCursorDefinition(decl);
+    if (!clang_Cursor_isNull(definition)) return;
+
+    char *name = cxstr_dup(clang_getCursorSpelling(decl));
+    if (name[0] == 0) {
+        free(name);
+        return;
+    }
+    char *clean = sanitize_ident(strip_tag_prefix(name));
+    if (!emitted_name_contains(g_emitted_opaque_records, clean)) {
+        emitted_name_add(&g_emitted_opaque_records, clean);
+        fprintf(out, "%s: struct = { external; }\n\n", clean);
+    }
+    free(clean);
+    free(name);
+}
+
+static int cursor_has_empty_record_name(CXCursor c) {
     enum CXCursorKind kind = clang_getCursorKind(c);
     if (kind != CXCursor_StructDecl && kind != CXCursor_UnionDecl) return 0;
     char *name = cxstr_dup(clang_getCursorSpelling(c));
-    int anonymous = name[0] == 0 || strstr(name, "unnamed") != 0 || strstr(name, "anonymous") != 0;
+    int empty = name[0] == 0 || strstr(name, "unnamed") != 0 || strstr(name, "anonymous") != 0;
     free(name);
-    return anonymous;
+    return empty;
+}
+
+static int cursor_is_direct_anonymous_record(CXCursor c) {
+    enum CXCursorKind kind = clang_getCursorKind(c);
+    if (kind != CXCursor_StructDecl && kind != CXCursor_UnionDecl) return 0;
+    return clang_Cursor_isAnonymousRecordDecl(c) != 0;
 }
 
 static CXCursor field_anonymous_record_decl(CXCursor field) {
     CXType type = clang_getCursorType(field);
     CXCursor decl = clang_getTypeDeclaration(type);
-    if (!clang_isCursorDefinition(decl) || !cursor_is_anonymous_record(decl)) {
+    if (!clang_isCursorDefinition(decl) || !cursor_has_empty_record_name(decl)) {
         return clang_getNullCursor();
     }
     return decl;
@@ -458,7 +641,10 @@ static enum CXChildVisitResult record_anon_type_visitor(CXCursor child, CXCursor
     CXCursor anon = clang_getNullCursor();
     if (kind == CXCursor_FieldDecl) {
         anon = field_anonymous_record_decl(child);
-    } else if (kind == CXCursor_UnionDecl && cursor_is_anonymous_record(child)) {
+        if (!clang_Cursor_isNull(anon) && cursor_is_direct_anonymous_record(anon)) {
+            return CXChildVisit_Continue;
+        }
+    } else if ((kind == CXCursor_StructDecl || kind == CXCursor_UnionDecl) && cursor_is_direct_anonymous_record(child)) {
         anon = child;
     } else {
         return CXChildVisit_Continue;
@@ -471,12 +657,20 @@ static enum CXChildVisitResult record_anon_type_visitor(CXCursor child, CXCursor
     return CXChildVisit_Continue;
 }
 
+static enum CXChildVisitResult record_opaque_dep_visitor(CXCursor child, CXCursor parent, CXClientData data) {
+    (void)parent;
+    FILE *out = (FILE *)data;
+    if (clang_getCursorKind(child) != CXCursor_FieldDecl) return CXChildVisit_Continue;
+    emit_opaque_record_decl_for_type(clang_getCursorType(child), out);
+    return CXChildVisit_Continue;
+}
+
 static enum CXChildVisitResult record_field_visitor(CXCursor child, CXCursor parent, CXClientData data) {
     (void)parent;
     record_emit_ctx *ctx = (record_emit_ctx *)data;
     enum CXCursorKind kind = clang_getCursorKind(child);
     if (kind != CXCursor_FieldDecl &&
-        !(kind == CXCursor_UnionDecl && cursor_is_anonymous_record(child))) {
+        !((kind == CXCursor_StructDecl || kind == CXCursor_UnionDecl) && cursor_is_direct_anonymous_record(child))) {
         return CXChildVisit_Continue;
     }
 
@@ -495,10 +689,25 @@ static enum CXChildVisitResult record_field_visitor(CXCursor child, CXCursor par
         snprintf(forced, sizeof(forced), "%s_anon%d", ctx->owner, ctx->anon_index++);
         type_s = _strdup(forced);
     } else {
-        type_s = emit_type(clang_getCursorType(child));
+        CXType field_type = clang_getCursorType(child);
+        type_s = emit_cursor_proc_type_if_available(child, field_type);
+        if (!type_s) type_s = emit_type(field_type);
     }
 
     char *clean = sanitize_ident(name);
+    if (kind == CXCursor_FieldDecl && clang_Cursor_isBitField(child)) {
+        int width = clang_getFieldDeclBitWidth(child);
+        fprintf(ctx->out, "    // ibind: bitfield %s:%d\n", clean, width);
+    }
+    if (kind == CXCursor_FieldDecl && clang_getCursorType(child).kind == CXType_IncompleteArray) {
+        fprintf(ctx->out, "    // ibind: incomplete_array %s\n", clean);
+    }
+    if (kind == CXCursor_FieldDecl) {
+        long long offset_bits = clang_Cursor_getOffsetOfField(child);
+        if (offset_bits >= 0) {
+            fprintf(ctx->out, "    // ibind: field_offset %s:%lld\n", clean, offset_bits);
+        }
+    }
     fprintf(ctx->out, "    %s:%s;\n", clean, type_s);
     free(type_s);
     free(clean);
@@ -517,9 +726,16 @@ static void emit_record_named(CXCursor c, FILE *out, int is_union, const char *f
 
     record_emit_ctx anon_ctx = {out, clean, 0};
     clang_visitChildren(c, record_anon_type_visitor, &anon_ctx);
+    clang_visitChildren(c, record_opaque_dep_visitor, out);
 
     if (record_is_packed(c)) {
         fprintf(out, "// ibind: packed\n");
+    }
+    CXType record_type = clang_getCursorType(c);
+    long long size = clang_Type_getSizeOf(record_type);
+    long long align = clang_Type_getAlignOf(record_type);
+    if (size >= 0 && align >= 0) {
+        fprintf(out, "// ibind: layout size=%lld align=%lld\n", size, align);
     }
     fprintf(out, "%s: %s = {\n", clean, is_union ? "union" : "struct");
     record_emit_ctx ctx = {out, clean, 0};
@@ -543,6 +759,7 @@ static void emit_function(CXCursor c, FILE *out) {
     char *clean = sanitize_ident(name);
     CXType fn = clang_getCursorType(c);
     int argc = clang_Cursor_getNumArguments(c);
+    emit_opaque_record_decl_for_type(clang_getResultType(fn), out);
     const char *callconv = calling_conv_name(fn);
     if (callconv) {
         fprintf(out, "%s: proc[%s](", clean, callconv);
@@ -559,7 +776,9 @@ static void emit_function(CXCursor c, FILE *out) {
             arg_name = _strdup(fallback);
         }
         char *arg_clean = sanitize_ident(arg_name);
-        char *type_s = emit_type(clang_getArgType(fn, (unsigned)i));
+        CXType arg_type = clang_getArgType(fn, (unsigned)i);
+        emit_opaque_record_decl_for_type(arg_type, out);
+        char *type_s = emit_type(arg_type);
         if (i) fprintf(out, ", ");
         fprintf(out, "%s: %s", arg_clean, type_s);
         free(type_s);
@@ -577,21 +796,6 @@ static void emit_function(CXCursor c, FILE *out) {
     free(name);
 }
 
-typedef struct typedef_param_ctx {
-    char **names;
-    int count;
-    int capacity;
-} typedef_param_ctx;
-
-static enum CXChildVisitResult typedef_param_visitor(CXCursor child, CXCursor parent, CXClientData data) {
-    (void)parent;
-    typedef_param_ctx *ctx = (typedef_param_ctx *)data;
-    if (clang_getCursorKind(child) != CXCursor_ParmDecl) return CXChildVisit_Continue;
-    if (ctx->count >= ctx->capacity) return CXChildVisit_Break;
-    ctx->names[ctx->count++] = cxstr_dup(clang_getCursorSpelling(child));
-    return CXChildVisit_Continue;
-}
-
 static void emit_typedef(CXCursor c, FILE *out) {
     char *name = cxstr_dup(clang_getCursorSpelling(c));
     if (name[0] == 0) {
@@ -600,6 +804,7 @@ static void emit_typedef(CXCursor c, FILE *out) {
     }
     CXType underlying = clang_getTypedefDeclUnderlyingType(c);
     CXType canonical = clang_getCanonicalType(underlying);
+    emit_opaque_record_decl_for_type(underlying, out);
     if ((canonical.kind == CXType_Record || canonical.kind == CXType_Enum) && !clang_isCursorDefinition(c)) {
         free(name);
         return;
@@ -621,13 +826,13 @@ static void emit_typedef(CXCursor c, FILE *out) {
     if (fn_type.kind == CXType_FunctionProto) {
         int argc = clang_getNumArgTypes(fn_type);
         char **param_names = 0;
-        typedef_param_ctx ctx = {0};
+        param_name_ctx ctx = {0};
         if (argc > 0) {
             param_names = (char **)calloc((size_t)argc, sizeof(char *));
             if (!param_names) exit(1);
             ctx.names = param_names;
             ctx.capacity = argc;
-            clang_visitChildren(c, typedef_param_visitor, &ctx);
+            clang_visitChildren(c, param_name_visitor, &ctx);
         }
         type_s = emit_proc_type_with_names(fn_type, fn_pointer, param_names, ctx.count);
         for (int i = 0; i < ctx.count; i++) free(param_names[i]);
@@ -643,6 +848,167 @@ static void emit_typedef(CXCursor c, FILE *out) {
 
 static int token_spelling_is_define(const char *s) {
     return streq(s, "#") || streq(s, "define");
+}
+
+static char *trim_dup_range(const char *start, const char *end) {
+    while (start < end && isspace((unsigned char)*start)) start++;
+    while (end > start && isspace((unsigned char)end[-1])) end--;
+    size_t n = (size_t)(end - start);
+    char *out = (char *)malloc(n + 1);
+    if (!out) exit(1);
+    memcpy(out, start, n);
+    out[n] = 0;
+    return out;
+}
+
+static char *trim_dup(const char *s) {
+    return trim_dup_range(s, s + strlen(s));
+}
+
+static int matching_outer_parens(const char *s, size_t first, size_t last) {
+    int depth = 0;
+    for (size_t i = first; i <= last; i++) {
+        if (s[i] == '(') {
+            depth++;
+        } else if (s[i] == ')') {
+            depth--;
+            if (depth == 0 && i != last) return 0;
+            if (depth < 0) return 0;
+        }
+    }
+    return depth == 0;
+}
+
+static char *strip_redundant_outer_parens(const char *input) {
+    char *out = trim_dup(input);
+    for (;;) {
+        size_t n = strlen(out);
+        size_t first = 0;
+        while (first < n && isspace((unsigned char)out[first])) first++;
+        size_t last = n;
+        while (last > first && isspace((unsigned char)out[last - 1])) last--;
+        if (last <= first + 1 || out[first] != '(' || out[last - 1] != ')') break;
+        if (!matching_outer_parens(out, first, last - 1)) break;
+        char *next = trim_dup_range(out + first + 1, out + last - 1);
+        free(out);
+        out = next;
+    }
+    return out;
+}
+
+static int cast_type_text_looks_c_like(const char *s) {
+    int saw_typeish = 0;
+    for (const char *p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (!(isalnum(c) || c == '_' || c == '*' || isspace(c))) return 0;
+        if (c == '*') saw_typeish = 1;
+    }
+    if (strstr(s, "int") || strstr(s, "char") || strstr(s, "short") || strstr(s, "long") ||
+        strstr(s, "float") || strstr(s, "double") || strstr(s, "signed") || strstr(s, "unsigned") ||
+        strstr(s, "size_t") || strstr(s, "intptr") || strstr(s, "uintptr") || strstr(s, "_t")) {
+        saw_typeish = 1;
+    }
+    return saw_typeish;
+}
+
+static char *strip_leading_numeric_cast(const char *input) {
+    char *out = trim_dup(input);
+    if (out[0] != '(') return out;
+    int depth = 0;
+    size_t close = 0;
+    for (size_t i = 0; out[i]; i++) {
+        if (out[i] == '(') depth++;
+        else if (out[i] == ')') {
+            depth--;
+            if (depth == 0) {
+                close = i;
+                break;
+            }
+        }
+    }
+    if (close == 0) return out;
+    char *cast_text = trim_dup_range(out + 1, out + close);
+    char *tail = trim_dup(out + close + 1);
+    if (!tail[0] || !cast_type_text_looks_c_like(cast_text)) {
+        free(cast_text);
+        free(tail);
+        return out;
+    }
+    char first = tail[0];
+    if (!(isdigit((unsigned char)first) || first == '-' || first == '+' || first == '\'' || first == '"' || first == '(')) {
+        free(cast_text);
+        free(tail);
+        return out;
+    }
+    free(cast_text);
+    free(out);
+    return tail;
+}
+
+static int c_integer_suffix_len(const char *s) {
+    int len = (int)strlen(s);
+    int i = len;
+    while (i > 0) {
+        char c = s[i - 1];
+        if (c == 'u' || c == 'U' || c == 'l' || c == 'L') {
+            i--;
+            continue;
+        }
+        break;
+    }
+    if (i == len) return 0;
+
+    int suffix_len = len - i;
+    int u_count = 0;
+    int l_count = 0;
+    for (int j = i; j < len; j++) {
+        char c = s[j];
+        if (c == 'u' || c == 'U') u_count++;
+        else if (c == 'l' || c == 'L') l_count++;
+        else return 0;
+    }
+    if (u_count > 1 || l_count > 2) return 0;
+    return suffix_len;
+}
+
+static char *strip_integer_literal_suffix(const char *input) {
+    char *out = trim_dup(input);
+    const char *p = out;
+    if (*p == '+' || *p == '-') p++;
+    if (!isdigit((unsigned char)*p)) return out;
+
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        p += 2;
+        if (!isxdigit((unsigned char)*p)) return out;
+        while (isxdigit((unsigned char)*p)) p++;
+    } else {
+        while (isdigit((unsigned char)*p)) p++;
+    }
+
+    if (*p == '.' || *p == 'e' || *p == 'E') return out;
+    if (*p == 0) return out;
+
+    int suffix_len = c_integer_suffix_len(p);
+    if (suffix_len <= 0 || p[suffix_len] != 0) return out;
+
+    size_t n = strlen(out) - (size_t)suffix_len;
+    char *trimmed = (char *)malloc(n + 1);
+    if (!trimmed) exit(1);
+    memcpy(trimmed, out, n);
+    trimmed[n] = 0;
+    free(out);
+    return trimmed;
+}
+
+static char *normalize_macro_constant_value(const char *value) {
+    char *outer = strip_redundant_outer_parens(value);
+    char *castless = strip_leading_numeric_cast(outer);
+    free(outer);
+    char *unwrapped = strip_redundant_outer_parens(castless);
+    free(castless);
+    char *normalized = strip_integer_literal_suffix(unwrapped);
+    free(unwrapped);
+    return normalized;
 }
 
 static void emit_macro(CXCursor c, CXTranslationUnit tu, FILE *out) {
@@ -690,7 +1056,9 @@ static void emit_macro(CXCursor c, CXTranslationUnit tu, FILE *out) {
     clang_disposeTokens(tu, tokens, token_count);
 
     if (value.length > 0) {
-        fprintf(out, "#define %s %s\n", clean, value.data);
+        char *normalized = normalize_macro_constant_value(value.data);
+        fprintf(out, "#define %s %s\n", clean, normalized);
+        free(normalized);
     }
 
     free(value.data);

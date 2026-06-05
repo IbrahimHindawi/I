@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -88,8 +90,33 @@ main:proc()->i32={
 }
 ''',
         expected_stdout="10 11 12 13 array_i32 8 3 length u64 0 0 data ptr_i32 1 1 2 array i32 i32 i32\n",
-        generated_contains=("array_i32_reflect", "memops_arena_push_array_i32", "generic_arg_type"),
-        header_contains=("void memops_arena_initialize(memops_arena * arena);",),
+        generated_contains=("array_i32_reflect", "memops_arena_push_array_i32", "generic_arg_type", "I monomorph: struct array<T> -> array_i32;", "I monomorph: proc array<T>reserve -> array_i32_reserve;", "instantiated at"),
+        header_contains=("void memops_arena_initialize(memops_arena * arena);", "I monomorph: struct array<T> -> array_i32;", "I monomorph: proc array<T>reserve -> array_i32_reserve;"),
+    ),
+    Case(
+        name="comments",
+        source=r'''
+cinclude "stdio.h"
+
+// top-level line comment
+/* top-level block comment */
+Payload:struct = {
+    // field comment
+    value:i32;
+    /* another field comment */
+    other:i32;
+}
+
+main:proc()->i32 = {
+    payload:Payload = {}; // local trailing comment
+    payload.value = 1;
+    /* expression-adjacent block comment */
+    payload.other = payload.value + 2;
+    printf("%d %d\n", payload.value, payload.other);
+    return 0;
+}
+''',
+        expected_stdout="1 3\n",
     ),
     Case(
         name="enum_reflect_preprocessor",
@@ -110,6 +137,7 @@ i_reflect_field:struct = {
     base_type:*const char;
     elem_type:*const char;
     generic_arg_type:*const char;
+    is_const:u64;
     external;
 }
 
@@ -137,9 +165,35 @@ i_reflect_enum:struct = {
     external;
 }
 
+i_reflect_type_kind_name:proc(kind:i32)->*const char = { external; }
+i_reflect_field_is_pointer:proc(field:*const i_reflect_field)->i32 = { external; }
+i_reflect_field_is_array:proc(field:*const i_reflect_field)->i32 = { external; }
+i_reflect_field_is_generic:proc(field:*const i_reflect_field)->i32 = { external; }
+i_reflect_count_fields_with_kind:proc(type:*const i_reflect_type, kind:i32)->u64 = { external; }
+i_reflect_find_field_with_kind:proc(type:*const i_reflect_type, kind:i32)->*const i_reflect_field = { external; }
+i_reflect_next_field_with_kind:proc(type:*const i_reflect_type, kind:i32, after:*const i_reflect_field)->*const i_reflect_field = { external; }
 i_reflect_find_field:proc(type:*const i_reflect_type, name:*const char)->*const i_reflect_field = { external; }
+i_reflect_field_index:proc(type:*const i_reflect_type, field:*const i_reflect_field, fallback:u64)->u64 = { external; }
+i_reflect_find_field_index:proc(type:*const i_reflect_type, name:*const char, fallback:u64)->u64 = { external; }
+i_reflect_field_at:proc(type:*const i_reflect_type, index:u64)->*const i_reflect_field = { external; }
+i_reflect_find_field_by_offset:proc(type:*const i_reflect_type, offset:u64)->*const i_reflect_field = { external; }
+i_reflect_field_end_offset:proc(field:*const i_reflect_field)->u64 = { external; }
+i_reflect_find_field_containing_offset:proc(type:*const i_reflect_type, offset:u64)->*const i_reflect_field = { external; }
+i_reflect_field_ptr:proc(base:*void, field:*const i_reflect_field)->*void = { external; }
+i_reflect_field_const_ptr:proc(base:*const void, field:*const i_reflect_field)->*const void = { external; }
+i_reflect_field_copy:proc(dst_base:*void, src_base:*const void, field:*const i_reflect_field)->i32 = { external; }
+i_reflect_field_zero:proc(base:*void, field:*const i_reflect_field)->i32 = { external; }
+i_reflect_field_copy_by_name:proc(dst_base:*void, src_base:*const void, type:*const i_reflect_type, name:*const char)->i32 = { external; }
+i_reflect_field_zero_by_name:proc(base:*void, type:*const i_reflect_type, name:*const char)->i32 = { external; }
+i_reflect_field_has_attr:proc(field:*const i_reflect_field, attr:*const char)->i32 = { external; }
+i_reflect_count_fields_with_attr:proc(type:*const i_reflect_type, attr:*const char)->u64 = { external; }
+i_reflect_find_field_with_attr:proc(type:*const i_reflect_type, attr:*const char)->*const i_reflect_field = { external; }
+i_reflect_next_field_with_attr:proc(type:*const i_reflect_type, attr:*const char, after:*const i_reflect_field)->*const i_reflect_field = { external; }
 i_reflect_find_enum_value_by_name:proc(type:*const i_reflect_enum, name:*const char)->*const i_reflect_enum_value = { external; }
 i_reflect_find_enum_value_by_value:proc(type:*const i_reflect_enum, value:i32)->*const i_reflect_enum_value = { external; }
+i_reflect_enum_value_at:proc(type:*const i_reflect_enum, index:u64)->*const i_reflect_enum_value = { external; }
+i_reflect_enum_name_from_value:proc(type:*const i_reflect_enum, value:i32)->*const char = { external; }
+i_reflect_enum_value_from_name:proc(type:*const i_reflect_enum, name:*const char, fallback:i32)->i32 = { external; }
 
 Color:enum = {
     Red = 1,
@@ -147,19 +201,61 @@ Color:enum = {
     Blue,
 }
 
+Bag:struct<T> = {
+    item:T;
+}
+
 Player:struct = {
     kind:Color;
     hp:i32 @ "editor,serialize";
+    label:*const char;
+    score:i32 @ "editor,path\\tag";
+    inventory:[3]i32;
+    bag:Bag<i32>;
 }
 
 main:proc()->i32={
     p:Player = {};
     p.kind = Color_Green;
     p.hp = I_TEST_HP;
+    p.label = "hero";
+    p.score = 123;
     hp_field:*const i_reflect_field = i_reflect_find_field(&Player_reflect, "hp");
+    hp_value_ptr:*i32 = cast(i_reflect_field_ptr(&p, hp_field), *i32);
+    hp_value_ptr[0] += 1;
+    hp_offset_field:*const i_reflect_field = i_reflect_find_field_by_offset(&Player_reflect, Player_reflect.fields[1].offset);
+    hp_containing_field:*const i_reflect_field = i_reflect_find_field_containing_offset(&Player_reflect, Player_reflect.fields[1].offset + 1);
+    hp_index_field:*const i_reflect_field = i_reflect_field_at(&Player_reflect, 1);
+    missing_index_field:*const i_reflect_field = i_reflect_field_at(&Player_reflect, Player_reflect.field_count);
+    editor_field:*const i_reflect_field = i_reflect_find_field_with_attr(&Player_reflect, "editor");
+    missing_attr_field:*const i_reflect_field = i_reflect_find_field_with_attr(&Player_reflect, "missing");
+    first_editor_field:*const i_reflect_field = i_reflect_next_field_with_attr(&Player_reflect, "editor", null);
+    second_editor_field:*const i_reflect_field = i_reflect_next_field_with_attr(&Player_reflect, "editor", first_editor_field);
+    no_more_editor_field:*const i_reflect_field = i_reflect_next_field_with_attr(&Player_reflect, "editor", second_editor_field);
     green_value:*const i_reflect_enum_value = i_reflect_find_enum_value_by_name(&Color_reflect, "Green");
     blue_value:*const i_reflect_enum_value = i_reflect_find_enum_value_by_value(&Color_reflect, Color_Blue);
-    printf("%s %llu %llu %llu %s %d %s %d %s %d %s %llu %s %s %s %d %d %s %s %d %s\n",
+    blue_index_value:*const i_reflect_enum_value = i_reflect_enum_value_at(&Color_reflect, 2);
+    missing_index_value:*const i_reflect_enum_value = i_reflect_enum_value_at(&Color_reflect, Color_reflect.value_count);
+    green_name:*const char = i_reflect_enum_name_from_value(&Color_reflect, Color_Green);
+    missing_name:*const char = i_reflect_enum_name_from_value(&Color_reflect, 99);
+    generic_kind_field:*const i_reflect_field = i_reflect_find_field_with_kind(&Player_reflect, 2);
+    missing_kind_field:*const i_reflect_field = i_reflect_find_field_with_kind(&Player_reflect, 4);
+    first_name_kind_field:*const i_reflect_field = i_reflect_next_field_with_kind(&Player_reflect, 0, null);
+    second_name_kind_field:*const i_reflect_field = i_reflect_next_field_with_kind(&Player_reflect, 0, first_name_kind_field);
+    third_name_kind_field:*const i_reflect_field = i_reflect_next_field_with_kind(&Player_reflect, 0, second_name_kind_field);
+    no_more_name_kind_field:*const i_reflect_field = i_reflect_next_field_with_kind(&Player_reflect, 0, third_name_kind_field);
+    q:Player = {};
+    copy_ok:i32 = i_reflect_field_copy(&q, &p, hp_field);
+    copied_hp:i32 = q.hp;
+    zero_ok:i32 = i_reflect_field_zero(&q, hp_field);
+    zeroed_hp:i32 = q.hp;
+    copy_missing:i32 = i_reflect_field_copy(null, &p, hp_field);
+    copy_score_ok:i32 = i_reflect_field_copy_by_name(&q, &p, &Player_reflect, "score");
+    copied_score:i32 = q.score;
+    zero_score_ok:i32 = i_reflect_field_zero_by_name(&q, &Player_reflect, "score");
+    zeroed_score:i32 = q.score;
+    copy_missing_name:i32 = i_reflect_field_copy_by_name(&q, &p, &Player_reflect, "missing");
+    printf("%s %llu %llu %llu %s %d %s %d %s %d %s %llu %s %s %s %llu %d %d %s %s %s %d %s %d %d %d %llu %llu %llu %s %d %s %s %d %s %s %s %s %d %d %d %d %d %d %llu %llu %llu %llu %llu %s %d %s %s %s %d %llu %s %d %d %d %d %llu %llu %s %d %s %d %d %d %d %d %d %d %d %d %d %d\n",
         Color_reflect.name,
         Color_reflect.size,
         Color_reflect.align,
@@ -175,17 +271,73 @@ main:proc()->i32={
         Player_reflect.fields[0].name,
         Player_reflect.fields[1].type,
         Player_reflect.fields[1].attrs,
+        Player_reflect.fields[2].is_const,
         p.kind,
         p.hp,
         hp_field[0].name,
+        hp_offset_field[0].name,
         green_value[0].name,
         green_value[0].value,
-        blue_value[0].name);
+        blue_value[0].name,
+        i_reflect_field_has_attr(hp_field, "editor"),
+        i_reflect_field_has_attr(hp_field, "serialize"),
+        i_reflect_field_has_attr(hp_field, "serial"),
+        i_reflect_count_fields_with_attr(&Player_reflect, "editor"),
+        i_reflect_count_fields_with_attr(&Player_reflect, "serialize"),
+        i_reflect_count_fields_with_attr(&Player_reflect, "missing"),
+        editor_field[0].name,
+        missing_attr_field == null,
+        first_editor_field[0].name,
+        second_editor_field[0].name,
+        no_more_editor_field == null,
+        i_reflect_type_kind_name(Player_reflect.fields[1].kind),
+        i_reflect_type_kind_name(Player_reflect.fields[2].kind),
+        i_reflect_type_kind_name(999),
+        green_name,
+        i_reflect_enum_value_from_name(&Color_reflect, "Blue", -1),
+        i_reflect_enum_value_from_name(&Color_reflect, "Missing", -1) + (missing_name == null),
+        i_reflect_field_is_pointer(&Player_reflect.fields[2]),
+        i_reflect_field_is_array(&Player_reflect.fields[4]),
+        i_reflect_field_is_generic(&Player_reflect.fields[5]),
+        i_reflect_field_is_pointer(&Player_reflect.fields[1]),
+        i_reflect_count_fields_with_kind(&Player_reflect, 0),
+        i_reflect_count_fields_with_kind(&Player_reflect, 1),
+        i_reflect_count_fields_with_kind(&Player_reflect, 2),
+        i_reflect_count_fields_with_kind(&Player_reflect, 3),
+        i_reflect_count_fields_with_kind(&Player_reflect, 4),
+        generic_kind_field[0].name,
+        missing_kind_field == null,
+        first_name_kind_field[0].name,
+        second_name_kind_field[0].name,
+        third_name_kind_field[0].name,
+        no_more_name_kind_field == null,
+        i_reflect_field_end_offset(hp_field),
+        hp_containing_field[0].name,
+        i_reflect_find_field_containing_offset(&Player_reflect, Player_reflect.size) == null,
+        hp_value_ptr[0],
+        i_reflect_field_const_ptr(&p, hp_field) != null,
+        i_reflect_field_ptr(null, hp_field) == null,
+        i_reflect_field_index(&Player_reflect, hp_field, 999),
+        i_reflect_find_field_index(&Player_reflect, "score", 999),
+        hp_index_field[0].name,
+        missing_index_field == null,
+        blue_index_value[0].name,
+        missing_index_value == null,
+        copy_ok,
+        copied_hp,
+        zero_ok,
+        zeroed_hp,
+        copy_missing,
+        copy_score_ok,
+        copied_score,
+        zero_score_ok,
+        zeroed_score,
+        copy_missing_name);
     return 0;
 }
 ''',
-        expected_stdout="Color 4 4 3 Red 1 Green 2 Blue 3 Player 2 kind i32 editor,serialize 2 77 hp Green 2 Blue\n",
-        generated_contains=("#define I_TEST_HP 77", "typedef enum Color", "Player_reflect", "i_reflect_find_field", "editor,serialize"),
+        expected_stdout="Color 4 4 3 Red 1 Green 2 Blue 3 Player 6 kind i32 editor,serialize 1 2 78 hp hp Green 2 Blue 1 1 0 2 1 0 hp 1 hp score 1 name ptr unknown Green 3 0 1 1 1 0 3 1 1 1 0 bag 1 kind hp score 1 8 hp 1 78 1 1 1 3 hp 1 Blue 1 1 78 1 0 0 1 123 1 0 0\n",
+        generated_contains=("#define I_TEST_HP 77", "typedef enum Color", "Player_reflect", "i_reflect_type_kind_name", "i_reflect_field_is_pointer", "i_reflect_field_is_array", "i_reflect_field_is_generic", "i_reflect_count_fields_with_kind", "i_reflect_find_field_with_kind", "i_reflect_next_field_with_kind", "i_reflect_find_field", "i_reflect_field_index", "i_reflect_find_field_index", "i_reflect_field_at", "i_reflect_find_field_by_offset", "i_reflect_field_end_offset", "i_reflect_find_field_containing_offset", "i_reflect_field_ptr", "i_reflect_field_const_ptr", "i_reflect_field_copy", "i_reflect_field_zero", "i_reflect_field_copy_by_name", "i_reflect_field_zero_by_name", "i_reflect_field_has_attr", "i_reflect_count_fields_with_attr", "i_reflect_find_field_with_attr", "i_reflect_next_field_with_attr", "i_reflect_enum_value_at", "i_reflect_enum_name_from_value", "i_reflect_enum_value_from_name", "editor,serialize", "editor,path\\\\\\\\tag", "is_const"),
         header_contains=("extern const i_reflect_type Player_reflect;", "typedef enum Color"),
     ),
     Case(
@@ -304,14 +456,14 @@ main:proc()->i32 = {
         expected_stdout="7 2 i f hello\n",
         generated_contains=(
             "typedef i32 I32;",
-            "typedef i32 (WINCALL *Binary)(i32, i32);",
+            "typedef i32 (WINCALL *Binary)(i32 a, i32 b);",
             "uniondef(Value)",
             "do {",
             " ? ",
             "choose(i32 a, ...)",
             'const char * label = "hello";',
         ),
-        header_contains=("typedef i32 I32;", "typedef i32 (WINCALL *Binary)(i32, i32);", "uniondef(Value)"),
+        header_contains=("typedef i32 I32;", "typedef i32 (WINCALL *Binary)(i32 a, i32 b);", "uniondef(Value)"),
     ),
     Case(
         name="initializer_lists",
@@ -404,8 +556,8 @@ main:proc()->i32 = {
 }
 ''',
         expected_stdout="227 66\n",
-        generated_contains=("typedef i32 (*Callback)(i32, const char *);", "Callback cb;", "i32 call_twice(Callback cb)"),
-        header_contains=("typedef i32 (*Callback)(i32, const char *);", "Callback cb;"),
+        generated_contains=("typedef i32 (*Callback)(i32 x, const char * label);", "Callback cb;", "i32 call_twice(Callback cb)"),
+        header_contains=("typedef i32 (*Callback)(i32 x, const char * label);", "Callback cb;"),
     ),
     Case(
         name="external_globals",
@@ -464,8 +616,8 @@ main:proc()->i32 = {
 '''
 
 
-def run(cmd: list[str], cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+def run(cmd: list[str], cwd: Path = ROOT, input: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=cwd, input=input, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
 def main() -> int:
@@ -530,6 +682,1386 @@ def main() -> int:
 
         print(f"ok {case.name}")
 
+    check_i = TEST_DIR / "check_mode.i"
+    check_c = TEST_DIR / "check_mode_should_not_exist.c"
+    if check_c.exists():
+        check_c.unlink()
+    check_i.write_text(r'''
+main:proc()->i32 = {
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check = run([str(I_EXE), "--check", str(check_i), str(check_c)])
+    if check.returncode != 0 or f"i: checked {check_i}" not in check.stdout or check_c.exists():
+        print("check_mode: expected --check to validate without generating C")
+        print(check.stdout)
+        return 1
+    print("ok check_mode")
+
+    check_json = run([str(I_EXE), "--check", str(check_i), "--diagnostics=json"])
+    try:
+        check_json_data = json.loads(check_json.stdout)
+    except json.JSONDecodeError:
+        print("check_json_success: expected JSON diagnostics array")
+        print(check_json.stdout)
+        return 1
+    if check_json.returncode != 0 or check_json_data != []:
+        print("check_json_success: expected empty diagnostics array")
+        print(check_json.stdout)
+        return 1
+    print("ok check_json_success")
+
+    check_json_cli = run([str(I_EXE), "--diagnostics=json", "--definitely-not-an-i-option"])
+    try:
+        check_json_cli_data = json.loads(check_json_cli.stdout)
+    except json.JSONDecodeError:
+        print("check_json_cli: expected JSON CLI diagnostic")
+        print(check_json_cli.stdout)
+        return 1
+    if (
+        check_json_cli.returncode == 0
+        or not isinstance(check_json_cli_data, list)
+        or not check_json_cli_data
+        or check_json_cli_data[0].get("category") != "cli"
+        or check_json_cli_data[0].get("file") != "<cli>"
+        or "unknown option --definitely-not-an-i-option" not in check_json_cli_data[0].get("message", "")
+    ):
+        print("check_json_cli: expected structured CLI diagnostic")
+        print(check_json_cli.stdout)
+        return 1
+    print("ok check_json_cli")
+
+    check_json_cli_order = run([str(I_EXE), "--definitely-not-an-i-option", "--diagnostics=json"])
+    try:
+        check_json_cli_order_data = json.loads(check_json_cli_order.stdout)
+    except json.JSONDecodeError:
+        print("check_json_cli_order: expected JSON CLI diagnostic even when --diagnostics=json appears later")
+        print(check_json_cli_order.stdout)
+        return 1
+    if (
+        check_json_cli_order.returncode == 0
+        or not isinstance(check_json_cli_order_data, list)
+        or not check_json_cli_order_data
+        or check_json_cli_order_data[0].get("category") != "cli"
+        or "unknown option --definitely-not-an-i-option" not in check_json_cli_order_data[0].get("message", "")
+    ):
+        print("check_json_cli_order: expected order-independent structured CLI diagnostic")
+        print(check_json_cli_order.stdout)
+        return 1
+    print("ok check_json_cli_order")
+
+    check_json_io_missing = TEST_DIR / "does_not_exist.i"
+    check_json_io = run([str(I_EXE), "--diagnostics=json", "--check", str(check_json_io_missing)])
+    try:
+        check_json_io_data = json.loads(check_json_io.stdout)
+    except json.JSONDecodeError:
+        print("check_json_io: expected JSON I/O diagnostic")
+        print(check_json_io.stdout)
+        return 1
+    if (
+        check_json_io.returncode == 0
+        or not isinstance(check_json_io_data, list)
+        or not check_json_io_data
+        or check_json_io_data[0].get("category") != "io"
+        or check_json_io_data[0].get("file") != str(check_json_io_missing)
+        or f"failed to read {check_json_io_missing}" not in check_json_io_data[0].get("message", "")
+    ):
+        print("check_json_io: expected structured failed-read diagnostic")
+        print(check_json_io.stdout)
+        return 1
+    print("ok check_json_io")
+
+    check_json_write_i = TEST_DIR / "check_json_write.i"
+    check_json_write_i.write_text(r'''
+main:proc()->i32 = {
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_output_write_dir = TEST_DIR / "check_json_output_write_dir"
+    if check_json_output_write_dir.exists() and not check_json_output_write_dir.is_dir():
+        check_json_output_write_dir.unlink()
+    check_json_output_write_dir.mkdir(parents=True, exist_ok=True)
+    check_json_output_write = run(
+        [
+            str(I_EXE),
+            str(check_json_write_i),
+            str(check_json_output_write_dir),
+            str(TEST_DIR / "check_json_output_write_unused.h"),
+            "--diagnostics=json",
+        ]
+    )
+    try:
+        check_json_output_write_data = json.loads(check_json_output_write.stdout)
+    except json.JSONDecodeError:
+        print("check_json_output_write: expected JSON I/O diagnostic")
+        print(check_json_output_write.stdout)
+        return 1
+    if (
+        check_json_output_write.returncode == 0
+        or not isinstance(check_json_output_write_data, list)
+        or not check_json_output_write_data
+        or check_json_output_write_data[0].get("category") != "io"
+        or check_json_output_write_data[0].get("file") != str(check_json_output_write_dir)
+        or f"failed to write {check_json_output_write_dir}" not in check_json_output_write_data[0].get("message", "")
+    ):
+        print("check_json_output_write: expected structured output write diagnostic")
+        print(check_json_output_write.stdout)
+        return 1
+    print("ok check_json_output_write")
+
+    check_json_header_write_c = TEST_DIR / "check_json_header_write.c"
+    check_json_header_write_dir = TEST_DIR / "check_json_header_write_dir"
+    if check_json_header_write_c.exists():
+        check_json_header_write_c.unlink()
+    if check_json_header_write_dir.exists() and not check_json_header_write_dir.is_dir():
+        check_json_header_write_dir.unlink()
+    check_json_header_write_dir.mkdir(parents=True, exist_ok=True)
+    check_json_header_write = run(
+        [
+            str(I_EXE),
+            str(check_json_write_i),
+            str(check_json_header_write_c),
+            str(check_json_header_write_dir),
+            "--diagnostics=json",
+        ]
+    )
+    try:
+        check_json_header_write_data = json.loads(check_json_header_write.stdout)
+    except json.JSONDecodeError:
+        print("check_json_header_write: expected JSON I/O diagnostic")
+        print(check_json_header_write.stdout)
+        return 1
+    if (
+        check_json_header_write.returncode == 0
+        or not isinstance(check_json_header_write_data, list)
+        or not check_json_header_write_data
+        or check_json_header_write_data[0].get("category") != "io"
+        or check_json_header_write_data[0].get("file") != str(check_json_header_write_dir)
+        or f"failed to write {check_json_header_write_dir}" not in check_json_header_write_data[0].get("message", "")
+    ):
+        print("check_json_header_write: expected structured header write diagnostic")
+        print(check_json_header_write.stdout)
+        return 1
+    print("ok check_json_header_write")
+
+    check_json_semantic_i = TEST_DIR / "check_json_semantic.i"
+    check_json_semantic_i.write_text(r'''
+main:proc()->i32 = {
+    return missing_symbol;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_semantic = run([str(I_EXE), "--check", str(check_json_semantic_i), "--diagnostics=json"])
+    try:
+        check_json_semantic_data = json.loads(check_json_semantic.stdout)
+    except json.JSONDecodeError:
+        print("check_json_semantic: expected JSON semantic diagnostic")
+        print(check_json_semantic.stdout)
+        return 1
+    if (
+        check_json_semantic.returncode == 0
+        or not isinstance(check_json_semantic_data, list)
+        or not check_json_semantic_data
+        or check_json_semantic_data[0].get("category") != "semantic"
+        or check_json_semantic_data[0].get("file") != str(check_json_semantic_i)
+        or "use of undeclared identifier 'missing_symbol'" not in check_json_semantic_data[0].get("message", "")
+        or check_json_semantic_data[0].get("end_column") != check_json_semantic_data[0].get("column", 0) + len("missing_symbol")
+    ):
+        print("check_json_semantic: expected structured undeclared identifier diagnostic")
+        print(check_json_semantic.stdout)
+        return 1
+    print("ok check_json_semantic")
+
+    check_json_stdin_i = TEST_DIR / "check_json_stdin.i"
+    check_json_stdin_i.write_text(r'''
+main:proc()->i32 = {
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_stdin_source = r'''
+main:proc()->i32 = {
+    return dirty_missing_symbol;
+}
+'''.strip() + "\n"
+    check_json_stdin = run(
+        [str(I_EXE), "--check", str(check_json_stdin_i), "--diagnostics=json", "--stdin"],
+        input=check_json_stdin_source,
+    )
+    try:
+        check_json_stdin_data = json.loads(check_json_stdin.stdout)
+    except json.JSONDecodeError:
+        print("check_json_stdin: expected JSON diagnostic from stdin source")
+        print(check_json_stdin.stdout)
+        return 1
+    if (
+        check_json_stdin.returncode == 0
+        or not isinstance(check_json_stdin_data, list)
+        or not check_json_stdin_data
+        or check_json_stdin_data[0].get("category") != "semantic"
+        or check_json_stdin_data[0].get("file") != str(check_json_stdin_i)
+        or "dirty_missing_symbol" not in check_json_stdin_data[0].get("message", "")
+        or check_json_stdin_data[0].get("end_column") != check_json_stdin_data[0].get("column", 0) + len("dirty_missing_symbol")
+    ):
+        print("check_json_stdin: expected structured dirty-buffer diagnostic using logical source path")
+        print(check_json_stdin.stdout)
+        return 1
+    print("ok check_json_stdin")
+
+    check_symbols_mod_i = TEST_DIR / "check_symbols_mod.i"
+    check_symbols_root_i = TEST_DIR / "check_symbols_root.i"
+    check_symbols_mod_i.write_text(r'''
+Shared:struct = {
+    value:i32;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_symbols_root_i.write_text(r'''
+main:proc()->i32 = {
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_symbols_source = f'''
+import "{check_symbols_mod_i.as_posix()}"
+
+Dirty:struct = {{
+    value:i32 @ "editor";
+}}
+
+Box:struct<T> = {{
+    value:T;
+}}
+
+Crate:struct<Item> = {{
+    item:Item;
+}}
+
+Mode:enum = {{
+    Run,
+}}
+
+Callback:alias = *proc(x:i32)->i32;
+
+dirty_proc:proc(dirty_arg:i32)->i32 = {{
+    dirty_local:i32 = dirty_arg;
+    for (dirty_i:i32 = 0; dirty_i < 1; dirty_i += 1) {{
+        dirty_local += dirty_i;
+    }}
+    return dirty_local;
+}}
+
+Box<T>get:proc<T>(box:Box<T>)->T = {{
+    return box.value;
+}}
+
+global_value:i32 = 1;
+'''.strip() + "\n"
+    check_symbols = run(
+        [str(I_EXE), str(check_symbols_root_i), "--symbols=json", "--stdin"],
+        input=check_symbols_source,
+    )
+    try:
+        check_symbols_data = json.loads(check_symbols.stdout)
+    except json.JSONDecodeError:
+        print("check_symbols_json: expected JSON symbol table")
+        print(check_symbols.stdout)
+        return 1
+    if check_symbols.returncode != 0 or not isinstance(check_symbols_data, list):
+        print("check_symbols_json: expected successful symbol table")
+        print(check_symbols.stdout)
+        return 1
+    symbols_by_name = {
+        item.get("name"): item
+        for item in check_symbols_data
+        if isinstance(item, dict)
+    }
+    fields_by_owner_name = {
+        (item.get("owner"), item.get("name")): item
+        for item in check_symbols_data
+        if isinstance(item, dict) and item.get("kind") == "field"
+    }
+    variables_by_kind_name = {
+        (item.get("kind"), item.get("name")): item
+        for item in check_symbols_data
+        if isinstance(item, dict) and item.get("kind") in {"global", "parameter", "variable"}
+    }
+    if (
+        symbols_by_name.get("Shared", {}).get("file") != str(check_symbols_mod_i)
+        or symbols_by_name.get("Dirty", {}).get("kind") != "struct"
+        or fields_by_owner_name.get(("Shared", "value"), {}).get("file") != str(check_symbols_mod_i)
+        or fields_by_owner_name.get(("Shared", "value"), {}).get("detail") != "Shared.value: i32"
+        or fields_by_owner_name.get(("Shared", "value"), {}).get("type") != "i32"
+        or fields_by_owner_name.get(("Dirty", "value"), {}).get("attrs") != "editor"
+        or fields_by_owner_name.get(("Box", "value"), {}).get("detail") != "Box.value: T"
+        or fields_by_owner_name.get(("Box", "value"), {}).get("type") != "T"
+        or fields_by_owner_name.get(("Box", "value"), {}).get("type_param") != "T"
+        or symbols_by_name.get("Box", {}).get("type_param") != "T"
+        or fields_by_owner_name.get(("Crate", "item"), {}).get("type") != "Item"
+        or fields_by_owner_name.get(("Crate", "item"), {}).get("type_param") != "Item"
+        or symbols_by_name.get("Crate", {}).get("type_param") != "Item"
+        or symbols_by_name.get("Mode", {}).get("kind") != "enum"
+        or symbols_by_name.get("Mode_Run", {}).get("detail") != "Mode.Run: enum member"
+        or symbols_by_name.get("Mode_Run", {}).get("owner") != "Mode"
+        or symbols_by_name.get("Mode_Run", {}).get("item") != "Run"
+        or symbols_by_name.get("Callback", {}).get("detail") != "Callback:alias = *proc(x:i32)->i32;"
+        or symbols_by_name.get("Callback", {}).get("target_type") != "*proc(x:i32)->i32"
+        or symbols_by_name.get("Callback", {}).get("params") != [{"name": "x", "type": "i32"}]
+        or symbols_by_name.get("Callback", {}).get("return_type") != "i32"
+        or symbols_by_name.get("Callback", {}).get("variadic") is not False
+        or symbols_by_name.get("dirty_proc", {}).get("detail") != "dirty_proc:proc(dirty_arg:i32)->i32"
+        or symbols_by_name.get("dirty_proc", {}).get("params") != [{"name": "dirty_arg", "type": "i32"}]
+        or symbols_by_name.get("dirty_proc", {}).get("return_type") != "i32"
+        or symbols_by_name.get("dirty_proc", {}).get("variadic") is not False
+        or variables_by_kind_name.get(("parameter", "dirty_arg"), {}).get("detail") != "dirty_arg: i32"
+        or variables_by_kind_name.get(("parameter", "dirty_arg"), {}).get("type") != "i32"
+        or variables_by_kind_name.get(("parameter", "dirty_arg"), {}).get("scope") != "dirty_proc"
+        or variables_by_kind_name.get(("variable", "dirty_local"), {}).get("detail") != "dirty_local: i32"
+        or variables_by_kind_name.get(("variable", "dirty_local"), {}).get("type") != "i32"
+        or variables_by_kind_name.get(("variable", "dirty_local"), {}).get("scope") != "dirty_proc"
+        or variables_by_kind_name.get(("variable", "dirty_i"), {}).get("detail") != "dirty_i: i32"
+        or variables_by_kind_name.get(("variable", "dirty_i"), {}).get("scope") != "dirty_proc"
+        or symbols_by_name.get("Box<T>get", {}).get("detail") != "Box<T>get:proc<T>(box:Box<T>)->T"
+        or symbols_by_name.get("Box<T>get", {}).get("params") != [{"name": "box", "type": "Box<T>"}]
+        or symbols_by_name.get("Box<T>get", {}).get("return_type") != "T"
+        or symbols_by_name.get("Box<T>get", {}).get("type_param") != "T"
+        or variables_by_kind_name.get(("parameter", "box"), {}).get("scope") != "Box<T>get"
+        or variables_by_kind_name.get(("global", "global_value"), {}).get("detail") != "global_value: i32"
+        or variables_by_kind_name.get(("global", "global_value"), {}).get("type") != "i32"
+    ):
+        print("check_symbols_json: expected compiler-backed top-level symbols and variables")
+        print(check_symbols.stdout)
+        return 1
+    print("ok check_symbols_json")
+
+    check_lsp = run(
+        [str(I_EXE), str(check_symbols_root_i), "--lsp=json", "--stdin"],
+        input=check_symbols_source,
+    )
+    try:
+        check_lsp_data = json.loads(check_lsp.stdout)
+    except json.JSONDecodeError:
+        print("check_lsp_json: expected combined LSP JSON payload")
+        print(check_lsp.stdout)
+        return 1
+    if (
+        check_lsp.returncode != 0
+        or not isinstance(check_lsp_data, dict)
+        or check_lsp_data.get("diagnostics") != []
+        or not isinstance(check_lsp_data.get("symbols"), list)
+        or not any(
+            isinstance(item, dict) and item.get("name") == "Dirty" and item.get("kind") == "struct"
+            for item in check_lsp_data.get("symbols", [])
+        )
+        or not any(
+            isinstance(item, dict) and item.get("name") == "Shared" and item.get("file") == str(check_symbols_mod_i)
+            for item in check_lsp_data.get("symbols", [])
+        )
+    ):
+        print("check_lsp_json: expected checked diagnostics plus import-graph symbols")
+        print(check_lsp.stdout)
+        return 1
+
+    check_lsp_dirty = run(
+        [str(I_EXE), str(check_symbols_root_i), "--lsp=json", "--stdin"],
+        input="main:proc()->i32 = {\n    return lsp_dirty_missing;\n}\n",
+    )
+    try:
+        check_lsp_dirty_data = json.loads(check_lsp_dirty.stdout)
+    except json.JSONDecodeError:
+        print("check_lsp_json_dirty: expected JSON diagnostics on checked LSP failure")
+        print(check_lsp_dirty.stdout)
+        return 1
+    if (
+        check_lsp_dirty.returncode == 0
+        or not isinstance(check_lsp_dirty_data, list)
+        or not check_lsp_dirty_data
+        or "lsp_dirty_missing" not in check_lsp_dirty_data[0].get("message", "")
+    ):
+        print("check_lsp_json_dirty: expected compiler diagnostic list when LSP check fails")
+        print(check_lsp_dirty.stdout)
+        return 1
+    print("ok check_lsp_json")
+
+    check_json_parse_i = TEST_DIR / "check_json_parse.i"
+    check_json_parse_i.write_text(r'''
+Payload:struct = {
+    value i32;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_parse = run([str(I_EXE), "--check", str(check_json_parse_i), "--diagnostics=json"])
+    try:
+        check_json_parse_data = json.loads(check_json_parse.stdout)
+    except json.JSONDecodeError:
+        print("check_json_parse: expected JSON parse diagnostic")
+        print(check_json_parse.stdout)
+        return 1
+    if (
+        check_json_parse.returncode == 0
+        or not isinstance(check_json_parse_data, list)
+        or not check_json_parse_data
+        or check_json_parse_data[0].get("category") != "parse"
+        or check_json_parse_data[0].get("file") != str(check_json_parse_i)
+        or "expected ':' after field name" not in check_json_parse_data[0].get("message", "")
+        or check_json_parse_data[0].get("end_column") != check_json_parse_data[0].get("column", 0) + len("i32")
+    ):
+        print("check_json_parse: expected structured parse diagnostic")
+        print(check_json_parse.stdout)
+        return 1
+    print("ok check_json_parse")
+
+    check_json_type_i = TEST_DIR / "check_json_type.i"
+    check_json_type_i.write_text(r'''
+Payload:struct = {
+    value:i32;
+}
+
+main:proc()->i32 = {
+    payload:Payload = {};
+    value:i32 = payload;
+    return value;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_type = run([str(I_EXE), "--check", str(check_json_type_i), "--diagnostics=json"])
+    try:
+        check_json_type_data = json.loads(check_json_type.stdout)
+    except json.JSONDecodeError:
+        print("check_json_type: expected JSON type diagnostic")
+        print(check_json_type.stdout)
+        return 1
+    if (
+        check_json_type.returncode == 0
+        or not isinstance(check_json_type_data, list)
+        or not check_json_type_data
+        or check_json_type_data[0].get("category") != "type"
+        or check_json_type_data[0].get("file") != str(check_json_type_i)
+        or "initializer expected 'i32', got 'Payload'" not in check_json_type_data[0].get("message", "")
+    ):
+        print("check_json_type: expected structured incompatible-type diagnostic")
+        print(check_json_type.stdout)
+        return 1
+    print("ok check_json_type")
+
+    check_json_type_cases = (
+        (
+            "check_json_proc_arg",
+            r'''
+take_ptr:proc(p:*i32)->void = {
+    return;
+}
+
+main:proc()->i32 = {
+    value:i32 = 1;
+    take_ptr(value);
+    return 0;
+}
+''',
+            "proc 'take_ptr' argument 1 'p' expected 'ptr_i32', got 'i32'",
+            "parameter declared here",
+        ),
+        (
+            "check_json_proc_count",
+            r'''
+add:proc(a:i32, b:i32)->i32 = {
+    return a + b;
+}
+
+main:proc()->i32 = {
+    return add(1);
+}
+''',
+            "proc 'add' expects 2 args, got 1",
+            ("expected params: a:i32, b:i32", "proc declared here"),
+        ),
+        (
+            "check_json_return_presence",
+            r'''
+main:proc()->i32 = {
+    return;
+}
+''',
+            "non-void proc must return a value of type 'i32'",
+            "proc declared here",
+        ),
+        (
+            "check_json_call_non_proc",
+            r'''
+main:proc()->i32 = {
+    value:i32 = 1;
+    return value(1);
+}
+''',
+            "cannot call non-proc symbol 'value' of type 'i32'",
+            "",
+        ),
+        (
+            "check_json_proc_pointer_arg",
+            r'''
+Callback:alias = *proc(x:i32)->i32;
+
+ok_cb:proc(x:i32)->i32 = {
+    return x;
+}
+
+main:proc()->i32 = {
+    value:i32 = 1;
+    cb:Callback = ok_cb;
+    return cb(value.&);
+}
+''',
+            "proc pointer 'cb' argument 1 'x' expected 'i32', got 'ptr_i32'",
+            "expected params: x:i32",
+        ),
+        (
+            "check_json_proc_pointer_count",
+            r'''
+Callback:alias = *proc(a:i32, b:i32)->i32;
+
+add:proc(a:i32, b:i32)->i32 = {
+    return a + b;
+}
+
+main:proc()->i32 = {
+    cb:Callback = add;
+    return cb(1);
+}
+''',
+            "proc pointer 'cb' expects 2 args, got 1",
+            "expected params: a:i32, b:i32",
+        ),
+        (
+            "check_json_cast",
+            r'''
+Payload:struct = {
+    value:i32;
+}
+
+main:proc()->i32 = {
+    payload:Payload = {};
+    return cast(payload, i32);
+}
+''',
+            "cannot cast 'Payload' to 'i32'",
+            "",
+        ),
+        (
+            "check_json_binary",
+            r'''
+Payload:struct = {
+    value:i32;
+}
+
+main:proc()->i32 = {
+    payload:Payload = {};
+    return payload + 1;
+}
+''',
+            "operator '+' cannot be applied to 'Payload' and 'i32'",
+            "",
+        ),
+        (
+            "check_json_field",
+            r'''
+Payload:struct = {
+    value:i32;
+}
+
+main:proc()->i32 = {
+    payload:Payload = {};
+    return payload.missing;
+}
+''',
+            "type 'Payload' has no field 'missing'",
+            "",
+        ),
+        (
+            "check_json_initializer_field",
+            r'''
+Payload:struct = {
+    value:i32;
+}
+
+main:proc()->i32 = {
+    payload:Payload = { .missing = 1 };
+    return payload.value;
+}
+''',
+            "initializer for type 'Payload' has no field 'missing'",
+            "",
+        ),
+        (
+            "check_json_const_assignment",
+            r'''
+main:proc()->i32 = {
+    value:const i32 = 1;
+    value = 2;
+    return value;
+}
+''',
+            "cannot assign to const target of type 'const_i32'",
+            "",
+        ),
+        (
+            "check_json_condition",
+            r'''
+Payload:struct = {
+    value:i32;
+}
+
+main:proc()->i32 = {
+    payload:Payload = {};
+    if (payload) {
+        return 1;
+    }
+    return 0;
+}
+''',
+            "if condition must be scalar/pointer, got 'Payload'",
+            "",
+        ),
+        (
+            "check_json_assignment_target",
+            r'''
+make_value:proc()->i32 = {
+    return 1;
+}
+
+main:proc()->i32 = {
+    make_value() = 3;
+    return 0;
+}
+''',
+            "assignment target must be a name, field, or indexed element; got call",
+            "",
+        ),
+        (
+            "check_json_address_target",
+            r'''
+main:proc()->i32 = {
+    value:*i32 = (1 + 2).&;
+    return 0;
+}
+''',
+            "address target must be a name, field, or indexed element; got binary expression",
+            "",
+        ),
+        (
+            "check_json_index_base",
+            r'''
+main:proc()->i32 = {
+    value:i32 = 1;
+    return value[0];
+}
+''',
+            "cannot index non-array/non-pointer type 'i32'",
+            "",
+        ),
+        (
+            "check_json_index_value",
+            r'''
+main:proc()->i32 = {
+    values:[2]i32 = {};
+    index:*i32 = values[0].&;
+    return values[index];
+}
+''',
+            "index expression must be numeric, got 'ptr_i32'",
+            "",
+        ),
+        (
+            "check_json_initializer_duplicate_field",
+            r'''
+Payload:struct = {
+    value:i32;
+}
+
+main:proc()->i32 = {
+    payload:Payload = {.value = 1, .value = 2};
+    return payload.value;
+}
+''',
+            "duplicate initializer for field 'value'",
+            "previous initializer here",
+        ),
+        (
+            "check_json_initializer_count",
+            r'''
+Payload:struct = {
+    value:i32;
+}
+
+main:proc()->i32 = {
+    payload:Payload = {1, 2};
+    return payload.value;
+}
+''',
+            "too many positional initializer values for type 'Payload'",
+            "",
+        ),
+        (
+            "check_json_array_initializer_duplicate_index",
+            r'''
+main:proc()->i32 = {
+    values:[2]i32 = {[1] = 1, [1] = 2};
+    return values[0];
+}
+''',
+            "duplicate initializer for array index '1'",
+            "previous initializer here",
+        ),
+        (
+            "check_json_array_initializer_index_bounds",
+            r'''
+main:proc()->i32 = {
+    values:[2]i32 = {[2] = 1};
+    return values[0];
+}
+''',
+            "initializer index '2' is out of bounds for type 'array_2_i32'",
+            "",
+        ),
+        (
+            "check_json_array_initializer_float_index",
+            r'''
+main:proc()->i32 = {
+    values:[2]i32 = {[1.0] = 1};
+    return values[0];
+}
+''',
+            "initializer index '1.0' must be a non-negative integer literal",
+            "",
+        ),
+        (
+            "check_json_pointer_value_note",
+            r'''
+main:proc()->i32 = {
+    x:i32 = 0;
+    p:*i32 = x.&;
+    x = p;
+    return x;
+}
+''',
+            "assignment expected 'i32', got 'ptr_i32'",
+            "got a pointer; use '[0]' to access the pointed value",
+        ),
+        (
+            "check_json_array_pointer_note",
+            r'''
+take_i32s:proc(values:*i32)->void = {
+    return;
+}
+
+main:proc()->i32 = {
+    values:[4]f32 = {};
+    take_i32s(values);
+    return 0;
+}
+''',
+            "proc 'take_i32s' argument 1 'values' expected 'ptr_i32', got 'array_4_f32'",
+            "fixed array can decay to pointer only when element types match; expected element 'i32', got 'f32'",
+        ),
+        (
+            "check_json_proc_signature_note",
+            r'''
+Callback:alias = *proc(x:i32)->i32;
+
+bad_cb:proc(x:i32)->*i32 = {
+    return null;
+}
+
+main:proc()->i32 = {
+    cb:Callback = bad_cb;
+    return 0;
+}
+''',
+            "initializer expected 'Callback', got 'ptr_proc_ptr_i32_i32'",
+            "expected proc signature: (arg0:i32)->i32",
+        ),
+    )
+    for case_name, source, message, note_messages in check_json_type_cases:
+        case_i = TEST_DIR / f"{case_name}.i"
+        case_i.write_text(source.strip() + "\n", encoding="utf-8", newline="\n")
+        result = run([str(I_EXE), "--check", str(case_i), "--diagnostics=json"])
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            print(f"{case_name}: expected JSON diagnostic")
+            print(result.stdout)
+            return 1
+        notes = data[0].get("notes", []) if isinstance(data, list) and data else []
+        if isinstance(note_messages, str):
+            expected_notes = (note_messages,) if note_messages else ()
+        else:
+            expected_notes = note_messages
+        if (
+            result.returncode == 0
+            or not isinstance(data, list)
+            or not data
+            or data[0].get("category") != "type"
+            or data[0].get("file") != str(case_i)
+            or message not in data[0].get("message", "")
+            or any(
+                not any(note_message in note.get("message", "") for note in notes if isinstance(note, dict))
+                for note_message in expected_notes
+            )
+        ):
+            print(f"{case_name}: expected structured type diagnostic")
+            print(result.stdout)
+            return 1
+        print(f"ok {case_name}")
+
+    check_json_lexer_i = TEST_DIR / "check_json_lexer.i"
+    check_json_lexer_i.write_text(r'''
+main:proc()->i32 = {
+    return 0;
+}
+$
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_lexer = run([str(I_EXE), "--check", str(check_json_lexer_i), "--diagnostics=json"])
+    try:
+        check_json_lexer_data = json.loads(check_json_lexer.stdout)
+    except json.JSONDecodeError:
+        print("check_json_lexer: expected JSON lexer diagnostic")
+        print(check_json_lexer.stdout)
+        return 1
+    if (
+        check_json_lexer.returncode == 0
+        or not isinstance(check_json_lexer_data, list)
+        or not check_json_lexer_data
+        or check_json_lexer_data[0].get("category") != "lexer"
+        or check_json_lexer_data[0].get("file") != str(check_json_lexer_i)
+        or "unexpected char '$'" not in check_json_lexer_data[0].get("message", "")
+        or check_json_lexer_data[0].get("end_column") != check_json_lexer_data[0].get("column", 0) + 1
+    ):
+        print("check_json_lexer: expected structured lexer diagnostic")
+        print(check_json_lexer.stdout)
+        return 1
+    print("ok check_json_lexer")
+
+    check_json_format_i = TEST_DIR / "check_json_format.i"
+    check_json_format_i.write_text(r'''
+cinclude "stdio.h"
+
+Payload:struct = {
+    value:i32;
+}
+
+main:proc()->i32 = {
+    payload:Payload = {};
+    printf("{}\n", payload);
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_format = run([str(I_EXE), "--check", str(check_json_format_i), "--diagnostics=json"])
+    try:
+        check_json_format_data = json.loads(check_json_format.stdout)
+    except json.JSONDecodeError:
+        print("check_json_format: expected JSON format diagnostic")
+        print(check_json_format.stdout)
+        return 1
+    if (
+        check_json_format.returncode == 0
+        or not isinstance(check_json_format_data, list)
+        or not check_json_format_data
+        or check_json_format_data[0].get("category") != "format"
+        or check_json_format_data[0].get("file") != str(check_json_format_i)
+        or "cannot infer '{}' format for printf arg 1" not in check_json_format_data[0].get("message", "")
+    ):
+        print("check_json_format: expected structured printf format diagnostic")
+        print(check_json_format.stdout)
+        return 1
+    print("ok check_json_format")
+
+    check_json_format_cases = (
+        (
+            "check_json_format_too_many_placeholders",
+            r'''
+main:proc()->i32 = {
+    printf("{} {}\n", 1);
+    return 0;
+}
+''',
+            "too many '{}' placeholders in printf format",
+        ),
+        (
+            "check_json_format_count_mismatch",
+            r'''
+main:proc()->i32 = {
+    printf("{}\n", 1, 2);
+    return 0;
+}
+''',
+            "printf placeholder count (1) does not match arg count (2)",
+        ),
+    )
+    for case_name, source, message in check_json_format_cases:
+        case_i = TEST_DIR / f"{case_name}.i"
+        case_i.write_text(source.strip() + "\n", encoding="utf-8", newline="\n")
+        result = run([str(I_EXE), "--check", str(case_i), "--diagnostics=json"])
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            print(f"{case_name}: expected JSON format diagnostic")
+            print(result.stdout)
+            return 1
+        if (
+            result.returncode == 0
+            or not isinstance(data, list)
+            or not data
+            or data[0].get("category") != "format"
+            or data[0].get("file") != str(case_i)
+            or message not in data[0].get("message", "")
+        ):
+            print(f"{case_name}: expected structured format diagnostic")
+            print(result.stdout)
+            return 1
+        print(f"ok {case_name}")
+
+    check_json_requirement_i = TEST_DIR / "check_json_requirement.i"
+    check_json_requirement_i.write_text(r'''
+Payload:struct = {
+    value:i32;
+}
+
+need_hash:proc<T:hashable>(value:T)->u64 = {
+    return hash<T>(value);
+}
+
+main:proc()->i32 = {
+    payload:Payload = {};
+    return cast(need_hash<Payload>(payload), i32);
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_requirement = run([str(I_EXE), "--check", str(check_json_requirement_i), "--diagnostics=json"])
+    try:
+        check_json_requirement_data = json.loads(check_json_requirement.stdout)
+    except json.JSONDecodeError:
+        print("check_json_requirement: expected JSON requirement diagnostic")
+        print(check_json_requirement.stdout)
+        return 1
+    requirement_notes = check_json_requirement_data[0].get("notes", []) if isinstance(check_json_requirement_data, list) and check_json_requirement_data else []
+    if (
+        check_json_requirement.returncode == 0
+        or not isinstance(check_json_requirement_data, list)
+        or not check_json_requirement_data
+        or check_json_requirement_data[0].get("category") != "requirement"
+        or check_json_requirement_data[0].get("file") != str(check_json_requirement_i)
+        or "requires 'hashable' for type 'Payload'" not in check_json_requirement_data[0].get("message", "")
+        or "missing function 'hash_Payload'" not in check_json_requirement_data[0].get("message", "")
+        or not any("generic 'need_hash' instantiated here with type 'Payload'" in note.get("message", "") for note in requirement_notes if isinstance(note, dict))
+        or not any("generic declared here with requirement 'hashable'" in note.get("message", "") for note in requirement_notes if isinstance(note, dict))
+    ):
+        print("check_json_requirement: expected structured requirement diagnostic")
+        print(check_json_requirement.stdout)
+        return 1
+    print("ok check_json_requirement")
+
+    check_json_import_root_i = TEST_DIR / "check_json_import_cycle_root.i"
+    check_json_import_a_i = TEST_DIR / "check_json_import_cycle_a.i"
+    check_json_import_b_i = TEST_DIR / "check_json_import_cycle_b.i"
+    check_json_import_root_i.write_text(f'import "{check_json_import_a_i.as_posix()}"\n', encoding="utf-8", newline="\n")
+    check_json_import_a_i.write_text(f'import "{check_json_import_b_i.as_posix()}"\n', encoding="utf-8", newline="\n")
+    check_json_import_b_i.write_text(f'import "{check_json_import_a_i.as_posix()}"\n', encoding="utf-8", newline="\n")
+    check_json_import = run([str(I_EXE), "--check", str(check_json_import_root_i), "--diagnostics=json"])
+    try:
+        check_json_import_data = json.loads(check_json_import.stdout)
+    except json.JSONDecodeError:
+        print("check_json_import_cycle: expected JSON import diagnostic")
+        print(check_json_import.stdout)
+        return 1
+    import_cycle_notes = check_json_import_data[0].get("notes", []) if isinstance(check_json_import_data, list) and check_json_import_data else []
+    if (
+        check_json_import.returncode == 0
+        or not isinstance(check_json_import_data, list)
+        or not check_json_import_data
+        or check_json_import_data[0].get("category") != "semantic"
+        or check_json_import_data[0].get("file") != str(check_json_import_b_i)
+        or check_json_import_data[0].get("line") != 1
+        or check_json_import_data[0].get("column") != 8
+        or "import cycle:" not in check_json_import_data[0].get("message", "")
+        or check_json_import_a_i.name not in check_json_import_data[0].get("message", "")
+        or check_json_import_b_i.name not in check_json_import_data[0].get("message", "")
+        or not any(
+            "imported through:" in note.get("message", "")
+            and check_json_import_root_i.name in note.get("message", "")
+            and check_json_import_b_i.name in note.get("message", "")
+            for note in import_cycle_notes
+            if isinstance(note, dict)
+        )
+    ):
+        print("check_json_import_cycle: expected structured import cycle diagnostic at the closing import with import-chain note")
+        print(check_json_import.stdout)
+        return 1
+    print("ok check_json_import_cycle")
+
+    check_json_missing_import_root_i = TEST_DIR / "check_json_missing_import_root.i"
+    check_json_missing_import_dep_i = TEST_DIR / "check_json_missing_import_dep.i"
+    if check_json_missing_import_dep_i.exists():
+        check_json_missing_import_dep_i.unlink()
+    check_json_missing_import_root_i.write_text(
+        f'''
+import "{check_json_missing_import_dep_i.as_posix()}"
+
+main:proc()->i32 = {{
+    return 0;
+}}
+'''.strip() + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    check_json_missing_import = run([str(I_EXE), "--check", str(check_json_missing_import_root_i), "--diagnostics=json"])
+    try:
+        check_json_missing_import_data = json.loads(check_json_missing_import.stdout)
+    except json.JSONDecodeError:
+        print("check_json_missing_import: expected JSON missing-import diagnostic")
+        print(check_json_missing_import.stdout)
+        return 1
+    missing_import_notes = check_json_missing_import_data[0].get("notes", []) if isinstance(check_json_missing_import_data, list) and check_json_missing_import_data else []
+    if (
+        check_json_missing_import.returncode == 0
+        or not isinstance(check_json_missing_import_data, list)
+        or not check_json_missing_import_data
+        or check_json_missing_import_data[0].get("category") != "semantic"
+        or check_json_missing_import_data[0].get("file") != str(check_json_missing_import_root_i)
+        or "failed to read import" not in check_json_missing_import_data[0].get("message", "")
+        or check_json_missing_import_dep_i.name not in check_json_missing_import_data[0].get("message", "")
+        or not any("imported through:" in note.get("message", "") for note in missing_import_notes if isinstance(note, dict))
+    ):
+        print("check_json_missing_import: expected structured missing-import diagnostic with import-chain note")
+        print(check_json_missing_import.stdout)
+        return 1
+    print("ok check_json_missing_import")
+
+    check_json_import_dup_mod = TEST_DIR / "check_json_import_duplicate_mod.i"
+    check_json_import_dup_mid = TEST_DIR / "check_json_import_duplicate_mid.i"
+    check_json_import_dup_app = TEST_DIR / "check_json_import_duplicate_app.i"
+    check_json_import_dup_mod.write_text(r'''
+Payload:struct = {
+    value:i32;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_import_dup_mid.write_text(r'''
+import "check_json_import_duplicate_mod.i"
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_import_dup_app.write_text(r'''
+import "check_json_import_duplicate_mid.i"
+
+Payload:struct = {
+    other:i32;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_import_dup = run([str(I_EXE), "--check", str(check_json_import_dup_app), "--diagnostics=json"])
+    try:
+        check_json_import_dup_data = json.loads(check_json_import_dup.stdout)
+    except json.JSONDecodeError:
+        print("check_json_import_duplicate: expected JSON import duplicate diagnostic")
+        print(check_json_import_dup.stdout)
+        return 1
+    import_dup_notes = check_json_import_dup_data[0].get("notes", []) if isinstance(check_json_import_dup_data, list) and check_json_import_dup_data else []
+    if (
+        check_json_import_dup.returncode == 0
+        or not isinstance(check_json_import_dup_data, list)
+        or not check_json_import_dup_data
+        or check_json_import_dup_data[0].get("category") != "semantic"
+        or check_json_import_dup_data[0].get("file") != str(check_json_import_dup_app)
+        or "duplicate struct declaration 'Payload'" not in check_json_import_dup_data[0].get("message", "")
+        or str(check_json_import_dup_mod) not in check_json_import_dup_data[0].get("message", "")
+        or not any("previous declaration imported through:" in note.get("message", "") for note in import_dup_notes if isinstance(note, dict))
+        or not any(check_json_import_dup_mid.name in note.get("message", "") for note in import_dup_notes if isinstance(note, dict))
+    ):
+        print("check_json_import_duplicate: expected structured import duplicate diagnostic with previous import-chain note")
+        print(check_json_import_dup.stdout)
+        return 1
+    print("ok check_json_import_duplicate")
+
+    check_json_import_value_dup_mod = TEST_DIR / "check_json_import_value_duplicate_mod.i"
+    check_json_import_value_dup_mid = TEST_DIR / "check_json_import_value_duplicate_mid.i"
+    check_json_import_value_dup_app = TEST_DIR / "check_json_import_value_duplicate_app.i"
+    check_json_import_value_dup_mod.write_text(r'''
+shared_value:proc()->i32 = {
+    return 1;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_import_value_dup_mid.write_text(r'''
+import "check_json_import_value_duplicate_mod.i"
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_import_value_dup_app.write_text(r'''
+import "check_json_import_value_duplicate_mid.i"
+
+shared_value:i32 = 2;
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_import_value_dup = run([str(I_EXE), "--check", str(check_json_import_value_dup_app), "--diagnostics=json"])
+    try:
+        check_json_import_value_dup_data = json.loads(check_json_import_value_dup.stdout)
+    except json.JSONDecodeError:
+        print("check_json_import_value_duplicate: expected JSON import value duplicate diagnostic")
+        print(check_json_import_value_dup.stdout)
+        return 1
+    import_value_dup_notes = check_json_import_value_dup_data[0].get("notes", []) if isinstance(check_json_import_value_dup_data, list) and check_json_import_value_dup_data else []
+    if (
+        check_json_import_value_dup.returncode == 0
+        or not isinstance(check_json_import_value_dup_data, list)
+        or not check_json_import_value_dup_data
+        or check_json_import_value_dup_data[0].get("category") != "semantic"
+        or check_json_import_value_dup_data[0].get("file") != str(check_json_import_value_dup_app)
+        or "duplicate global declaration 'shared_value'" not in check_json_import_value_dup_data[0].get("message", "")
+        or str(check_json_import_value_dup_mod) not in check_json_import_value_dup_data[0].get("message", "")
+        or not any("previous declaration imported through:" in note.get("message", "") for note in import_value_dup_notes if isinstance(note, dict))
+        or not any(check_json_import_value_dup_mid.name in note.get("message", "") for note in import_value_dup_notes if isinstance(note, dict))
+    ):
+        print("check_json_import_value_duplicate: expected structured import value duplicate diagnostic with previous import-chain note")
+        print(check_json_import_value_dup.stdout)
+        return 1
+    print("ok check_json_import_value_duplicate")
+
+    check_json_semantic_cases = (
+        (
+            "check_json_sizeof_arg_count",
+            r'''
+main:proc()->i32 = {
+    value:i32 = sizeof(1, 2);
+    return value;
+}
+''',
+            "sizeof expects exactly 1 argument",
+            "",
+        ),
+        (
+            "check_json_alignof_arg_count",
+            r'''
+main:proc()->i32 = {
+    value:i32 = alignof(1, 2);
+    return value;
+}
+''',
+            "alignof expects exactly 1 argument",
+            "",
+        ),
+        (
+            "check_json_undeclared_type",
+            r'''
+main:proc()->i32 = {
+    value:Missing = {};
+    return 0;
+}
+''',
+            "use of undeclared type 'Missing'",
+            "",
+        ),
+        (
+            "check_json_undeclared_generic_type",
+            r'''
+main:proc()->i32 = {
+    box:Box<i32> = {};
+    return 0;
+}
+''',
+            "use of undeclared generic type 'Box'",
+            "",
+        ),
+        (
+            "check_json_duplicate_global",
+            r'''
+value:i32 = 1;
+value:i32 = 2;
+
+main:proc()->i32 = {
+    return value;
+}
+''',
+            "duplicate global declaration 'value'",
+            "previous declaration here",
+        ),
+        (
+            "check_json_duplicate_type_alias",
+            r'''
+Payload:alias = i32;
+Payload:alias = i32;
+''',
+            "duplicate type alias 'Payload'",
+            "previous declaration here",
+        ),
+        (
+            "check_json_duplicate_struct",
+            r'''
+Payload:struct = {
+    value:i32;
+}
+
+Payload:struct = {
+    other:i32;
+}
+''',
+            "duplicate struct declaration 'Payload'",
+            "previous declaration here",
+        ),
+        (
+            "check_json_duplicate_enum",
+            r'''
+Kind:enum = {
+    Ready,
+}
+
+Kind:enum = {
+    Done,
+}
+''',
+            "duplicate enum declaration 'Kind'",
+            "previous declaration here",
+        ),
+        (
+            "check_json_generated_struct_reflect_collision",
+            r'''
+define("Payload_reflect")
+
+Payload:struct = {
+    value:i32;
+}
+''',
+            "duplicate generated global declaration 'Payload_reflect'",
+            "previous declaration here",
+        ),
+        (
+            "check_json_generated_enum_value_collision",
+            r'''
+define("Kind_Ready")
+
+Kind:enum = {
+    Ready,
+}
+''',
+            "duplicate generated global declaration 'Kind_Ready'",
+            "previous declaration here",
+        ),
+        (
+            "check_json_duplicate_proc_param",
+            r'''
+main:proc(value:i32, value:i32)->i32 = {
+    return value;
+}
+''',
+            "duplicate proc parameter 'value'",
+            "previous declaration here",
+        ),
+        (
+            "check_json_duplicate_local",
+            r'''
+main:proc()->i32 = {
+    value:i32 = 1;
+    value:i32 = 2;
+    return value;
+}
+''',
+            "duplicate local declaration 'value'",
+            "previous declaration here",
+        ),
+        (
+            "check_json_duplicate_field",
+            r'''
+Payload:struct = {
+    value:i32;
+    value:i32;
+}
+
+main:proc()->i32 = {
+    return 0;
+}
+''',
+            "duplicate field 'value'",
+            "previous declaration here",
+        ),
+        (
+            "check_json_duplicate_enum_item",
+            r'''
+Kind:enum = {
+    Ready,
+    Ready,
+}
+
+main:proc()->i32 = {
+    return 0;
+}
+''',
+            "duplicate enum item 'Ready'",
+            "previous declaration here",
+        ),
+        (
+            "check_json_duplicate_proc",
+            r'''
+value:proc()->i32 = {
+    return 1;
+}
+
+value:proc()->i32 = {
+    return 2;
+}
+''',
+            "duplicate proc declaration 'value'",
+            "previous declaration here",
+        ),
+        (
+            "check_json_control_flow",
+            r'''
+main:proc()->i32 = {
+    break;
+    return 0;
+}
+''',
+            "break outside loop or switch",
+            "",
+        ),
+        (
+            "check_json_generic_type_arity",
+            r'''
+Array:struct<T> = {
+    data:*T;
+}
+
+main:proc()->i32 = {
+    a:Array<i32, f32> = {};
+    return 0;
+}
+''',
+            "generic type 'Array' expects 1 type arg, got 2",
+            "struct 'Array' declared here",
+        ),
+        (
+            "check_json_nongeneric_type_arg",
+            r'''
+Payload:struct = {
+    value:i32;
+}
+
+main:proc()->i32 = {
+    payload:Payload<i32> = {};
+    return payload.value;
+}
+''',
+            "type 'Payload' is not generic; got 1 type arg",
+            "struct 'Payload' declared here",
+        ),
+    )
+    for case_name, source, message, note_message in check_json_semantic_cases:
+        case_i = TEST_DIR / f"{case_name}.i"
+        case_i.write_text(source.strip() + "\n", encoding="utf-8", newline="\n")
+        result = run([str(I_EXE), "--check", str(case_i), "--diagnostics=json"])
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            print(f"{case_name}: expected JSON semantic diagnostic")
+            print(result.stdout)
+            return 1
+        notes = data[0].get("notes", []) if isinstance(data, list) and data else []
+        if (
+            result.returncode == 0
+            or not isinstance(data, list)
+            or not data
+            or data[0].get("category") != "semantic"
+            or data[0].get("file") != str(case_i)
+            or message not in data[0].get("message", "")
+            or (note_message and not any(note_message in note.get("message", "") for note in notes if isinstance(note, dict)))
+        ):
+            print(f"{case_name}: expected structured semantic diagnostic")
+            print(result.stdout)
+            return 1
+        print(f"ok {case_name}")
+
     line_map_i = TEST_DIR / "generated_line_map.i"
     line_map_c = TEST_DIR / "generated_line_map.c"
     line_map_h = TEST_DIR / "generated_line_map.h"
@@ -557,6 +2089,12 @@ main:proc()->i32 = {
     line_map_generated = line_map_c.read_text(encoding="utf-8")
     return_line = line_map_source.splitlines().index("    return value;") + 1
     line_map_path = str(line_map_i).replace("\\", "\\\\")
+    line_map_comment_path = str(line_map_i)
+    expected_source_banner = f"/* Generated by I from {line_map_comment_path} (source). Do not edit. */\n"
+    if not line_map_generated.startswith(expected_source_banner):
+        print("generated_line_map: expected source banner with originating .i path")
+        print(f"missing: {expected_source_banner.strip()}")
+        return 1
     expected_line = f'#line {return_line} "{line_map_path}"'
     if expected_line not in line_map_generated:
         print("generated_line_map: expected statement #line directive")
@@ -566,12 +2104,31 @@ main:proc()->i32 = {
     if generated_reflect_marker not in line_map_generated:
         print("generated_line_map: expected reflection runtime to be marked as generated code")
         return 1
+    generated_struct_reflect_marker = '#line 1 "<generated>"\nstatic const i_reflect_field i_reflect_fields_Box_i32'
+    if generated_struct_reflect_marker not in line_map_generated:
+        print("generated_line_map: expected struct reflection metadata to be marked as generated code")
+        return 1
+    if "I monomorph: struct Box<T> -> Box_i32;" not in line_map_generated:
+        print("generated_line_map: expected monomorphized struct comment")
+        return 1
     if not line_map_h.exists():
         print("generated_line_map: expected generated header")
         return 1
     line_map_header = line_map_h.read_text(encoding="utf-8")
+    expected_header_banner = f"/* Generated by I from {line_map_comment_path} (header). Do not edit. */\n"
+    if not line_map_header.startswith(expected_header_banner):
+        print("generated_line_map: expected header banner with originating .i path")
+        print(f"missing: {expected_header_banner.strip()}")
+        return 1
     if generated_reflect_marker not in line_map_header:
         print("generated_line_map: expected header reflection runtime to be marked as generated code")
+        return 1
+    generated_reflect_extern_marker = '#line 1 "<generated>"\nextern const i_reflect_type Box_i32_reflect;'
+    if generated_reflect_extern_marker not in line_map_header:
+        print("generated_line_map: expected reflection externs to be marked as generated code")
+        return 1
+    if "I monomorph: struct Box<T> -> Box_i32;" not in line_map_header:
+        print("generated_line_map: expected header monomorphized struct comment")
         return 1
     proc_line = line_map_source.splitlines().index("Box<T>get:proc<T>(box:Box<T>)->T = {") + 1
     expected_proc_line = f'#line {proc_line} "{line_map_path}"'
@@ -579,7 +2136,58 @@ main:proc()->i32 = {
         print("generated_line_map: expected proc prototype #line directive in header")
         print(f"missing: {expected_proc_line}")
         return 1
+    mono_return_line = line_map_source.splitlines().index("    return box.value;") + 1
+    expected_mono_return_line = f'#line {mono_return_line} "{line_map_path}"'
+    if expected_mono_return_line not in line_map_generated:
+        print("generated_line_map: expected monomorphized proc body #line directive")
+        print(f"missing: {expected_mono_return_line}")
+        return 1
+    if (
+        "I monomorph: proc Box<T>get -> Box_i32_get;" not in line_map_generated
+        or "instantiated at" not in line_map_generated
+    ):
+        print("generated_line_map: expected monomorphized proc instantiation comment")
+        return 1
     print("ok generated_line_map")
+
+    line_map_mono_param_i = TEST_DIR / "generated_line_map_mono_param_error.i"
+    line_map_mono_param_c = TEST_DIR / "generated_line_map_mono_param_error.c"
+    line_map_mono_param_source = r'''
+bad_generic:proc<T>(
+    ok:T,
+    bad:MISSING_C_MONO_PARAM_TYPE
+)->i32 = { external_emit; }
+
+main:proc()->i32 = {
+    return bad_generic<i32>(1, cast(null, MISSING_C_MONO_PARAM_TYPE));
+}
+'''.strip() + "\n"
+    line_map_mono_param_i.write_text(line_map_mono_param_source, encoding="utf-8", newline="\n")
+    line_map_mono_param = run([str(I_EXE), str(line_map_mono_param_i), str(line_map_mono_param_c)])
+    if line_map_mono_param.returncode != 0:
+        print(line_map_mono_param.stdout)
+        return line_map_mono_param.returncode
+    line_map_mono_param_compile = run([
+        "clang.exe",
+        str(line_map_mono_param_c),
+        "-I",
+        "src",
+        "-I",
+        "src/runtime",
+        "-o",
+        str(TEST_DIR / "generated_line_map_mono_param_error.exe"),
+    ])
+    bad_mono_param_line = line_map_mono_param_source.splitlines().index("    bad:MISSING_C_MONO_PARAM_TYPE") + 1
+    if (
+        line_map_mono_param_compile.returncode == 0
+        or str(line_map_mono_param_i) not in line_map_mono_param_compile.stdout
+        or f":{bad_mono_param_line}:" not in line_map_mono_param_compile.stdout
+        or "MISSING_C_MONO_PARAM_TYPE" not in line_map_mono_param_compile.stdout
+    ):
+        print("generated_line_map_mono_param_error: expected clang diagnostic to map monomorphized generic param error back to exact .i parameter line")
+        print(line_map_mono_param_compile.stdout)
+        return 1
+    print("ok generated_line_map_mono_param_error")
 
     line_map_error_i = TEST_DIR / "generated_line_map_error.i"
     line_map_error_c = TEST_DIR / "generated_line_map_error.c"
@@ -693,6 +2301,50 @@ main:proc()->i32 = {
         return 1
     print("ok generated_line_map_field_error")
 
+    line_map_import_mod_i = TEST_DIR / "generated_line_map_import_mod.i"
+    line_map_import_app_i = TEST_DIR / "generated_line_map_import_app.i"
+    line_map_import_app_c = TEST_DIR / "generated_line_map_import_app.c"
+    line_map_import_mod_source = r'''
+ImportedPayload:struct = {
+    ok:i32;
+    bad:MISSING_IMPORTED_FIELD_TYPE;
+}
+'''.strip() + "\n"
+    line_map_import_app_source = f'''
+import "{line_map_import_mod_i.name}"
+
+main:proc()->i32 = {{
+    return 0;
+}}
+'''.strip() + "\n"
+    line_map_import_mod_i.write_text(line_map_import_mod_source, encoding="utf-8", newline="\n")
+    line_map_import_app_i.write_text(line_map_import_app_source, encoding="utf-8", newline="\n")
+    line_map_import = run([str(I_EXE), str(line_map_import_app_i), str(line_map_import_app_c)])
+    if line_map_import.returncode != 0:
+        print(line_map_import.stdout)
+        return line_map_import.returncode
+    line_map_import_compile = run([
+        "clang.exe",
+        str(line_map_import_app_c),
+        "-I",
+        "src",
+        "-I",
+        "src/runtime",
+        "-o",
+        str(TEST_DIR / "generated_line_map_import_app.exe"),
+    ])
+    imported_bad_field_line = line_map_import_mod_source.splitlines().index("    bad:MISSING_IMPORTED_FIELD_TYPE;") + 1
+    if (
+        line_map_import_compile.returncode == 0
+        or str(line_map_import_mod_i) not in line_map_import_compile.stdout
+        or f":{imported_bad_field_line}:" not in line_map_import_compile.stdout
+        or "MISSING_IMPORTED_FIELD_TYPE" not in line_map_import_compile.stdout
+    ):
+        print("generated_line_map_import_error: expected clang diagnostic to map imported generated C error back to imported .i line")
+        print(line_map_import_compile.stdout)
+        return 1
+    print("ok generated_line_map_import_error")
+
     module_i = TEST_DIR / "module.i"
     module_c = TEST_DIR / "module.c"
     module_h = TEST_DIR / "module.h"
@@ -754,7 +2406,11 @@ main:proc()->i32 = {
     diamond_app_i = TEST_DIR / "diamond_app.i"
     diamond_app_c = TEST_DIR / "diamond_app.c"
     diamond_app_exe = TEST_DIR / "diamond_app.exe"
+    diamond_shared_dot_path = f"{TEST_DIR.as_posix()}/./diamond_shared.i"
     diamond_shared_i.write_text(r'''
+cinclude "stdio.h"
+#define DIAMOND_SHARED_FLAG 1
+
 DiamondPayload:struct = {
     value:i32;
 }
@@ -764,6 +2420,8 @@ diamond_value:proc(p:DiamondPayload)->i32 = {
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     diamond_left_i.write_text(f'''
+cinclude "stdio.h"
+#define DIAMOND_SHARED_FLAG 1
 import "{diamond_shared_i.as_posix()}"
 
 diamond_left:proc(p:DiamondPayload)->i32 = {{
@@ -771,6 +2429,8 @@ diamond_left:proc(p:DiamondPayload)->i32 = {{
 }}
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     diamond_right_i.write_text(f'''
+cinclude "stdio.h"
+#define DIAMOND_SHARED_FLAG 1
 import "{diamond_shared_i.as_posix()}"
 
 diamond_right:proc(p:DiamondPayload)->i32 = {{
@@ -782,6 +2442,7 @@ cinclude "stdio.h"
 import "{diamond_left_i.as_posix()}"
 import "{diamond_right_i.as_posix()}"
 import "{diamond_shared_i.as_posix()}"
+import "{diamond_shared_dot_path}"
 
 main:proc()->i32 = {{
     p:DiamondPayload = {{.value = 5}};
@@ -797,6 +2458,9 @@ main:proc()->i32 = {{
     diamond_generated = diamond_app_c.read_text(encoding="utf-8")
     if diamond_generated.count("structdef(DiamondPayload)") != 1 or diamond_generated.count("i32 diamond_value(") != 2:
         print("module_diamond_import: expected shared module declarations to be emitted once")
+        return 1
+    if diamond_generated.count('#include "stdio.h"') != 1 or diamond_generated.count("#define DIAMOND_SHARED_FLAG 1") != 1:
+        print("module_diamond_import: expected duplicate imported cincludes and macros to be emitted once")
         return 1
     diamond_compile = run([
         "clang.exe",
@@ -817,6 +2481,61 @@ main:proc()->i32 = {{
     if diamond_program.returncode != 0 or diamond_program.stdout != "5 6 7\n":
         print("module_diamond_import: stdout mismatch")
         print(diamond_program.stdout)
+        return 1
+
+    diamond_rev_app_i = TEST_DIR / "diamond_rev_app.i"
+    diamond_rev_app_c = TEST_DIR / "diamond_rev_app.c"
+    diamond_rev_app_exe = TEST_DIR / "diamond_rev_app.exe"
+    diamond_rev_app_i.write_text(f'''
+cinclude "stdio.h"
+import "{diamond_right_i.as_posix()}"
+import "{diamond_left_i.as_posix()}"
+import "{diamond_shared_i.as_posix()}"
+
+main:proc()->i32 = {{
+    p:DiamondPayload = {{.value = 5}};
+    printf("%d %d %d\\n", diamond_value(p), diamond_right(p), diamond_left(p));
+    return 0;
+}}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+
+    diamond_rev = run([str(I_EXE), str(diamond_rev_app_i), str(diamond_rev_app_c)])
+    if diamond_rev.returncode != 0:
+        print(diamond_rev.stdout)
+        return diamond_rev.returncode
+    diamond_rev_generated = diamond_rev_app_c.read_text(encoding="utf-8")
+    if diamond_rev_generated.count("structdef(DiamondPayload)") != 1 or diamond_rev_generated.count("i32 diamond_value(") != 2:
+        print("module_diamond_import: reversed import order should still dedupe shared module")
+        return 1
+    if diamond_rev_generated.count('#include "stdio.h"') != 1 or diamond_rev_generated.count("#define DIAMOND_SHARED_FLAG 1") != 1:
+        print("module_diamond_import: reversed import order should still dedupe imported cincludes and macros")
+        return 1
+    payload_pos = diamond_rev_generated.find("structdef(DiamondPayload)")
+    right_pos = diamond_rev_generated.find("i32 diamond_right(")
+    left_pos = diamond_rev_generated.find("i32 diamond_left(")
+    main_pos = diamond_rev_generated.find("i32 main(")
+    if payload_pos < 0 or right_pos < 0 or left_pos < 0 or main_pos < 0 or not (payload_pos < right_pos < left_pos < main_pos):
+        print("module_diamond_import: expected deterministic dependency-first import order")
+        return 1
+    diamond_rev_compile = run([
+        "clang.exe",
+        str(diamond_rev_app_c),
+        "-I",
+        str(TEST_DIR),
+        "-I",
+        "src",
+        "-I",
+        "src/runtime",
+        "-o",
+        str(diamond_rev_app_exe),
+    ])
+    if diamond_rev_compile.returncode != 0:
+        print(diamond_rev_compile.stdout)
+        return diamond_rev_compile.returncode
+    diamond_rev_program = run([str(diamond_rev_app_exe)])
+    if diamond_rev_program.returncode != 0 or diamond_rev_program.stdout != "5 7 6\n":
+        print("module_diamond_import: reversed import stdout mismatch")
+        print(diamond_rev_program.stdout)
         return 1
     print("ok module_diamond_import")
 
@@ -889,6 +2608,43 @@ main:proc()->i32 = {
 
     print("ok native_monomorph")
 
+    native_json_dir = TEST_DIR / "native_monomorph_json_out"
+    if native_json_dir.exists():
+        shutil.rmtree(native_json_dir)
+    native_json_dir.mkdir(parents=True)
+    native_json_i = TEST_DIR / "native_monomorph_json.i"
+    native_json_c = native_json_dir / "native_monomorph_json.c"
+    native_json_blocker = native_json_dir / "Array_i32.h"
+    native_json_i.write_text(r'''
+import "C:/devel/i/src/runtime/containers.i"
+
+main:proc()->i32 = {
+    arena:memops_arena = {};
+    values:Array<i32> = Array<i32>reserve(arena.&, 1);
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    native_json_blocker.mkdir()
+    native_json = run([str(I_EXE), str(native_json_i), str(native_json_c), "--diagnostics=json"])
+    try:
+        native_json_data = json.loads(native_json.stdout)
+    except json.JSONDecodeError:
+        print("check_json_native_monomorph_write: expected JSON I/O diagnostic")
+        print(native_json.stdout)
+        return 1
+    if (
+        native_json.returncode == 0
+        or not isinstance(native_json_data, list)
+        or not native_json_data
+        or native_json_data[0].get("category") != "io"
+        or native_json_data[0].get("file") != str(native_json_blocker)
+        or "failed to write" not in native_json_data[0].get("message", "")
+    ):
+        print("check_json_native_monomorph_write: expected structured native monomorph write diagnostic")
+        print(native_json.stdout)
+        return 1
+    print("ok check_json_native_monomorph_write")
+
     missing_i = TEST_DIR / "missing_decl.i"
     missing_c = TEST_DIR / "missing_decl.c"
     missing_i.write_text(r'''
@@ -897,7 +2653,13 @@ main:proc()->i32 = {
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     missing = run([str(I_EXE), str(missing_i), str(missing_c)])
-    if missing.returncode == 0 or "use of undeclared identifier 'missing_symbol'" not in missing.stdout:
+    if (
+        missing.returncode == 0
+        or "use of undeclared identifier 'missing_symbol'" not in missing.stdout
+        or "    return missing_symbol;" not in missing.stdout
+        or "           ^" not in missing.stdout
+        or "^~~~~~~~~~~~~~" not in missing.stdout
+    ):
         print("missing_decl: expected undeclared identifier diagnostic")
         print(missing.stdout)
         return 1
@@ -915,6 +2677,30 @@ main:proc()->i32 = {
         return 1
     print("ok import_cycle")
 
+    missing_import_i = TEST_DIR / "missing_import.i"
+    missing_import_c = TEST_DIR / "missing_import.c"
+    missing_import_i.write_text(r'''
+import "missing_import_dep.i"
+
+main:proc()->i32 = {
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    missing_import = run([str(I_EXE), str(missing_import_i), str(missing_import_c)])
+    if (
+        missing_import.returncode == 0
+        or "semantic error: failed to read import" not in missing_import.stdout
+        or "missing_import_dep.i" not in missing_import.stdout
+        or "note: imported through:" not in missing_import.stdout
+        or str(missing_import_i) not in missing_import.stdout
+        or 'import "missing_import_dep.i"' not in missing_import.stdout
+        or "^" not in missing_import.stdout
+    ):
+        print("missing_import: expected failed import diagnostic to include import chain")
+        print(missing_import.stdout)
+        return 1
+    print("ok missing_import")
+
     parse_error_i = TEST_DIR / "parse_expected_actual.i"
     parse_error_c = TEST_DIR / "parse_expected_actual.c"
     parse_error_i.write_text(r'''
@@ -928,11 +2714,72 @@ Bad:struct = {
         or "expected ':' after field name" not in parse_error.stdout
         or "expected ':'" not in parse_error.stdout
         or "got identifier `i32`" not in parse_error.stdout
+        or "    value i32;" not in parse_error.stdout
+        or "          ^" not in parse_error.stdout
+        or "^~~" not in parse_error.stdout
     ):
         print("parse_expected_actual: expected rich parser diagnostic")
         print(parse_error.stdout)
         return 1
     print("ok parse_expected_actual")
+
+    import_parse_bad_i = TEST_DIR / "import_parse_bad.i"
+    import_parse_app_i = TEST_DIR / "import_parse_app.i"
+    import_parse_app_c = TEST_DIR / "import_parse_app.c"
+    import_parse_bad_i.write_text(r'''
+Bad:struct = {
+    value i32;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    import_parse_app_i.write_text(r'''
+import "import_parse_bad.i"
+
+main:proc()->i32 = {
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    import_parse = run([str(I_EXE), str(import_parse_app_i), str(import_parse_app_c)])
+    if (
+        import_parse.returncode == 0
+        or str(import_parse_bad_i) not in import_parse.stdout
+        or "expected ':' after field name" not in import_parse.stdout
+        or "note: imported through:" not in import_parse.stdout
+        or str(import_parse_app_i) not in import_parse.stdout
+        or "import_parse_bad.i" not in import_parse.stdout
+    ):
+        print("import_parse_diagnostic: expected imported parse error to include import chain")
+        print(import_parse.stdout)
+        return 1
+    print("ok import_parse_diagnostic")
+
+    import_c_header_bad_i = TEST_DIR / "import_c_header_bad.i"
+    import_c_header_app_i = TEST_DIR / "import_c_header_app.i"
+    import_c_header_app_c = TEST_DIR / "import_c_header_app.c"
+    import_c_header_bad_i.write_text(r'''
+import "stdio.h"
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    import_c_header_app_i.write_text(r'''
+import "import_c_header_bad.i"
+
+main:proc()->i32 = {
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    import_c_header = run([str(I_EXE), str(import_c_header_app_i), str(import_c_header_app_c)])
+    if (
+        import_c_header.returncode == 0
+        or str(import_c_header_bad_i) not in import_c_header.stdout
+        or "parse error: import expects an .i module; use cinclude for C headers" not in import_c_header.stdout
+        or 'got string `"stdio.h"`' not in import_c_header.stdout
+        or '    import "stdio.h"' not in import_c_header.stdout
+        or "           ^" not in import_c_header.stdout
+        or "note: imported through:" not in import_c_header.stdout
+        or str(import_c_header_app_i) not in import_c_header.stdout
+    ):
+        print("import_c_header_diagnostic: expected imported C-header import error to include token context and import chain")
+        print(import_c_header.stdout)
+        return 1
+    print("ok import_c_header_diagnostic")
 
     parse_expected_expr_i = TEST_DIR / "parse_expected_expression.i"
     parse_expected_expr_c = TEST_DIR / "parse_expected_expression.c"
@@ -947,11 +2794,32 @@ main:proc()->i32 = {
         parse_expected_expr.returncode == 0
         or "parse error: expected expression" not in parse_expected_expr.stdout
         or "got ';' `;`" not in parse_expected_expr.stdout
+        or "    value:i32 = ;" not in parse_expected_expr.stdout
+        or "                ^" not in parse_expected_expr.stdout
     ):
         print("parse_expected_expression: expected expression diagnostic with actual token")
         print(parse_expected_expr.stdout)
         return 1
     print("ok parse_expected_expression")
+
+    parse_eof_context_i = TEST_DIR / "parse_eof_context.i"
+    parse_eof_context_c = TEST_DIR / "parse_eof_context.c"
+    parse_eof_context_i.write_text(r'''
+main:proc()->i32 = {
+    return 0;
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    parse_eof_context = run([str(I_EXE), str(parse_eof_context_i), str(parse_eof_context_c)])
+    if (
+        parse_eof_context.returncode == 0
+        or "parse error:" not in parse_eof_context.stdout
+        or "got end of file" not in parse_eof_context.stdout
+        or "    return 0;" not in parse_eof_context.stdout
+        or "^" not in parse_eof_context.stdout
+    ):
+        print("parse_eof_context: expected EOF diagnostic to point at last source line")
+        print(parse_eof_context.stdout)
+        return 1
+    print("ok parse_eof_context")
 
     parse_unexpected_stmt_i = TEST_DIR / "parse_unexpected_statement.i"
     parse_unexpected_stmt_c = TEST_DIR / "parse_unexpected_statement.c"
@@ -964,8 +2832,10 @@ main:proc()->i32 = {
     parse_unexpected_stmt = run([str(I_EXE), str(parse_unexpected_stmt_i), str(parse_unexpected_stmt_c)])
     if (
         parse_unexpected_stmt.returncode == 0
-        or "parse error: unexpected token" not in parse_unexpected_stmt.stdout
+        or "parse error: expected statement: local declaration, assignment, expression, if, for, while, do, switch, break, continue, or return" not in parse_unexpected_stmt.stdout
         or "got 'case' `case`" not in parse_unexpected_stmt.stdout
+        or "    case 1:" not in parse_unexpected_stmt.stdout
+        or "    ^" not in parse_unexpected_stmt.stdout
     ):
         print("parse_unexpected_statement: expected unexpected statement token diagnostic")
         print(parse_unexpected_stmt.stdout)
@@ -1364,6 +3234,7 @@ main:proc()->i32 = {
         generic_proc_extra_type_arg.returncode == 0
         or str(generic_proc_extra_type_arg_i) not in generic_proc_extra_type_arg.stdout
         or "type error: generic proc 'identity' expects 1 type arg, got 2" not in generic_proc_extra_type_arg.stdout
+        or generic_proc_extra_type_arg.stdout.count("    return identity<i32, f32>(1);") != 1
         or f"{generic_proc_extra_type_arg_i}:1:1: note: proc 'identity' declared here" not in generic_proc_extra_type_arg.stdout
     ):
         print("generic_proc_extra_type_arg: expected generic proc type arg arity diagnostic")
@@ -1422,6 +3293,36 @@ main:proc()->i32 = {
         return 1
     print("ok import_generic_proc_type_arg")
 
+    generic_proc_arg_mismatch_i = TEST_DIR / "generic_proc_arg_mismatch.i"
+    generic_proc_arg_mismatch_c = TEST_DIR / "generic_proc_arg_mismatch.c"
+    generic_proc_arg_mismatch_i.write_text(r'''
+Payload:struct = {
+    value:i32;
+}
+
+identity:proc<T>(value:T, other:T)->T = {
+    return value;
+}
+
+main:proc()->i32 = {
+    payload:Payload = {};
+    return identity<i32>(1, payload);
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    generic_proc_arg_mismatch = run([str(I_EXE), str(generic_proc_arg_mismatch_i), str(generic_proc_arg_mismatch_c)])
+    if (
+        generic_proc_arg_mismatch.returncode == 0
+        or str(generic_proc_arg_mismatch_i) not in generic_proc_arg_mismatch.stdout
+        or "type error: proc 'identity' argument 2 'other' expected 'i32', got 'Payload'" not in generic_proc_arg_mismatch.stdout
+        or "note: generic 'identity' instantiated here with type 'i32'" not in generic_proc_arg_mismatch.stdout
+        or f"{generic_proc_arg_mismatch_i}:5:1: note: proc 'identity' declared here" not in generic_proc_arg_mismatch.stdout
+        or "    return identity<i32>(1, payload);" not in generic_proc_arg_mismatch.stdout
+    ):
+        print("generic_proc_arg_mismatch: expected concrete generic argument mismatch diagnostic")
+        print(generic_proc_arg_mismatch.stdout)
+        return 1
+    print("ok generic_proc_arg_mismatch")
+
     type_pointer_i = TEST_DIR / "type_pointer_value.i"
     type_pointer_c = TEST_DIR / "type_pointer_value.c"
     type_pointer_i.write_text(r'''
@@ -1432,7 +3333,13 @@ main:proc()->i32 = {
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     type_pointer = run([str(I_EXE), str(type_pointer_i), str(type_pointer_c)])
-    if type_pointer.returncode == 0 or "type error: initializer expected 'ptr_i32', got 'i32'" not in type_pointer.stdout:
+    if (
+        type_pointer.returncode == 0
+        or "type error: initializer expected 'ptr_i32', got 'i32'" not in type_pointer.stdout
+        or "note: expected a pointer; use '.&' to take the value address" not in type_pointer.stdout
+        or "    p:*i32 = x;" not in type_pointer.stdout
+        or "    ^" not in type_pointer.stdout
+    ):
         print("type_pointer_value: expected pointer/value type diagnostic")
         print(type_pointer.stdout)
         return 1
@@ -1448,7 +3355,11 @@ main:proc()->i32 = {
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     type_array_elem = run([str(I_EXE), str(type_array_elem_i), str(type_array_elem_c)])
-    if type_array_elem.returncode == 0 or "type error: initializer expected 'ptr_i32', got 'i32'" not in type_array_elem.stdout:
+    if (
+        type_array_elem.returncode == 0
+        or "type error: initializer expected 'ptr_i32', got 'i32'" not in type_array_elem.stdout
+        or "note: expected a pointer; use '.&' to take the value address" not in type_array_elem.stdout
+    ):
         print("type_array_element_inference: expected fixed-array element type diagnostic")
         print(type_array_elem.stdout)
         return 1
@@ -1606,6 +3517,236 @@ main:proc()->i32 = {
         return 1
     print("ok type_enum_int_cast")
 
+    type_enum_float_assign_i = TEST_DIR / "type_enum_float_assignment.i"
+    type_enum_float_assign_c = TEST_DIR / "type_enum_float_assignment.c"
+    type_enum_float_assign_i.write_text(r'''
+Kind:enum = {
+    None,
+    Ready,
+}
+
+main:proc()->i32 = {
+    kind:Kind = Kind_Ready;
+    value:f32 = kind;
+    return cast(value, i32);
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_enum_float_assign = run([str(I_EXE), str(type_enum_float_assign_i), str(type_enum_float_assign_c)])
+    if (
+        type_enum_float_assign.returncode == 0
+        or "type error: initializer expected 'f32', got 'Kind'" not in type_enum_float_assign.stdout
+        or "    value:f32 = kind;" not in type_enum_float_assign.stdout
+        or "^" not in type_enum_float_assign.stdout
+    ):
+        print("type_enum_float_assignment: expected implicit enum-to-float assignment diagnostic")
+        print(type_enum_float_assign.stdout)
+        return 1
+    print("ok type_enum_float_assignment")
+
+    type_enum_float_cast_i = TEST_DIR / "type_enum_float_cast.i"
+    type_enum_float_cast_c = TEST_DIR / "type_enum_float_cast.c"
+    type_enum_float_cast_i.write_text(r'''
+Kind:enum = {
+    None,
+    Ready,
+}
+
+main:proc()->i32 = {
+    kind:Kind = Kind_Ready;
+    value:f32 = cast(kind, f32);
+    return cast(value, i32);
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_enum_float_cast = run([str(I_EXE), str(type_enum_float_cast_i), str(type_enum_float_cast_c)])
+    if type_enum_float_cast.returncode != 0:
+        print("type_enum_float_cast: expected explicit enum-to-float cast to type-check")
+        print(type_enum_float_cast.stdout)
+        return 1
+    print("ok type_enum_float_cast")
+
+    type_cast_bad_i = TEST_DIR / "type_invalid_aggregate_cast.i"
+    type_cast_bad_c = TEST_DIR / "type_invalid_aggregate_cast.c"
+    type_cast_bad_i.write_text(r'''
+Payload:struct = {
+    value:i32;
+}
+
+main:proc()->i32 = {
+    payload:Payload = {};
+    return cast(payload, i32);
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_cast_bad = run([str(I_EXE), str(type_cast_bad_i), str(type_cast_bad_c)])
+    if (
+        type_cast_bad.returncode == 0
+        or "type error: cannot cast 'Payload' to 'i32'" not in type_cast_bad.stdout
+        or "    return cast(payload, i32);" not in type_cast_bad.stdout
+        or "^" not in type_cast_bad.stdout
+    ):
+        print("type_invalid_aggregate_cast: expected invalid aggregate cast diagnostic")
+        print(type_cast_bad.stdout)
+        return 1
+    print("ok type_invalid_aggregate_cast")
+
+    type_cast_pointer_int_i = TEST_DIR / "type_pointer_integer_cast.i"
+    type_cast_pointer_int_c = TEST_DIR / "type_pointer_integer_cast.c"
+    type_cast_pointer_int_i.write_text(r'''
+main:proc(p:*i32)->i32 = {
+    bits:usize = cast(p, usize);
+    q:*i32 = cast(bits, *i32);
+    return q[0];
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_cast_pointer_int = run([str(I_EXE), str(type_cast_pointer_int_i), str(type_cast_pointer_int_c)])
+    if type_cast_pointer_int.returncode != 0:
+        print("type_pointer_integer_cast: expected pointer/integer casts to type-check")
+        print(type_cast_pointer_int.stdout)
+        return 1
+    print("ok type_pointer_integer_cast")
+
+    type_cast_pointer_float_i = TEST_DIR / "type_pointer_float_cast.i"
+    type_cast_pointer_float_c = TEST_DIR / "type_pointer_float_cast.c"
+    type_cast_pointer_float_i.write_text(r'''
+main:proc(p:*i32)->i32 = {
+    value:f32 = cast(p, f32);
+    return cast(value, i32);
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_cast_pointer_float = run([str(I_EXE), str(type_cast_pointer_float_i), str(type_cast_pointer_float_c)])
+    if (
+        type_cast_pointer_float.returncode == 0
+        or "type error: cannot cast 'ptr_i32' to 'f32'" not in type_cast_pointer_float.stdout
+        or "    value:f32 = cast(p, f32);" not in type_cast_pointer_float.stdout
+        or "^" not in type_cast_pointer_float.stdout
+    ):
+        print("type_pointer_float_cast: expected pointer-to-float cast diagnostic")
+        print(type_cast_pointer_float.stdout)
+        return 1
+    print("ok type_pointer_float_cast")
+
+    type_cast_float_pointer_i = TEST_DIR / "type_float_pointer_cast.i"
+    type_cast_float_pointer_c = TEST_DIR / "type_float_pointer_cast.c"
+    type_cast_float_pointer_i.write_text(r'''
+main:proc()->i32 = {
+    p:*i32 = cast(1.0f, *i32);
+    return p[0];
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_cast_float_pointer = run([str(I_EXE), str(type_cast_float_pointer_i), str(type_cast_float_pointer_c)])
+    if (
+        type_cast_float_pointer.returncode == 0
+        or "type error: cannot cast 'f32' to 'ptr_i32'" not in type_cast_float_pointer.stdout
+        or "    p:*i32 = cast(1.0f, *i32);" not in type_cast_float_pointer.stdout
+        or "^" not in type_cast_float_pointer.stdout
+    ):
+        print("type_float_pointer_cast: expected float-to-pointer cast diagnostic")
+        print(type_cast_float_pointer.stdout)
+        return 1
+    print("ok type_float_pointer_cast")
+
+    type_cast_array_pointer_i = TEST_DIR / "type_array_pointer_cast.i"
+    type_cast_array_pointer_c = TEST_DIR / "type_array_pointer_cast.c"
+    type_cast_array_pointer_i.write_text(r'''
+main:proc()->i32 = {
+    values:[4]i32 = {};
+    p:*i32 = cast(values, *i32);
+    return p[0];
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_cast_array_pointer = run([str(I_EXE), str(type_cast_array_pointer_i), str(type_cast_array_pointer_c)])
+    if type_cast_array_pointer.returncode != 0:
+        print("type_array_pointer_cast: expected fixed-array to pointer cast to type-check")
+        print(type_cast_array_pointer.stdout)
+        return 1
+    print("ok type_array_pointer_cast")
+
+    type_cast_array_int_i = TEST_DIR / "type_array_integer_cast.i"
+    type_cast_array_int_c = TEST_DIR / "type_array_integer_cast.c"
+    type_cast_array_int_i.write_text(r'''
+main:proc()->i32 = {
+    values:[4]i32 = {};
+    return cast(values, i32);
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_cast_array_int = run([str(I_EXE), str(type_cast_array_int_i), str(type_cast_array_int_c)])
+    if (
+        type_cast_array_int.returncode == 0
+        or "type error: cannot cast 'array_4_i32' to 'i32'" not in type_cast_array_int.stdout
+        or "    return cast(values, i32);" not in type_cast_array_int.stdout
+        or "^" not in type_cast_array_int.stdout
+    ):
+        print("type_array_integer_cast: expected fixed-array to integer cast diagnostic")
+        print(type_cast_array_int.stdout)
+        return 1
+    print("ok type_array_integer_cast")
+
+    type_cast_pointer_array_i = TEST_DIR / "type_pointer_array_cast.i"
+    type_cast_pointer_array_c = TEST_DIR / "type_pointer_array_cast.c"
+    type_cast_pointer_array_i.write_text(r'''
+main:proc(p:*i32)->i32 = {
+    values:[4]i32 = cast(p, [4]i32);
+    return values[0];
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_cast_pointer_array = run([str(I_EXE), str(type_cast_pointer_array_i), str(type_cast_pointer_array_c)])
+    if (
+        type_cast_pointer_array.returncode == 0
+        or "type error: cannot cast 'ptr_i32' to 'array_4_i32'" not in type_cast_pointer_array.stdout
+        or "    values:[4]i32 = cast(p, [4]i32);" not in type_cast_pointer_array.stdout
+        or "^" not in type_cast_pointer_array.stdout
+    ):
+        print("type_pointer_array_cast: expected pointer to fixed-array cast diagnostic")
+        print(type_cast_pointer_array.stdout)
+        return 1
+    print("ok type_pointer_array_cast")
+
+    type_proc_ptr_cast_i = TEST_DIR / "type_proc_pointer_cast_mismatch.i"
+    type_proc_ptr_cast_c = TEST_DIR / "type_proc_pointer_cast_mismatch.c"
+    type_proc_ptr_cast_i.write_text(r'''
+Callback:alias = *proc(x:*i32)->i32;
+
+good_cb:proc(x:i32)->i32 = {
+    return x;
+}
+
+main:proc()->i32 = {
+    cb:Callback = cast(good_cb, Callback);
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_proc_ptr_cast = run([str(I_EXE), str(type_proc_ptr_cast_i), str(type_proc_ptr_cast_c)])
+    if (
+        type_proc_ptr_cast.returncode == 0
+        or "type error: cannot cast 'ptr_proc_i32_i32' to 'ptr_proc_i32_ptr_i32'" not in type_proc_ptr_cast.stdout
+        or "note: expected proc signature: (arg0:ptr_i32)->i32" not in type_proc_ptr_cast.stdout
+        or "note: actual proc signature: (arg0:i32)->i32" not in type_proc_ptr_cast.stdout
+        or "    cb:Callback = cast(good_cb, Callback);" not in type_proc_ptr_cast.stdout
+    ):
+        print("type_proc_pointer_cast_mismatch: expected invalid proc pointer cast diagnostic")
+        print(type_proc_ptr_cast.stdout)
+        return 1
+    print("ok type_proc_pointer_cast_mismatch")
+
+    type_proc_ptr_opaque_cast_i = TEST_DIR / "type_proc_pointer_opaque_cast.i"
+    type_proc_ptr_opaque_cast_c = TEST_DIR / "type_proc_pointer_opaque_cast.c"
+    type_proc_ptr_opaque_cast_i.write_text(r'''
+FARPROC:alias = proc()->void;
+Callback:alias = proc(x:i32)->i32;
+
+get_proc:proc()->FARPROC = { external; }
+
+main:proc()->i32 = {
+    cb:Callback = cast(get_proc(), Callback);
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_proc_ptr_opaque_cast = run([str(I_EXE), str(type_proc_ptr_opaque_cast_i), str(type_proc_ptr_opaque_cast_c)])
+    if type_proc_ptr_opaque_cast.returncode != 0:
+        print("type_proc_pointer_opaque_cast: expected FARPROC-style opaque callback cast to type-check")
+        print(type_proc_ptr_opaque_cast.stdout)
+        return 1
+    print("ok type_proc_pointer_opaque_cast")
+
     type_enum_assign_i = TEST_DIR / "type_enum_int_assignment.i"
     type_enum_assign_c = TEST_DIR / "type_enum_int_assignment.c"
     type_enum_assign_i.write_text(r'''
@@ -1625,6 +3766,62 @@ main:proc()->i32 = {
         print(type_enum_assign.stdout)
         return 1
     print("ok type_enum_int_assignment")
+
+    type_enum_binary_mismatch_i = TEST_DIR / "type_enum_binary_mismatch.i"
+    type_enum_binary_mismatch_c = TEST_DIR / "type_enum_binary_mismatch.c"
+    type_enum_binary_mismatch_i.write_text(r'''
+Kind:enum = {
+    None,
+    Ready,
+}
+
+Other:enum = {
+    Bad,
+}
+
+main:proc()->i32 = {
+    return Kind_Ready < Other_Bad;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_enum_binary_mismatch = run([str(I_EXE), str(type_enum_binary_mismatch_i), str(type_enum_binary_mismatch_c)])
+    if (
+        type_enum_binary_mismatch.returncode == 0
+        or "type error: operator '<' cannot be applied to 'Kind' and 'Other'" not in type_enum_binary_mismatch.stdout
+        or "    return Kind_Ready < Other_Bad;" not in type_enum_binary_mismatch.stdout
+        or "^" not in type_enum_binary_mismatch.stdout
+    ):
+        print("type_enum_binary_mismatch: expected enum relational mismatch diagnostic")
+        print(type_enum_binary_mismatch.stdout)
+        return 1
+    print("ok type_enum_binary_mismatch")
+
+    type_enum_arithmetic_mismatch_i = TEST_DIR / "type_enum_arithmetic_mismatch.i"
+    type_enum_arithmetic_mismatch_c = TEST_DIR / "type_enum_arithmetic_mismatch.c"
+    type_enum_arithmetic_mismatch_i.write_text(r'''
+Kind:enum = {
+    None,
+    Ready,
+}
+
+Other:enum = {
+    Bad,
+}
+
+main:proc()->i32 = {
+    return Kind_Ready + Other_Bad;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_enum_arithmetic_mismatch = run([str(I_EXE), str(type_enum_arithmetic_mismatch_i), str(type_enum_arithmetic_mismatch_c)])
+    if (
+        type_enum_arithmetic_mismatch.returncode == 0
+        or "type error: operator '+' cannot be applied to 'Kind' and 'Other'" not in type_enum_arithmetic_mismatch.stdout
+        or "    return Kind_Ready + Other_Bad;" not in type_enum_arithmetic_mismatch.stdout
+        or "^" not in type_enum_arithmetic_mismatch.stdout
+    ):
+        print("type_enum_arithmetic_mismatch: expected enum arithmetic mismatch diagnostic")
+        print(type_enum_arithmetic_mismatch.stdout)
+        return 1
+    print("ok type_enum_arithmetic_mismatch")
 
     type_binary_pointer_i = TEST_DIR / "type_binary_pointer_arithmetic.i"
     type_binary_pointer_c = TEST_DIR / "type_binary_pointer_arithmetic.c"
@@ -1646,6 +3843,88 @@ main:proc()->i32 = {
         return 1
     print("ok type_binary_pointer_arithmetic")
 
+    type_binary_pointer_mismatch_i = TEST_DIR / "type_binary_pointer_subtraction_mismatch.i"
+    type_binary_pointer_mismatch_c = TEST_DIR / "type_binary_pointer_subtraction_mismatch.c"
+    type_binary_pointer_mismatch_i.write_text(r'''
+main:proc()->i32 = {
+    ints:[2]i32 = {};
+    floats:[2]f32 = {};
+    p:*i32 = ints;
+    q:*f32 = floats;
+    delta:long = p - q;
+    return cast(delta, i32);
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_binary_pointer_mismatch = run([str(I_EXE), str(type_binary_pointer_mismatch_i), str(type_binary_pointer_mismatch_c)])
+    if (
+        type_binary_pointer_mismatch.returncode == 0
+        or "type error: operator '-' cannot be applied to 'ptr_i32' and 'ptr_f32'" not in type_binary_pointer_mismatch.stdout
+        or "    delta:long = p - q;" not in type_binary_pointer_mismatch.stdout
+        or "^" not in type_binary_pointer_mismatch.stdout
+    ):
+        print("type_binary_pointer_subtraction_mismatch: expected pointer element mismatch diagnostic")
+        print(type_binary_pointer_mismatch.stdout)
+        return 1
+    print("ok type_binary_pointer_subtraction_mismatch")
+
+    type_binary_pointer_const_i = TEST_DIR / "type_binary_pointer_subtraction_const.i"
+    type_binary_pointer_const_c = TEST_DIR / "type_binary_pointer_subtraction_const.c"
+    type_binary_pointer_const_i.write_text(r'''
+main:proc()->i32 = {
+    values:[2]i32 = {};
+    p:*const i32 = values;
+    q:*i32 = values;
+    delta:long = p - q;
+    return cast(delta, i32);
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_binary_pointer_const = run([str(I_EXE), str(type_binary_pointer_const_i), str(type_binary_pointer_const_c)])
+    if type_binary_pointer_const.returncode != 0:
+        print("type_binary_pointer_subtraction_const: expected const-compatible pointer subtraction to type-check")
+        print(type_binary_pointer_const.stdout)
+        return 1
+    print("ok type_binary_pointer_subtraction_const")
+
+    type_binary_pointer_compare_const_i = TEST_DIR / "type_binary_pointer_comparison_const.i"
+    type_binary_pointer_compare_const_c = TEST_DIR / "type_binary_pointer_comparison_const.c"
+    type_binary_pointer_compare_const_i.write_text(r'''
+main:proc()->i32 = {
+    values:[2]i32 = {};
+    p:*const i32 = values;
+    q:*i32 = values;
+    return p <= q;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_binary_pointer_compare_const = run([str(I_EXE), str(type_binary_pointer_compare_const_i), str(type_binary_pointer_compare_const_c)])
+    if type_binary_pointer_compare_const.returncode != 0:
+        print("type_binary_pointer_comparison_const: expected const-compatible pointer comparison to type-check")
+        print(type_binary_pointer_compare_const.stdout)
+        return 1
+    print("ok type_binary_pointer_comparison_const")
+
+    type_binary_pointer_compare_mismatch_i = TEST_DIR / "type_binary_pointer_comparison_mismatch.i"
+    type_binary_pointer_compare_mismatch_c = TEST_DIR / "type_binary_pointer_comparison_mismatch.c"
+    type_binary_pointer_compare_mismatch_i.write_text(r'''
+main:proc()->i32 = {
+    ints:[2]i32 = {};
+    floats:[2]f32 = {};
+    p:*i32 = ints;
+    q:*f32 = floats;
+    return p < q;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_binary_pointer_compare_mismatch = run([str(I_EXE), str(type_binary_pointer_compare_mismatch_i), str(type_binary_pointer_compare_mismatch_c)])
+    if (
+        type_binary_pointer_compare_mismatch.returncode == 0
+        or "type error: operator '<' cannot be applied to 'ptr_i32' and 'ptr_f32'" not in type_binary_pointer_compare_mismatch.stdout
+        or "    return p < q;" not in type_binary_pointer_compare_mismatch.stdout
+        or "^" not in type_binary_pointer_compare_mismatch.stdout
+    ):
+        print("type_binary_pointer_comparison_mismatch: expected pointer element mismatch diagnostic")
+        print(type_binary_pointer_compare_mismatch.stdout)
+        return 1
+    print("ok type_binary_pointer_comparison_mismatch")
+
     type_binary_bad_i = TEST_DIR / "type_binary_bad_operands.i"
     type_binary_bad_c = TEST_DIR / "type_binary_bad_operands.c"
     type_binary_bad_i.write_text(r'''
@@ -1662,6 +3941,8 @@ main:proc()->i32 = {
     if (
         type_binary_bad.returncode == 0
         or "type error: operator '+' cannot be applied to 'Payload' and 'i32'" not in type_binary_bad.stdout
+        or "    return payload + 1;" not in type_binary_bad.stdout
+        or "^" not in type_binary_bad.stdout
     ):
         print("type_binary_bad_operands: expected invalid binary operand diagnostic")
         print(type_binary_bad.stdout)
@@ -1713,7 +3994,9 @@ main:proc()->i32 = {
     type_compound_bitwise_float = run([str(I_EXE), str(type_compound_bitwise_float_i), str(type_compound_bitwise_float_c)])
     if (
         type_compound_bitwise_float.returncode == 0
-        or "type error: assignment expected 'f32', got 'f32'" not in type_compound_bitwise_float.stdout
+        or "type error: operator '&=' cannot be applied to 'f32' and 'f32'" not in type_compound_bitwise_float.stdout
+        or "    value &= 1.0;" not in type_compound_bitwise_float.stdout
+        or "^" not in type_compound_bitwise_float.stdout
     ):
         print("type_compound_bitwise_float: expected float bitwise compound assignment diagnostic")
         print(type_compound_bitwise_float.stdout)
@@ -1736,6 +4019,97 @@ main:proc()->i32 = {
         print(type_compound_modulo_int.stdout)
         return 1
     print("ok type_compound_modulo_int")
+
+    type_compound_enum_i = TEST_DIR / "type_compound_enum.i"
+    type_compound_enum_c = TEST_DIR / "type_compound_enum.c"
+    type_compound_enum_i.write_text(r'''
+Flags:enum = {
+    A = 1,
+    B = 2,
+}
+
+main:proc()->i32 = {
+    flags:Flags = Flags_A;
+    flags |= Flags_B;
+    flags &= Flags_A;
+    return flags;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_compound_enum = run([str(I_EXE), str(type_compound_enum_i), str(type_compound_enum_c)])
+    if type_compound_enum.returncode != 0:
+        print("type_compound_enum: expected same-enum compound bitwise assignment to type-check")
+        print(type_compound_enum.stdout)
+        return 1
+    print("ok type_compound_enum")
+
+    type_compound_enum_mismatch_i = TEST_DIR / "type_compound_enum_mismatch.i"
+    type_compound_enum_mismatch_c = TEST_DIR / "type_compound_enum_mismatch.c"
+    type_compound_enum_mismatch_i.write_text(r'''
+Flags:enum = {
+    A = 1,
+}
+
+Other:enum = {
+    B = 2,
+}
+
+main:proc()->i32 = {
+    flags:Flags = Flags_A;
+    flags |= Other_B;
+    return flags;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_compound_enum_mismatch = run([str(I_EXE), str(type_compound_enum_mismatch_i), str(type_compound_enum_mismatch_c)])
+    if (
+        type_compound_enum_mismatch.returncode == 0
+        or "type error: operator '|=' cannot be applied to 'Flags' and 'Other'" not in type_compound_enum_mismatch.stdout
+        or "    flags |= Other_B;" not in type_compound_enum_mismatch.stdout
+        or "^" not in type_compound_enum_mismatch.stdout
+    ):
+        print("type_compound_enum_mismatch: expected enum compound mismatch diagnostic")
+        print(type_compound_enum_mismatch.stdout)
+        return 1
+    print("ok type_compound_enum_mismatch")
+
+    type_compound_pointer_int_i = TEST_DIR / "type_compound_pointer_int.i"
+    type_compound_pointer_int_c = TEST_DIR / "type_compound_pointer_int.c"
+    type_compound_pointer_int_i.write_text(r'''
+main:proc()->i32 = {
+    values:[4]i32 = {};
+    p:*i32 = values;
+    p += 1;
+    p -= 1;
+    return p[0];
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_compound_pointer_int = run([str(I_EXE), str(type_compound_pointer_int_i), str(type_compound_pointer_int_c)])
+    if type_compound_pointer_int.returncode != 0:
+        print("type_compound_pointer_int: expected pointer integer compound assignment to type-check")
+        print(type_compound_pointer_int.stdout)
+        return 1
+    print("ok type_compound_pointer_int")
+
+    type_compound_pointer_float_i = TEST_DIR / "type_compound_pointer_float.i"
+    type_compound_pointer_float_c = TEST_DIR / "type_compound_pointer_float.c"
+    type_compound_pointer_float_i.write_text(r'''
+main:proc()->i32 = {
+    values:[4]i32 = {};
+    p:*i32 = values;
+    p += 1.0f;
+    return p[0];
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_compound_pointer_float = run([str(I_EXE), str(type_compound_pointer_float_i), str(type_compound_pointer_float_c)])
+    if (
+        type_compound_pointer_float.returncode == 0
+        or "type error: operator '+=' cannot be applied to 'ptr_i32' and 'f32'" not in type_compound_pointer_float.stdout
+        or "    p += 1.0f;" not in type_compound_pointer_float.stdout
+        or "^" not in type_compound_pointer_float.stdout
+    ):
+        print("type_compound_pointer_float: expected pointer float compound assignment diagnostic")
+        print(type_compound_pointer_float.stdout)
+        return 1
+    print("ok type_compound_pointer_float")
 
     type_assign_binary_lhs_i = TEST_DIR / "type_assignment_binary_lhs.i"
     type_assign_binary_lhs_c = TEST_DIR / "type_assignment_binary_lhs.c"
@@ -1794,6 +4168,27 @@ main:proc()->i32 = {
         return 1
     print("ok type_assignment_index_lhs")
 
+    type_pointer_to_value_assign_i = TEST_DIR / "type_pointer_to_value_assignment.i"
+    type_pointer_to_value_assign_c = TEST_DIR / "type_pointer_to_value_assignment.c"
+    type_pointer_to_value_assign_i.write_text(r'''
+main:proc()->i32 = {
+    x:i32 = 0;
+    p:*i32 = x.&;
+    x = p;
+    return x;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_pointer_to_value_assign = run([str(I_EXE), str(type_pointer_to_value_assign_i), str(type_pointer_to_value_assign_c)])
+    if (
+        type_pointer_to_value_assign.returncode == 0
+        or "type error: assignment expected 'i32', got 'ptr_i32'" not in type_pointer_to_value_assign.stdout
+        or "note: got a pointer; use '[0]' to access the pointed value" not in type_pointer_to_value_assign.stdout
+    ):
+        print("type_pointer_to_value_assignment: expected pointer dereference suggestion")
+        print(type_pointer_to_value_assign.stdout)
+        return 1
+    print("ok type_pointer_to_value_assignment")
+
     type_const_local_i = TEST_DIR / "type_const_local_assignment.i"
     type_const_local_c = TEST_DIR / "type_const_local_assignment.c"
     type_const_local_i.write_text(r'''
@@ -1848,6 +4243,7 @@ main:proc()->i32 = {
     if (
         type_const_field.returncode == 0
         or "type error: cannot assign to const target of type 'i32'" not in type_const_field.stdout
+        or "note: constness comes from lvalue base type 'const_Payload'" not in type_const_field.stdout
     ):
         print("type_const_field_assignment: expected const aggregate field assignment diagnostic")
         print(type_const_field.stdout)
@@ -1904,6 +4300,61 @@ main:proc(p:*i32)->i32 = {
         return 1
     print("ok type_const_pointer_add")
 
+    type_const_void_drop_i = TEST_DIR / "type_const_void_pointer_drop.i"
+    type_const_void_drop_c = TEST_DIR / "type_const_void_pointer_drop.c"
+    type_const_void_drop_i.write_text(r'''
+main:proc(p:*const i32)->i32 = {
+    raw:*void = p;
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_const_void_drop = run([str(I_EXE), str(type_const_void_drop_i), str(type_const_void_drop_c)])
+    if (
+        type_const_void_drop.returncode == 0
+        or "type error: initializer expected 'ptr_void', got 'ptr_const_i32'" not in type_const_void_drop.stdout
+        or "    raw:*void = p;" not in type_const_void_drop.stdout
+        or "^" not in type_const_void_drop.stdout
+    ):
+        print("type_const_void_pointer_drop: expected pointer-to-const to mutable void pointer diagnostic")
+        print(type_const_void_drop.stdout)
+        return 1
+    print("ok type_const_void_pointer_drop")
+
+    type_const_void_add_i = TEST_DIR / "type_const_void_pointer_add.i"
+    type_const_void_add_c = TEST_DIR / "type_const_void_pointer_add.c"
+    type_const_void_add_i.write_text(r'''
+main:proc(p:*const i32)->i32 = {
+    raw:*const void = p;
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_const_void_add = run([str(I_EXE), str(type_const_void_add_i), str(type_const_void_add_c)])
+    if type_const_void_add.returncode != 0:
+        print("type_const_void_pointer_add: expected pointer-to-const to pointer-to-const void to type-check")
+        print(type_const_void_add.stdout)
+        return 1
+    print("ok type_const_void_pointer_add")
+
+    type_const_void_typed_drop_i = TEST_DIR / "type_const_void_typed_pointer_drop.i"
+    type_const_void_typed_drop_c = TEST_DIR / "type_const_void_typed_pointer_drop.c"
+    type_const_void_typed_drop_i.write_text(r'''
+main:proc(raw:*const void)->i32 = {
+    p:*i32 = raw;
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_const_void_typed_drop = run([str(I_EXE), str(type_const_void_typed_drop_i), str(type_const_void_typed_drop_c)])
+    if (
+        type_const_void_typed_drop.returncode == 0
+        or "type error: initializer expected 'ptr_i32', got 'ptr_const_void'" not in type_const_void_typed_drop.stdout
+        or "    p:*i32 = raw;" not in type_const_void_typed_drop.stdout
+        or "^" not in type_const_void_typed_drop.stdout
+    ):
+        print("type_const_void_typed_pointer_drop: expected const void pointer to mutable typed pointer diagnostic")
+        print(type_const_void_typed_drop.stdout)
+        return 1
+    print("ok type_const_void_typed_pointer_drop")
+
     type_const_call_drop_i = TEST_DIR / "type_const_call_drop.i"
     type_const_call_drop_c = TEST_DIR / "type_const_call_drop.c"
     type_const_call_drop_i.write_text(r'''
@@ -1924,6 +4375,26 @@ main:proc(p:*const i32)->i32 = {
         print(type_const_call_drop.stdout)
         return 1
     print("ok type_const_call_drop")
+
+    type_const_array_element_i = TEST_DIR / "type_const_array_element_assignment.i"
+    type_const_array_element_c = TEST_DIR / "type_const_array_element_assignment.c"
+    type_const_array_element_i.write_text(r'''
+main:proc()->i32 = {
+    values:const [2]i32 = {};
+    values[0] = 1;
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_const_array_element = run([str(I_EXE), str(type_const_array_element_i), str(type_const_array_element_c)])
+    if (
+        type_const_array_element.returncode == 0
+        or "type error: cannot assign to const target of type 'i32'" not in type_const_array_element.stdout
+        or "note: constness comes from lvalue base type 'const_array_2_i32'" not in type_const_array_element.stdout
+    ):
+        print("type_const_array_element_assignment: expected const array element assignment diagnostic")
+        print(type_const_array_element.stdout)
+        return 1
+    print("ok type_const_array_element_assignment")
 
     type_const_array_decay_i = TEST_DIR / "type_const_array_decay.i"
     type_const_array_decay_c = TEST_DIR / "type_const_array_decay.c"
@@ -2142,6 +4613,38 @@ main:proc(kind:Kind)->i32 = {
         return 1
     print("ok type_switch_enum")
 
+    type_switch_enum_mismatch_i = TEST_DIR / "type_switch_enum_mismatch.i"
+    type_switch_enum_mismatch_c = TEST_DIR / "type_switch_enum_mismatch.c"
+    type_switch_enum_mismatch_i.write_text(r'''
+Kind:enum = {
+    None,
+    Ready,
+}
+
+Other:enum = {
+    Bad,
+}
+
+main:proc(kind:Kind)->i32 = {
+    switch (kind) {
+        case Other_Bad:
+            return 1;
+    }
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_switch_enum_mismatch = run([str(I_EXE), str(type_switch_enum_mismatch_i), str(type_switch_enum_mismatch_c)])
+    if (
+        type_switch_enum_mismatch.returncode == 0
+        or "type error: switch case expected 'Kind', got 'Other'" not in type_switch_enum_mismatch.stdout
+        or "        case Other_Bad:" not in type_switch_enum_mismatch.stdout
+        or "^" not in type_switch_enum_mismatch.stdout
+    ):
+        print("type_switch_enum_mismatch: expected enum switch case mismatch diagnostic")
+        print(type_switch_enum_mismatch.stdout)
+        return 1
+    print("ok type_switch_enum_mismatch")
+
     type_switch_case_i = TEST_DIR / "type_switch_case.i"
     type_switch_case_c = TEST_DIR / "type_switch_case.c"
     type_switch_case_i.write_text(r'''
@@ -2184,6 +4687,26 @@ main:proc()->i32 = {
         print(type_pointer_alias.stdout)
         return 1
     print("ok type_pointer_alias_compat")
+
+    type_float_pointer_alias_i = TEST_DIR / "type_float_pointer_alias_compat.i"
+    type_float_pointer_alias_c = TEST_DIR / "type_float_pointer_alias_compat.c"
+    type_float_pointer_alias_i.write_text(r'''
+MyF32:alias = f32;
+
+take_f32s:proc(values:*MyF32)->void = { external; }
+
+main:proc()->i32 = {
+    uv:vec2 = {};
+    take_f32s(uv);
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_float_pointer_alias = run([str(I_EXE), str(type_float_pointer_alias_i), str(type_float_pointer_alias_c)])
+    if type_float_pointer_alias.returncode != 0:
+        print("type_float_pointer_alias_compat: expected c-float vector to decay to pointer-to-f32 alias")
+        print(type_float_pointer_alias.stdout)
+        return 1
+    print("ok type_float_pointer_alias_compat")
 
     type_array_ptr_mismatch_i = TEST_DIR / "type_array_pointer_element_mismatch.i"
     type_array_ptr_mismatch_c = TEST_DIR / "type_array_pointer_element_mismatch.c"
@@ -2229,6 +4752,27 @@ main:proc()->i32 = {
         return 1
     print("ok type_array_pointer_initializer_mismatch")
 
+    type_array_ptr_assign_mismatch_i = TEST_DIR / "type_array_pointer_assignment_mismatch.i"
+    type_array_ptr_assign_mismatch_c = TEST_DIR / "type_array_pointer_assignment_mismatch.c"
+    type_array_ptr_assign_mismatch_i.write_text(r'''
+main:proc()->i32 = {
+    values:[4]f32 = {};
+    ptr:*i32 = {};
+    ptr = values;
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_array_ptr_assign_mismatch = run([str(I_EXE), str(type_array_ptr_assign_mismatch_i), str(type_array_ptr_assign_mismatch_c)])
+    if (
+        type_array_ptr_assign_mismatch.returncode == 0
+        or "type error: assignment expected 'ptr_i32', got 'array_4_f32'" not in type_array_ptr_assign_mismatch.stdout
+        or "note: fixed array can decay to pointer only when element types match; expected element 'i32', got 'f32'" not in type_array_ptr_assign_mismatch.stdout
+    ):
+        print("type_array_pointer_assignment_mismatch: expected assignment array-to-pointer mismatch note")
+        print(type_array_ptr_assign_mismatch.stdout)
+        return 1
+    print("ok type_array_pointer_assignment_mismatch")
+
     type_call_i = TEST_DIR / "type_proc_call.i"
     type_call_c = TEST_DIR / "type_proc_call.c"
     type_call_i.write_text(r'''
@@ -2246,6 +4790,9 @@ main:proc()->i32 = {
     if (
         type_call.returncode == 0
         or "type error: proc 'take_ptr' argument 1 'p' expected 'ptr_i32', got 'i32'" not in type_call.stdout
+        or "note: expected a pointer; use '.&' to take the value address" not in type_call.stdout
+        or "    take_ptr(x);" not in type_call.stdout
+        or "^" not in type_call.stdout
         or f"{type_call_i}:1:15: note: parameter 'p' declared here" not in type_call.stdout
         or f"{type_call_i}:1:1: note: proc 'take_ptr' declared here" not in type_call.stdout
     ):
@@ -2269,6 +4816,9 @@ main:proc()->i32 = {
     if (
         type_call_count.returncode == 0
         or "type error: proc 'add' expects 2 args, got 1" not in type_call_count.stdout
+        or "note: expected params: a:i32, b:i32" not in type_call_count.stdout
+        or "    return add(1);" not in type_call_count.stdout
+        or "^" not in type_call_count.stdout
         or f"{type_call_count_i}:1:1: note: proc 'add' declared here" not in type_call_count.stdout
     ):
         print("type_proc_call_count: expected proc argument count diagnostic")
@@ -2298,6 +4848,9 @@ main:proc()->i32 = {
         import_type_call.returncode == 0
         or str(import_type_call_app) not in import_type_call.stdout
         or "type error: proc 'take_ptr' argument 1 'p' expected 'ptr_i32', got 'i32'" not in import_type_call.stdout
+        or "note: expected a pointer; use '.&' to take the value address" not in import_type_call.stdout
+        or "    take_ptr(x);" not in import_type_call.stdout
+        or "^" not in import_type_call.stdout
         or f"{import_type_call_mod}:1:15: note: parameter 'p' declared here" not in import_type_call.stdout
         or f"{import_type_call_mod}:1:1: note: proc 'take_ptr' declared here" not in import_type_call.stdout
     ):
@@ -2346,7 +4899,11 @@ main:proc()->i32 = {
     type_proc_ptr_call_arg = run([str(I_EXE), str(type_proc_ptr_call_arg_i), str(type_proc_ptr_call_arg_c)])
     if (
         type_proc_ptr_call_arg.returncode == 0
-        or "type error: proc pointer 'cb' argument 1 expected 'i32', got 'ptr_i32'" not in type_proc_ptr_call_arg.stdout
+        or "type error: proc pointer 'cb' argument 1 'x' expected 'i32', got 'ptr_i32'" not in type_proc_ptr_call_arg.stdout
+        or "note: got a pointer; use '[0]' to access the pointed value" not in type_proc_ptr_call_arg.stdout
+        or "note: expected params: x:i32" not in type_proc_ptr_call_arg.stdout
+        or "    return cb(value.&);" not in type_proc_ptr_call_arg.stdout
+        or "^" not in type_proc_ptr_call_arg.stdout
     ):
         print("type_proc_pointer_call_arg: expected proc pointer call argument diagnostic")
         print(type_proc_ptr_call_arg.stdout)
@@ -2371,6 +4928,9 @@ main:proc()->i32 = {
     if (
         type_proc_ptr_call_count.returncode == 0
         or "type error: proc pointer 'cb' expects 2 args, got 1" not in type_proc_ptr_call_count.stdout
+        or "note: expected params: a:i32, b:i32" not in type_proc_ptr_call_count.stdout
+        or "    return cb(1);" not in type_proc_ptr_call_count.stdout
+        or "^" not in type_proc_ptr_call_count.stdout
     ):
         print("type_proc_pointer_call_count: expected proc pointer call count diagnostic")
         print(type_proc_ptr_call_count.stdout)
@@ -2435,7 +4995,12 @@ main:proc()->i32 = {
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     type_proc_ptr_ret = run([str(I_EXE), str(type_proc_ptr_ret_i), str(type_proc_ptr_ret_c)])
-    if type_proc_ptr_ret.returncode == 0 or "type error: initializer expected 'Callback', got 'ptr_proc_ptr_i32_i32'" not in type_proc_ptr_ret.stdout:
+    if (
+        type_proc_ptr_ret.returncode == 0
+        or "type error: initializer expected 'Callback', got 'ptr_proc_ptr_i32_i32'" not in type_proc_ptr_ret.stdout
+        or "note: expected proc signature: (arg0:i32)->i32" not in type_proc_ptr_ret.stdout
+        or "note: actual proc signature: (arg0:i32)->ptr_i32" not in type_proc_ptr_ret.stdout
+    ):
         print("type_proc_pointer_return_mismatch: expected proc pointer return type diagnostic")
         print(type_proc_ptr_ret.stdout)
         return 1
@@ -2456,11 +5021,42 @@ main:proc()->i32 = {
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     type_proc_ptr_arg = run([str(I_EXE), str(type_proc_ptr_arg_i), str(type_proc_ptr_arg_c)])
-    if type_proc_ptr_arg.returncode == 0 or "type error: initializer expected 'Callback', got 'ptr_proc_i32_ptr_i32'" not in type_proc_ptr_arg.stdout:
+    if (
+        type_proc_ptr_arg.returncode == 0
+        or "type error: initializer expected 'Callback', got 'ptr_proc_i32_ptr_i32'" not in type_proc_ptr_arg.stdout
+        or "note: expected proc signature: (arg0:i32)->i32" not in type_proc_ptr_arg.stdout
+        or "note: actual proc signature: (arg0:ptr_i32)->i32" not in type_proc_ptr_arg.stdout
+    ):
         print("type_proc_pointer_arg_mismatch: expected proc pointer argument type diagnostic")
         print(type_proc_ptr_arg.stdout)
         return 1
     print("ok type_proc_pointer_arg_mismatch")
+
+    type_proc_ptr_const_arg_i = TEST_DIR / "type_proc_pointer_const_arg_mismatch.i"
+    type_proc_ptr_const_arg_c = TEST_DIR / "type_proc_pointer_const_arg_mismatch.c"
+    type_proc_ptr_const_arg_i.write_text(r'''
+Callback:alias = *proc(x:*i32)->void;
+
+bad_cb:proc(x:*const i32)->void = {
+    return;
+}
+
+main:proc()->i32 = {
+    cb:Callback = bad_cb;
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_proc_ptr_const_arg = run([str(I_EXE), str(type_proc_ptr_const_arg_i), str(type_proc_ptr_const_arg_c)])
+    if (
+        type_proc_ptr_const_arg.returncode == 0
+        or "type error: initializer expected 'Callback', got 'ptr_proc_void_ptr_const_i32'" not in type_proc_ptr_const_arg.stdout
+        or "note: expected proc signature: (arg0:ptr_i32)->void" not in type_proc_ptr_const_arg.stdout
+        or "note: actual proc signature: (arg0:ptr_const_i32)->void" not in type_proc_ptr_const_arg.stdout
+    ):
+        print("type_proc_pointer_const_arg_mismatch: expected proc pointer const argument mismatch diagnostic")
+        print(type_proc_ptr_const_arg.stdout)
+        return 1
+    print("ok type_proc_pointer_const_arg_mismatch")
 
     type_return_i = TEST_DIR / "type_return.i"
     type_return_c = TEST_DIR / "type_return.c"
@@ -2487,6 +5083,8 @@ main:proc()->i32 = {
     if (
         type_return_missing.returncode == 0
         or "type error: non-void proc must return a value of type 'i32'" not in type_return_missing.stdout
+        or "    return;" not in type_return_missing.stdout
+        or f"{type_return_missing_i}:1:1: note: proc 'main' declared here" not in type_return_missing.stdout
     ):
         print("type_return_missing_value: expected non-void bare return diagnostic")
         print(type_return_missing.stdout)
@@ -2504,6 +5102,8 @@ main:proc()->void = {
     if (
         type_return_void_value.returncode == 0
         or "type error: void proc should not return a value" not in type_return_void_value.stdout
+        or "    return 1;" not in type_return_void_value.stdout
+        or f"{type_return_void_value_i}:1:1: note: proc 'main' declared here" not in type_return_void_value.stdout
     ):
         print("type_return_void_value: expected void return value diagnostic")
         print(type_return_void_value.stdout)
@@ -2537,7 +5137,12 @@ main:proc()->i32 = {
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     type_field = run([str(I_EXE), str(type_field_i), str(type_field_c)])
-    if type_field.returncode == 0 or "type error: type 'Payload' has no field 'missing'" not in type_field.stdout:
+    if (
+        type_field.returncode == 0
+        or "type error: type 'Payload' has no field 'missing'" not in type_field.stdout
+        or "    return payload.missing;" not in type_field.stdout
+        or "^" not in type_field.stdout
+    ):
         print("type_field_access: expected missing field type diagnostic")
         print(type_field.stdout)
         return 1
@@ -2557,7 +5162,7 @@ main:proc(p:*Payload)->i32 = {
     type_field_ptr = run([str(I_EXE), str(type_field_ptr_i), str(type_field_ptr_c)])
     if (
         type_field_ptr.returncode == 0
-        or "type error: field 'value' cannot be accessed on pointer type 'ptr_Payload'; use value[0].value" not in type_field_ptr.stdout
+        or "type error: field 'value' cannot be accessed on pointer type 'ptr_Payload'; use p[0].value" not in type_field_ptr.stdout
     ):
         print("type_field_pointer_access: expected pointer field access type diagnostic")
         print(type_field_ptr.stdout)
@@ -2593,7 +5198,12 @@ main:proc()->i32 = {
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     type_init_field = run([str(I_EXE), str(type_init_field_i), str(type_init_field_c)])
-    if type_init_field.returncode == 0 or "type error: initializer for type 'Payload' has no field 'missing'" not in type_init_field.stdout:
+    if (
+        type_init_field.returncode == 0
+        or "type error: initializer for type 'Payload' has no field 'missing'" not in type_init_field.stdout
+        or "    payload:Payload = {.missing = 1};" not in type_init_field.stdout
+        or "^" not in type_init_field.stdout
+    ):
         print("type_initializer_field: expected unknown initializer field diagnostic")
         print(type_init_field.stdout)
         return 1
@@ -2634,6 +5244,7 @@ main:proc()->i32 = {
     if (
         type_init_duplicate.returncode == 0
         or "type error: duplicate initializer for field 'value'" not in type_init_duplicate.stdout
+        or "(previous at 6:" not in type_init_duplicate.stdout
     ):
         print("type_initializer_duplicate_field: expected duplicate initializer field diagnostic")
         print(type_init_duplicate.stdout)
@@ -2657,6 +5268,7 @@ main:proc()->i32 = {
     if (
         type_init_duplicate_pos.returncode == 0
         or "type error: duplicate initializer for field 'value'" not in type_init_duplicate_pos.stdout
+        or "(previous at 7:" not in type_init_duplicate_pos.stdout
     ):
         print("type_initializer_duplicate_positional_field: expected duplicate positional/designated initializer diagnostic")
         print(type_init_duplicate_pos.stdout)
@@ -2712,6 +5324,7 @@ main:proc()->i32 = {
     if (
         type_array_init_dup.returncode == 0
         or "type error: duplicate initializer for array index '0'" not in type_array_init_dup.stdout
+        or "(previous at 2:" not in type_array_init_dup.stdout
     ):
         print("type_array_initializer_duplicate_index: expected duplicate array index diagnostic")
         print(type_array_init_dup.stdout)
@@ -2730,6 +5343,7 @@ main:proc()->i32 = {
     if (
         type_array_init_dup_pos.returncode == 0
         or "type error: duplicate initializer for array index '0'" not in type_array_init_dup_pos.stdout
+        or "(previous at 2:" not in type_array_init_dup_pos.stdout
     ):
         print("type_array_initializer_duplicate_positional_index: expected duplicate positional/designated array index diagnostic")
         print(type_array_init_dup_pos.stdout)
@@ -3009,6 +5623,7 @@ main:proc()->i32 = {
     print("ok import_semantic_nongeneric_diagnostic")
 
     import_dup_mod = TEST_DIR / "import_duplicate_mod.i"
+    import_dup_mid = TEST_DIR / "import_duplicate_mid.i"
     import_dup_app = TEST_DIR / "import_duplicate_app.i"
     import_dup_c = TEST_DIR / "import_duplicate_app.c"
     import_dup_mod.write_text(r'''
@@ -3016,8 +5631,11 @@ Payload:struct = {
     value:i32;
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
-    import_dup_app.write_text(r'''
+    import_dup_mid.write_text(r'''
 import "import_duplicate_mod.i"
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    import_dup_app.write_text(r'''
+import "import_duplicate_mid.i"
 
 Payload:struct = {
     other:i32;
@@ -3028,8 +5646,10 @@ Payload:struct = {
         import_dup.returncode == 0
         or str(import_dup_app) not in import_dup.stdout
         or str(import_dup_mod) not in import_dup.stdout
+        or str(import_dup_mid) not in import_dup.stdout
         or "duplicate struct declaration 'Payload'" not in import_dup.stdout
         or "previous at" not in import_dup.stdout
+        or "note: previous declaration imported through:" not in import_dup.stdout
     ):
         print("import_duplicate_diagnostic: expected duplicate import source paths")
         print(import_dup.stdout)
@@ -3037,6 +5657,7 @@ Payload:struct = {
     print("ok import_duplicate_diagnostic")
 
     import_value_dup_mod = TEST_DIR / "import_value_duplicate_mod.i"
+    import_value_dup_mid = TEST_DIR / "import_value_duplicate_mid.i"
     import_value_dup_app = TEST_DIR / "import_value_duplicate_app.i"
     import_value_dup_c = TEST_DIR / "import_value_duplicate_app.c"
     import_value_dup_mod.write_text(r'''
@@ -3044,8 +5665,11 @@ shared_value:proc()->i32 = {
     return 1;
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
-    import_value_dup_app.write_text(r'''
+    import_value_dup_mid.write_text(r'''
 import "import_value_duplicate_mod.i"
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    import_value_dup_app.write_text(r'''
+import "import_value_duplicate_mid.i"
 
 shared_value:i32 = 2;
 '''.strip() + "\n", encoding="utf-8", newline="\n")
@@ -3054,13 +5678,55 @@ shared_value:i32 = 2;
         import_value_dup.returncode == 0
         or str(import_value_dup_app) not in import_value_dup.stdout
         or str(import_value_dup_mod) not in import_value_dup.stdout
+        or str(import_value_dup_mid) not in import_value_dup.stdout
         or "duplicate global declaration 'shared_value'" not in import_value_dup.stdout
         or "previous at" not in import_value_dup.stdout
+        or "note: previous declaration imported through:" not in import_value_dup.stdout
     ):
         print("import_value_duplicate_diagnostic: expected proc/global C namespace collision diagnostic")
         print(import_value_dup.stdout)
         return 1
     print("ok import_value_duplicate_diagnostic")
+
+    macro_proc_dup_i = TEST_DIR / "macro_proc_duplicate.i"
+    macro_proc_dup_c = TEST_DIR / "macro_proc_duplicate.c"
+    macro_proc_dup_i.write_text(r'''
+#define macro_proc 1
+
+macro_proc:proc()->i32 = {
+    return 0;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    macro_proc_dup = run([str(I_EXE), str(macro_proc_dup_i), str(macro_proc_dup_c)])
+    if (
+        macro_proc_dup.returncode == 0
+        or str(macro_proc_dup_i) not in macro_proc_dup.stdout
+        or "semantic error: duplicate proc declaration 'macro_proc'" not in macro_proc_dup.stdout
+        or "previous at" not in macro_proc_dup.stdout
+    ):
+        print("macro_proc_duplicate: expected macro/proc namespace collision diagnostic")
+        print(macro_proc_dup.stdout)
+        return 1
+    print("ok macro_proc_duplicate")
+
+    define_global_dup_i = TEST_DIR / "define_global_duplicate.i"
+    define_global_dup_c = TEST_DIR / "define_global_duplicate.c"
+    define_global_dup_i.write_text(r'''
+define("macro_global")
+
+macro_global:i32 = 1;
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    define_global_dup = run([str(I_EXE), str(define_global_dup_i), str(define_global_dup_c)])
+    if (
+        define_global_dup.returncode == 0
+        or str(define_global_dup_i) not in define_global_dup.stdout
+        or "semantic error: duplicate global declaration 'macro_global'" not in define_global_dup.stdout
+        or "previous at" not in define_global_dup.stdout
+    ):
+        print("define_global_duplicate: expected define/global namespace collision diagnostic")
+        print(define_global_dup.stdout)
+        return 1
+    print("ok define_global_duplicate")
 
     generic_constraint_i = TEST_DIR / "generic_constraint_site.i"
     generic_constraint_c = TEST_DIR / "generic_constraint_site.c"
@@ -3084,12 +5750,51 @@ main:proc()->i32 = {
         or str(generic_constraint_i) not in generic_constraint.stdout
         or "requirement error: proc 'need_hash' requires 'hashable' for type 'Payload'" not in generic_constraint.stdout
         or "missing function 'hash_Payload'" not in generic_constraint.stdout
-        or "generic declared at" not in generic_constraint.stdout
+        or "note: generic 'need_hash' instantiated here with type 'Payload'" not in generic_constraint.stdout
+        or "note: generic declared here with requirement 'hashable'" not in generic_constraint.stdout
+        or "    return cast(need_hash<Payload>(payload), i32);" not in generic_constraint.stdout
+        or "need_hash:proc<T:hashable>(value:T)->u64" not in generic_constraint.stdout
     ):
         print("generic_constraint_site: expected instantiation-site requirement diagnostic")
         print(generic_constraint.stdout)
         return 1
     print("ok generic_constraint_site")
+
+    generic_constraint_signature_i = TEST_DIR / "generic_constraint_signature.i"
+    generic_constraint_signature_c = TEST_DIR / "generic_constraint_signature.c"
+    generic_constraint_signature_i.write_text(r'''
+Payload:struct = {
+    value:i32;
+}
+
+hash_Payload:proc(value:*Payload)->i32 = {
+    return 0;
+}
+
+need_hash:proc<T:hashable>(value:T)->u64 = {
+    return hash<T>(value);
+}
+
+main:proc()->i32 = {
+    payload:Payload = {};
+    return cast(need_hash<Payload>(payload), i32);
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    generic_constraint_signature = run([str(I_EXE), str(generic_constraint_signature_i), str(generic_constraint_signature_c)])
+    if (
+        generic_constraint_signature.returncode == 0
+        or str(generic_constraint_signature_i) not in generic_constraint_signature.stdout
+        or "requirement error: proc 'need_hash' requires 'hashable' for type 'Payload'" not in generic_constraint_signature.stdout
+        or "function 'hash_Payload' has incompatible signature" not in generic_constraint_signature.stdout
+        or "note: expected signature: hash_Payload(value:Payload)->u64" not in generic_constraint_signature.stdout
+        or "note: function 'hash_Payload' declared here" not in generic_constraint_signature.stdout
+        or "    return cast(need_hash<Payload>(payload), i32);" not in generic_constraint_signature.stdout
+        or "hash_Payload:proc(value:*Payload)->i32" not in generic_constraint_signature.stdout
+    ):
+        print("generic_constraint_signature: expected incompatible requirement helper diagnostic")
+        print(generic_constraint_signature.stdout)
+        return 1
+    print("ok generic_constraint_signature")
 
     ibind_exe = BUILD / "ibind.exe"
     if not ibind_exe.exists():
@@ -3100,25 +5805,66 @@ main:proc()->i32 = {
         ibind_header.write_text(r'''
 #define IB_CONST 42
 #define IB_NAME "hello"
+#define IB_PAREN_CONST (42)
+#define IB_CAST_CONST ((int)7)
+#define IB_GROUP_CONST (IB_CONST | IB_CAST_CONST)
+#define IB_UNSIGNED_CONST 42u
+#define IB_ULL_CONST 18446744073709551615ULL
+#define IB_HEX_SUFFIX_CONST 0xffUL
 #define IB_ADD(x, y) ((x) + (y))
 
 static const int IB_STATIC_CONST = 99;
 static const unsigned IB_STATIC_HEX = 0x10u;
 static const double IB_STATIC_DOUBLE = 3.5;
+static const char *IB_STATIC_TEXT = "typed text";
+static const char IB_STATIC_CHAR = 'A';
 static const int NOT_IB_STATIC_SKIPPED = 101;
 
 typedef int (*IB_Callback)(int x, const char *label);
+typedef void (*IB_DataCallback)(void *ctx, const void *data);
+typedef int (*IB_VarCallback)(int code, ...);
 typedef int (__stdcall *IB_StdCallback)(int value);
+typedef unsigned short IB_WChar;
+typedef const IB_WChar *IB_LPCWSTR;
+typedef struct IB_Opaque IB_Opaque;
+typedef struct IB_Private *IB_Handle;
+typedef const struct IB_Private *IB_ConstHandle;
+typedef struct IB_Defined IB_Defined;
 
 enum {
     IB_ANON_READY = 7,
     NOT_IB_ANON_SKIPPED = 9,
 };
 
+enum IB_Mode {
+    IB_MODE_READY = 1,
+    NOT_IB_MODE_SKIPPED = 2,
+};
+
+enum NOT_IB_Mode {
+    NOT_IB_MODE_DECL_SKIPPED = 3,
+};
+
 typedef struct IB_Payload {
     int value;
+    float weights[4];
     IB_Callback cb;
+    IB_DataCallback data_cb;
+    IB_VarCallback var_cb;
+    int (*raw_cb)(int count, const char *label);
+    IB_LPCWSTR title;
+    IB_Handle handle;
+    struct IB_FieldOpaque *field_opaque;
 } IB_Payload;
+
+struct IB_Defined {
+    int value;
+};
+
+typedef struct IB_Bits {
+    unsigned flags:3;
+    unsigned mode:5;
+} IB_Bits;
 
 typedef struct IB_Anon {
     union {
@@ -3129,6 +5875,9 @@ typedef struct IB_Anon {
         int a;
         int b;
     } named;
+    struct {
+        int z;
+    };
 } IB_Anon;
 
 typedef struct __attribute__((packed)) IB_Packed {
@@ -3136,8 +5885,17 @@ typedef struct __attribute__((packed)) IB_Packed {
     int value;
 } IB_Packed;
 
+typedef struct IB_Flex {
+    unsigned count;
+    char bytes[];
+} IB_Flex;
+
 int IB_do(IB_Callback cb, IB_Payload *payload);
+void *IB_copy(void *dst, const void *src, unsigned count);
+int IB_use_handle(IB_Handle handle, const IB_Opaque *opaque, IB_Defined *defined);
 int __stdcall IB_call(IB_StdCallback cb, int value);
+int IB_wide(IB_LPCWSTR title, IB_WChar *out_title);
+int IB_log(const char *fmt, ...);
 '''.strip() + "\n", encoding="utf-8", newline="\n")
 
         ibind = run([str(ibind_exe), str(ibind_header), str(ibind_out), "--prefix", "IB_", "--", "-target", "i686-pc-windows-msvc"])
@@ -3148,30 +5906,79 @@ int __stdcall IB_call(IB_StdCallback cb, int value);
         for needle in (
             '#define IB_CONST 42',
             '#define IB_NAME "hello"',
+            '#define IB_PAREN_CONST 42',
+            '#define IB_CAST_CONST 7',
+            '#define IB_GROUP_CONST IB_CONST | IB_CAST_CONST',
+            '#define IB_UNSIGNED_CONST 42',
+            '#define IB_ULL_CONST 18446744073709551615',
+            '#define IB_HEX_SUFFIX_CONST 0xff',
             '#define IB_STATIC_CONST 99',
             '#define IB_STATIC_HEX 16',
             '#define IB_STATIC_DOUBLE 3.5',
+            '#define IB_STATIC_TEXT "typed text"',
+            '#define IB_STATIC_CHAR 65',
             '#define IB_ANON_READY 7',
+            "IB_Mode: enum = {",
+            "    IB_MODE_READY = 1,",
             "IB_Callback: alias = *proc(x:i32, label:*const char)->i32;",
+            "IB_DataCallback: alias = *proc(ctx:*void, data:*const void)->void;",
+            "IB_VarCallback: alias = *proc(code:i32, ...)->i32;",
             "IB_StdCallback: alias = *proc[__stdcall](value:i32)->i32;",
+            "IB_WChar: alias = u16;",
+            "IB_LPCWSTR: alias = *const IB_WChar;",
+            "IB_Opaque: struct = { external; }",
+            "IB_Private: struct = { external; }",
+            "IB_FieldOpaque: struct = { external; }",
+            "IB_Handle: alias = *IB_Private;",
+            "IB_ConstHandle: alias = *const IB_Private;",
             "IB_Payload: struct = {",
             "    value:i32;",
+            "    weights:[4]f32;",
             "    cb:IB_Callback;",
+            "    data_cb:IB_DataCallback;",
+            "    var_cb:IB_VarCallback;",
+            "    raw_cb:*proc(count:i32, label:*const char)->i32;",
+            "    title:IB_LPCWSTR;",
+            "    handle:IB_Handle;",
+            "    field_opaque:*IB_FieldOpaque;",
+            "IB_Defined: struct = {",
+            "    value:i32;",
+            "IB_Bits: struct = {",
+            "    // ibind: bitfield flags:3",
+            "    // ibind: field_offset flags:0",
+            "    flags:u32;",
+            "    // ibind: bitfield mode:5",
+            "    // ibind: field_offset mode:3",
+            "    mode:u32;",
             "IB_Anon_anon0: union = {",
             "    x:i32;",
             "    y:f32;",
             "IB_Anon_anon1: struct = {",
             "    a:i32;",
             "    b:i32;",
+            "IB_Anon_anon2: struct = {",
+            "    z:i32;",
             "IB_Anon: struct = {",
             "    _anon0:IB_Anon_anon0;",
             "    named:IB_Anon_anon1;",
+            "    _anon2:IB_Anon_anon2;",
             "// ibind: packed",
+            "// ibind: layout size=5 align=1",
             "IB_Packed: struct = {",
+            "    // ibind: field_offset tag:0",
             "    tag:char;",
+            "    // ibind: field_offset value:8",
             "    value:i32;",
+            "IB_Flex: struct = {",
+            "    count:u32;",
+            "    // ibind: incomplete_array bytes",
+            "    bytes:*char;",
             "IB_do: proc(cb: IB_Callback, payload: *IB_Payload)->i32 = { external_emit; }",
+            "IB_copy: proc(dst: *void, src: *const void, count: u32)->*void = { external_emit; }",
+            "IB_use_handle: proc(handle: IB_Handle, opaque: *const IB_Opaque, defined: *IB_Defined)->i32 = { external_emit; }",
             "IB_call: proc[__stdcall](cb: IB_StdCallback, value: i32)->i32 = { external_emit; }",
+            "IB_wide: proc(title: IB_LPCWSTR, out_title: *IB_WChar)->i32 = { external_emit; }",
+            "IB_log: proc(fmt: *const char, ...)->i32 = { external_emit; }",
         ):
             if needle not in ibind_text:
                 print(f"ibind_bindgen: generated binding missing {needle!r}")
@@ -3185,10 +5992,50 @@ int __stdcall IB_call(IB_StdCallback cb, int value);
             print("ibind_bindgen: anonymous enum constants should honor --prefix")
             print(ibind_text)
             return 1
+        if "NOT_IB_MODE_SKIPPED" in ibind_text or "NOT_IB_MODE_DECL_SKIPPED" in ibind_text or "NOT_IB_Mode" in ibind_text:
+            print("ibind_bindgen: named enum declarations and constants should honor --prefix")
+            print(ibind_text)
+            return 1
         if "NOT_IB_STATIC_SKIPPED" in ibind_text:
             print("ibind_bindgen: typed constants should honor --prefix")
             print(ibind_text)
             return 1
+        if "IB_Defined: struct = { external; }" in ibind_text:
+            print("ibind_bindgen: defined forward typedef should not emit opaque external record")
+            print(ibind_text)
+            return 1
+
+        ibind_filter_noise = TEST_DIR / "not_ibind_selected_main.h"
+        ibind_filter_main = TEST_DIR / "ibind_selected_main.h"
+        ibind_filter_out = TEST_DIR / "ibind_selected_main.i"
+        ibind_filter_noise.write_text(r'''
+#define IB_FILTER_NOISE 1
+typedef struct IB_FilterNoise {
+    int should_skip;
+} IB_FilterNoise;
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+        ibind_filter_main.write_text(r'''
+#include "not_ibind_selected_main.h"
+
+typedef struct IB_FilterPayload {
+    IB_FilterNoise *noise;
+    int value;
+} IB_FilterPayload;
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+        ibind_filter = run([str(ibind_exe), str(ibind_filter_main), str(ibind_filter_out), "--filter", ibind_filter_main.name, "--prefix", "IB_", "--", "-I", str(TEST_DIR)])
+        if ibind_filter.returncode != 0:
+            print(ibind_filter.stdout)
+            return ibind_filter.returncode
+        ibind_filter_text = ibind_filter_out.read_text(encoding="utf-8")
+        if "IB_FilterPayload: struct = {" not in ibind_filter_text or "noise:*IB_FilterNoise;" not in ibind_filter_text:
+            print("ibind_bindgen_filter: expected selected header declaration and dependency type reference")
+            print(ibind_filter_text)
+            return 1
+        if "IB_FilterNoise: struct" in ibind_filter_text or "IB_FILTER_NOISE" in ibind_filter_text:
+            print("ibind_bindgen_filter: selected header filter should not leak similarly named included header declarations")
+            print(ibind_filter_text)
+            return 1
+        print("ok ibind_bindgen_filter")
         print("ok ibind_bindgen")
 
     lsp = run([sys.executable, "tests/run_lsp_tests.py"])
@@ -3196,6 +6043,12 @@ int __stdcall IB_call(IB_StdCallback cb, int value);
         print(lsp.stdout)
         return lsp.returncode
     print(lsp.stdout.rstrip())
+
+    i_torture = run([sys.executable, "tests/run_i_torture.py"])
+    if i_torture.returncode != 0:
+        print(i_torture.stdout)
+        return i_torture.returncode
+    print(i_torture.stdout.rstrip())
 
     torture = run([sys.executable, "tests/run_c_torture.py"])
     if torture.returncode != 0:

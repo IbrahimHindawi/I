@@ -35,6 +35,21 @@ end
 
 local root = find_root() or vim.fn.getcwd()
 
+if vim.diagnostic then
+  pcall(vim.diagnostic.config, {
+    underline = true,
+    signs = true,
+    virtual_text = false,
+    update_in_insert = true,
+    severity_sort = true,
+  }, 0)
+  if vim.diagnostic.enable then
+    if not pcall(vim.diagnostic.enable, true, { bufnr = 0 }) then
+      pcall(vim.diagnostic.enable, 0)
+    end
+  end
+end
+
 local get_clients = vim.lsp.get_clients or vim.lsp.get_active_clients
 if get_clients then
   local ok, clients = pcall(get_clients, { name = "i-lsp" })
@@ -51,10 +66,19 @@ if get_clients then
   end
 end
 
-vim.lsp.start({
+local client_id = vim.lsp.start({
   name = "i-lsp",
   cmd = command,
   root_dir = root,
+  cmd_cwd = root,
+  flags = {
+    debounce_text_changes = 75,
+  },
 })
 
-vim.b.i_lsp_started = true
+if client_id then
+  vim.b.i_lsp_started = true
+else
+  vim.b.i_lsp_started = false
+  vim.notify("failed to start i-lsp", vim.log.levels.WARN)
+end

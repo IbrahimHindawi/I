@@ -23,6 +23,15 @@ class Result:
     output: str
 
 
+def object_path_for_source(suite: Path, source: Path, build_dir: Path) -> Path:
+    rel = source.relative_to(suite)
+    parts = list(rel.parts)
+    parts[-1] = f"{Path(parts[-1]).stem}.o"
+    obj = build_dir.joinpath(*parts)
+    obj.parent.mkdir(parents=True, exist_ok=True)
+    return obj
+
+
 def find_suite(explicit: Path | None) -> Path | None:
     candidates: list[Path] = []
     if explicit:
@@ -45,9 +54,8 @@ def find_suite(explicit: Path | None) -> Path | None:
     return None
 
 
-def compile_one(cc: str, source: Path, build_dir: Path) -> Result:
-    rel = source.name
-    obj = build_dir / f"{source.stem}.o"
+def compile_one(cc: str, suite: Path, source: Path, build_dir: Path) -> Result:
+    obj = object_path_for_source(suite, source, build_dir)
     cmd = [cc, "-c", str(source), "-o", str(obj), "-Wno-everything"]
     proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     return Result(source, proc.returncode, proc.stdout)
@@ -84,7 +92,7 @@ def main() -> int:
 
     failures: list[Result] = []
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        futures = [pool.submit(compile_one, args.cc, source, build_dir) for source in sources]
+        futures = [pool.submit(compile_one, args.cc, suite, source, build_dir) for source in sources]
         for future in as_completed(futures):
             result = future.result()
             if result.returncode != 0:
