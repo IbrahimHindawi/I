@@ -364,10 +364,10 @@ void memops_arena_temp_end(memops_arena_temp temp);
 #line 9 "src/main.i"
 i32 main(i32 argc, char * * argv);
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:24:32 */
+/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:27:32 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_payload Array_payload_reserve(memops_arena * arena, u64 length);
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:30:27 */
+/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:34:27 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_i32 Array_i32_reserve(memops_arena * arena, u64 length);

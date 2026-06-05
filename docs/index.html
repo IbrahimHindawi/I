@@ -200,8 +200,9 @@ fx_step:proc(dt:f32)->void = { external_emit; }</code></pre>
         </article>
         <article>
           <h3>Compiler CLI</h3>
-          <pre><code>build\I.exe [input.i] [output.c]</code></pre>
-          <p>Defaults are <code>src\main.i</code> to <code>src\main.i.c</code>. A companion header is written beside the C output.</p>
+          <pre><code>build\I.exe compile [input.i] -o [output.c]
+build\I.exe check [input.i] --diagnostics=json</code></pre>
+          <p>Use <code>compile</code>, <code>check</code>, <code>symbols</code>, or <code>lsp</code>. The old positional compile form still works.</p>
         </article>
       </div>
     </section>

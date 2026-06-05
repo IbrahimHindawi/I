@@ -698,6 +698,94 @@ main:proc()->i32 = {
         return 1
     print("ok check_mode")
 
+    cli_help = run([str(I_EXE), "--help"])
+    if (
+        cli_help.returncode != 0
+        or "usage:" not in cli_help.stdout
+        or "I compile [input.i]" not in cli_help.stdout
+        or "I check   [input.i]" not in cli_help.stdout
+    ):
+        print("cli_help: expected readable command-line help")
+        print(cli_help.stdout)
+        return 1
+    print("ok cli_help")
+
+    cli_version = run([str(I_EXE), "--version"])
+    if cli_version.returncode != 0 or "I compiler" not in cli_version.stdout:
+        print("cli_version: expected compiler version output")
+        print(cli_version.stdout)
+        return 1
+    print("ok cli_version")
+
+    cli_check = run([str(I_EXE), "check", str(check_i)])
+    if cli_check.returncode != 0 or f"i: checked {check_i}" not in cli_check.stdout or check_c.exists():
+        print("cli_check_command: expected check command to validate without generating C")
+        print(cli_check.stdout)
+        return 1
+    print("ok cli_check_command")
+
+    cli_compile_c = TEST_DIR / "cli_compile.c"
+    cli_compile_h = TEST_DIR / "cli_compile.h"
+    for path in (cli_compile_c, cli_compile_h):
+        if path.exists():
+            path.unlink()
+    cli_compile = run(
+        [
+            str(I_EXE),
+            "compile",
+            str(check_i),
+            "-o",
+            str(cli_compile_c),
+            "--header",
+            str(cli_compile_h),
+        ]
+    )
+    if (
+        cli_compile.returncode != 0
+        or not cli_compile_c.exists()
+        or not cli_compile_h.exists()
+        or f"i: generated {cli_compile_c} and {cli_compile_h}" not in cli_compile.stdout
+    ):
+        print("cli_compile_command: expected compile command to generate C and header outputs")
+        print(cli_compile.stdout)
+        return 1
+    print("ok cli_compile_command")
+
+    cli_symbols = run([str(I_EXE), "symbols", str(check_i)])
+    try:
+        cli_symbols_data = json.loads(cli_symbols.stdout)
+    except json.JSONDecodeError:
+        print("cli_symbols_command: expected JSON symbol output")
+        print(cli_symbols.stdout)
+        return 1
+    if (
+        cli_symbols.returncode != 0
+        or not isinstance(cli_symbols_data, list)
+        or not any(item.get("kind") == "proc" and item.get("name") == "main" for item in cli_symbols_data)
+    ):
+        print("cli_symbols_command: expected symbols command to emit compiler JSON symbols")
+        print(cli_symbols.stdout)
+        return 1
+    print("ok cli_symbols_command")
+
+    cli_lsp = run([str(I_EXE), "lsp", str(check_i)])
+    try:
+        cli_lsp_data = json.loads(cli_lsp.stdout)
+    except json.JSONDecodeError:
+        print("cli_lsp_command: expected JSON LSP output")
+        print(cli_lsp.stdout)
+        return 1
+    if (
+        cli_lsp.returncode != 0
+        or not isinstance(cli_lsp_data, dict)
+        or cli_lsp_data.get("diagnostics") != []
+        or not any(item.get("kind") == "proc" and item.get("name") == "main" for item in cli_lsp_data.get("symbols", []))
+    ):
+        print("cli_lsp_command: expected lsp command to emit diagnostics plus symbols")
+        print(cli_lsp.stdout)
+        return 1
+    print("ok cli_lsp_command")
+
     check_json = run([str(I_EXE), "--check", str(check_i), "--diagnostics=json"])
     try:
         check_json_data = json.loads(check_json.stdout)
@@ -905,6 +993,56 @@ main:proc()->i32 = {
         print(check_json_stdin.stdout)
         return 1
     print("ok check_json_stdin")
+
+    check_json_stdin_root_i = TEST_DIR / "check_json_stdin_root.i"
+    check_json_stdin_mod_i = TEST_DIR / "check_json_stdin_mod.i"
+    check_json_stdin_mod_i.write_text(r'''
+mod_value:proc()->i32 = {
+    return root_value;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_stdin_root_i.write_text(f'''
+import "{check_json_stdin_mod_i.as_posix()}"
+
+root_value:i32 = 7;
+
+main:proc()->i32 = {{
+    return mod_value();
+}}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    check_json_stdin_mod_source = r'''
+mod_value:proc()->i32 = {
+    return dirty_module_missing;
+}
+'''.strip() + "\n"
+    check_json_stdin_import = run(
+        [
+            str(I_EXE),
+            "--check",
+            str(check_json_stdin_root_i),
+            "--diagnostics=json",
+            "--stdin-path",
+            str(check_json_stdin_mod_i),
+        ],
+        input=check_json_stdin_mod_source,
+    )
+    try:
+        check_json_stdin_import_data = json.loads(check_json_stdin_import.stdout)
+    except json.JSONDecodeError:
+        print("check_json_stdin_import: expected JSON diagnostic from stdin import override")
+        print(check_json_stdin_import.stdout)
+        return 1
+    if (
+        check_json_stdin_import.returncode == 0
+        or not isinstance(check_json_stdin_import_data, list)
+        or not check_json_stdin_import_data
+        or check_json_stdin_import_data[0].get("file") != str(check_json_stdin_mod_i)
+        or "dirty_module_missing" not in check_json_stdin_import_data[0].get("message", "")
+    ):
+        print("check_json_stdin_import: expected dirty imported module diagnostic using project entry")
+        print(check_json_stdin_import.stdout)
+        return 1
+    print("ok check_json_stdin_import")
 
     check_symbols_mod_i = TEST_DIR / "check_symbols_mod.i"
     check_symbols_root_i = TEST_DIR / "check_symbols_root.i"

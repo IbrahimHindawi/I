@@ -14,9 +14,18 @@ I is C-shaped code with a smaller syntax surface and compile-time metaprogrammin
 - run `i.bat path\to\file.i build\i_gen\file.c` to translate a different source file
 
 ### Compiler CLI
-- `build\I.exe [input.i] [output.c]`
-- defaults: `src\main.i` -> `src\main.i.c`
+- `build\I.exe compile [input.i] -o [output.c] --header [output.h]`
+- `build\I.exe check [input.i]`
+- `build\I.exe check [input.i] --diagnostics=json`
+- `build\I.exe symbols [input.i]`
+- `build\I.exe lsp [input.i]`
+- `build\I.exe --help`
+- `build\I.exe [input.i] [output.c] [output.h]` still works as the legacy compile form
+- compile defaults: `src\main.i` -> `src\main.i.c`
 - the compiler also writes a companion header beside the output C file, for example `build\i_gen\main.i.h`
+- `check` parses, imports, validates, and type-checks without writing generated C
+- `symbols` emits compiler symbol metadata as JSON
+- `lsp` emits diagnostics plus compiler symbol metadata as JSON
 - `import "foo.i"` emits `#include "foo.h"` and lets the current file type-check against `foo.i` declarations
 - `i.bat` keeps generated C in `build\i_gen` so normal editing stays in `.i` files
 

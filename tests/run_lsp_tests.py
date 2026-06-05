@@ -969,6 +969,72 @@ main:proc()->i32 = {{
             print("lsp: didOpen should not run compiler symbols while attaching")
             print(graph_symbol_calls)
             return 1
+        graph_server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 87,
+                "method": "textDocument/semanticTokens/full",
+                "params": {"textDocument": {"uri": graph_root_uri}},
+            }
+        )
+        if graph_symbol_calls:
+            print("lsp: cold semantic tokens should not synchronously run compiler symbols while idle prefetch is pending")
+            print(graph_symbol_calls)
+            return 1
+        graph_cold_tokens_response = next((message for message in graph_server.sent if message.get("id") == 87), {})
+        if "data" not in graph_cold_tokens_response.get("result", {}):
+            print("lsp: cold semantic tokens should still return a token payload")
+            print(graph_cold_tokens_response)
+            return 1
+        graph_server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 86,
+                "method": "textDocument/documentSymbol",
+                "params": {"textDocument": {"uri": graph_root_uri}},
+            }
+        )
+        graph_server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 85,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": {"uri": graph_root_uri},
+                    "position": {"line": 3, "character": 11},
+                },
+            }
+        )
+        graph_server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 84,
+                "method": "textDocument/documentHighlight",
+                "params": {
+                    "textDocument": {"uri": graph_root_uri},
+                    "position": {"line": 3, "character": 11},
+                },
+            }
+        )
+        if graph_symbol_calls:
+            print("lsp: cold document symbols/completion/highlight should not synchronously run compiler symbols while idle prefetch is pending")
+            print(graph_symbol_calls)
+            return 1
+        graph_cold_symbol_response = next((message for message in graph_server.sent if message.get("id") == 86), {})
+        graph_cold_completion_response = next((message for message in graph_server.sent if message.get("id") == 85), {})
+        graph_cold_highlight_response = next((message for message in graph_server.sent if message.get("id") == 84), {})
+        if not isinstance(graph_cold_symbol_response.get("result"), list):
+            print("lsp: cold document symbols should still return a symbol list")
+            print(graph_cold_symbol_response)
+            return 1
+        if "items" not in graph_cold_completion_response.get("result", {}):
+            print("lsp: cold completion should still return a completion payload")
+            print(graph_cold_completion_response)
+            return 1
+        if not isinstance(graph_cold_highlight_response.get("result"), list):
+            print("lsp: cold document highlight should still return a highlight list")
+            print(graph_cold_highlight_response)
+            return 1
         graph_server.flush_pending_diagnostics(graph_root_uri)
         if graph_diagnostic_calls != [graph_root_uri] or graph_symbol_calls:
             print("lsp: debounced diagnostics should run only compiler diagnostics, leaving symbols for the idle prefetch")
@@ -985,6 +1051,23 @@ main:proc()->i32 = {{
             print(graph_symbol_calls)
             return 1
         graph_symbol_calls.clear()
+        graph_server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 83,
+                "method": "textDocument/semanticTokens/full",
+                "params": {"textDocument": {"uri": graph_root_uri}},
+            }
+        )
+        if graph_symbol_calls:
+            print("lsp: default semantic tokens should stay lexical after workspace symbols are warm")
+            print(graph_symbol_calls)
+            return 1
+        graph_warm_tokens_response = next((message for message in graph_server.sent if message.get("id") == 83), {})
+        if "data" not in graph_warm_tokens_response.get("result", {}):
+            print("lsp: warm lexical semantic tokens should still return a token payload")
+            print(graph_warm_tokens_response)
+            return 1
         graph_diagnostic_calls.clear()
         graph_server.handle(
             {
@@ -1000,21 +1083,22 @@ main:proc()->i32 = {{
                 },
             }
         )
-        if graph_root_uri in graph_server.pending_workspace_symbols or graph_symbol_calls:
-            print("lsp: symbol-stable edits should preserve compiler symbols and skip idle symbol prefetch")
+        if graph_root_uri not in graph_server.pending_workspace_symbols or graph_symbol_calls:
+            print("lsp: dirty edits should keep compiler symbols hot but defer symbol refresh to idle")
             print(graph_server.pending_workspace_symbols)
             print(graph_symbol_calls)
             return 1
         graph_server.flush_pending_diagnostics(graph_root_uri)
         if graph_diagnostic_calls != [graph_root_uri]:
-            print("lsp: symbol-stable edits should still publish compiler diagnostics")
+            print("lsp: dirty edits should still publish compiler diagnostics")
             print(graph_diagnostic_calls)
             return 1
         graph_server.flush_pending_workspace_symbols(graph_root_uri)
-        if graph_symbol_calls:
-            print("lsp: flushing after a symbol-stable edit should not run compiler symbols")
+        if graph_symbol_calls != [(graph_root_uri, True)]:
+            print("lsp: flushing after a dirty edit should run one idle compiler symbol refresh")
             print(graph_symbol_calls)
             return 1
+        graph_symbol_calls.clear()
         graph_server.handle({"jsonrpc": "2.0", "id": 88, "method": "workspace/symbol", "params": {"query": "Graph"}})
         graph_server.handle({"jsonrpc": "2.0", "id": 89, "method": "workspace/symbol", "params": {"query": "Graph"}})
     finally:
@@ -1094,8 +1178,8 @@ main:proc()->i32 = {{
         for checked_doc in publish_server.workspace.documents.values()
         if checked_doc.path and checked_doc.path.resolve() == module.resolve()
     )
-    if module_doc_count != 1:
-        print("lsp: dotted duplicate import should resolve to one module document")
+    if module_doc_count != 0:
+        print("lsp: didOpen should not recursively parse imported modules on the attach path")
         print(publish_server.workspace.documents.keys())
         return 1
     first_import_line = 0
@@ -1300,24 +1384,10 @@ main:proc()->i32 = {{
         print("lsp: expected cinclude keyword and path string semantic tokens")
         print(cinclude_tokens)
         return 1
-    module_loaded_doc = publish_server.workspace.documents.get(module_uri)
-    if module_loaded_doc is None:
-        print("lsp: didOpen should still load imported module documents for path navigation and indexing")
-        print(publish_server.workspace.documents.keys())
-        return 1
-    if publish_server.workspace.collect_python_diagnostics or module_loaded_doc.diagnostics:
-        print("lsp: compiler-backed LSP workspaces should parse imports without retaining Python fallback diagnostics")
-        print(module_loaded_doc.diagnostics if module_loaded_doc else None)
-        return 1
-    c_header_module_uri = lsp.path_to_uri(c_header_import_module)
-    c_header_loaded_doc = publish_server.workspace.documents.get(c_header_module_uri)
-    if c_header_loaded_doc is None:
-        print("lsp: didOpen should still load imported modules that contain invalid imports for navigation")
-        print(publish_server.workspace.documents.keys())
-        return 1
-    if c_header_loaded_doc.diagnostics:
-        print("lsp: compiler-backed LSP workspaces should not retain Python import diagnostics on loaded modules")
-        print(c_header_loaded_doc.diagnostics if c_header_loaded_doc else None)
+    published_doc = publish_server.workspace.documents.get(lsp.path_to_uri(app))
+    if published_doc is None or publish_server.workspace.collect_python_diagnostics or published_doc.diagnostics:
+        print("lsp: compiler-backed LSP didOpen should keep only the opened buffer and avoid Python fallback diagnostics")
+        print(published_doc.diagnostics if published_doc else None)
         return 1
 
     compiler_publish_server = CaptureServer()
@@ -1502,6 +1572,175 @@ main:proc()->i32 = {
         print("lsp: dirty-buffer compiler diagnostic range should span the unsaved identifier")
         print(dirty_diag)
         return 1
+
+    noop_sent_count = len(dirty_publish_server.sent)
+    dirty_publish_server.handle(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": dirty_uri},
+                "contentChanges": [{"text": dirty_source}],
+            },
+        }
+    )
+    if (
+        len(dirty_publish_server.sent) != noop_sent_count
+        or dirty_uri in dirty_publish_server.pending_diagnostics
+        or dirty_uri in dirty_publish_server.pending_workspace_symbols
+    ):
+        print("lsp: no-op didChange should not publish or schedule diagnostics/symbol refresh")
+        print(dirty_publish_server.sent[noop_sent_count:])
+        print(dirty_publish_server.pending_diagnostics)
+        print(dirty_publish_server.pending_workspace_symbols)
+        return 1
+
+    entry_project = TEST_DIR / "entry_project"
+    entry_src = entry_project / "src"
+    entry_src.mkdir(parents=True, exist_ok=True)
+    (entry_project / "bunyan.py").write_text("# test project root\n", encoding="utf-8", newline="\n")
+    entry_root_i = entry_src / "app_win32.i"
+    entry_mod_i = entry_src / "entry_mod.i"
+    entry_mod_i.write_text(
+        "mod_value:proc()->i32 = {\n    return root_value;\n}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    entry_root_i.write_text(
+        f"import \"{entry_mod_i.as_posix()}\"\n\nroot_value:i32 = 7;\n\nmain:proc()->i32 = {{\n    return mod_value();\n}}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    entry_uri = lsp.path_to_uri(entry_mod_i)
+    entry_server = CaptureServer()
+    entry_server.handle(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": entry_uri,
+                    "text": entry_mod_i.read_text(encoding="utf-8"),
+                }
+            },
+        }
+    )
+    entry_doc = entry_server.workspace.documents.get(entry_uri)
+    if not entry_doc or lsp.project_entry_for_doc(entry_doc) != entry_root_i.resolve():
+        print("lsp: project entry inference should choose the reachable top-level I entry")
+        print(lsp.project_entry_for_doc(entry_doc) if entry_doc else None)
+        return 1
+    entry_dirty_source = "mod_value:proc()->i32 = {\n    return dirty_import_missing;\n}\n"
+    entry_server.handle(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": entry_uri},
+                "contentChanges": [{"text": entry_dirty_source}],
+            },
+        }
+    )
+    entry_server.flush_pending_diagnostics(entry_uri)
+    entry_published = [
+        msg.get("params", {})
+        for msg in entry_server.sent
+        if msg.get("method") == "textDocument/publishDiagnostics" and msg.get("params", {}).get("uri") == entry_uri
+    ]
+    entry_last = entry_published[-1] if entry_published else {}
+    if not any("dirty_import_missing" in diag.get("message", "") for diag in entry_last.get("diagnostics", [])):
+        print("lsp: dirty imported module diagnostics should be checked through the project entry")
+        print(entry_published)
+        return 1
+    entry_server.cancel_pending_workspace_symbols()
+
+    imported_diag_project = TEST_DIR / "imported_diag_project"
+    imported_diag_src = imported_diag_project / "src"
+    imported_diag_src.mkdir(parents=True, exist_ok=True)
+    (imported_diag_project / "bunyan.py").write_text("# test project root\n", encoding="utf-8", newline="\n")
+    imported_diag_root = imported_diag_src / "app_win32.i"
+    imported_diag_mod = imported_diag_src / "diag_mod.i"
+    imported_diag_mod.write_text(
+        "diag_mod:proc()->i32 = {\n    return imported_file_missing;\n}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    imported_diag_root.write_text(
+        f"import \"{imported_diag_mod.as_posix()}\"\n\nmain:proc()->i32 = {{\n    return 0;\n}}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    imported_diag_root_uri = lsp.path_to_uri(imported_diag_root)
+    imported_diag_mod_uri = lsp.path_to_uri(imported_diag_mod)
+    imported_diag_server = CaptureServer()
+    imported_diag_server.handle(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": imported_diag_root_uri,
+                    "text": imported_diag_root.read_text(encoding="utf-8"),
+                }
+            },
+        }
+    )
+    imported_diag_server.flush_pending_diagnostics(imported_diag_root_uri)
+    imported_diag_publishes = [
+        msg.get("params", {})
+        for msg in imported_diag_server.sent
+        if msg.get("method") == "textDocument/publishDiagnostics"
+    ]
+    imported_diag_mod_publish = next(
+        (
+            params
+            for params in reversed(imported_diag_publishes)
+            if params.get("uri") == imported_diag_mod_uri
+        ),
+        {},
+    )
+    if not any(
+        "imported_file_missing" in diag.get("message", "")
+        for diag in imported_diag_mod_publish.get("diagnostics", [])
+    ):
+        print("lsp: compiler diagnostics from imported files should publish to the imported file URI")
+        print(imported_diag_publishes)
+        return 1
+    imported_diag_mod.write_text(
+        "diag_mod:proc()->i32 = {\n    return 0;\n}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    imported_diag_root_clean_text = imported_diag_root.read_text(encoding="utf-8") + "\n// touch\n"
+    imported_diag_server.handle(
+        {
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": imported_diag_root_uri},
+                "contentChanges": [{"text": imported_diag_root_clean_text}],
+            },
+        }
+    )
+    imported_diag_server.flush_pending_diagnostics(imported_diag_root_uri)
+    imported_diag_clean_publishes = [
+        msg.get("params", {})
+        for msg in imported_diag_server.sent
+        if msg.get("method") == "textDocument/publishDiagnostics"
+    ]
+    imported_diag_mod_clear = next(
+        (
+            params
+            for params in reversed(imported_diag_clean_publishes)
+            if params.get("uri") == imported_diag_mod_uri
+        ),
+        {},
+    )
+    if imported_diag_mod_clear.get("diagnostics") != []:
+        print("lsp: clean compiler runs should clear stale imported-file diagnostics")
+        print(imported_diag_clean_publishes)
+        return 1
+    imported_diag_server.cancel_pending_workspace_symbols()
 
     compiler_cache_doc = lsp.analyze(
         lsp.path_to_uri(compiler_dirty_app),

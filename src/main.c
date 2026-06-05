@@ -59,6 +59,8 @@ bool i32_eq(i32 a, i32 b) { return a == b; }
 static const char *g_source_path = "<input>";
 static const char *g_diag_source_path = null;
 static const char *g_diag_import_chain = null;
+static const char *g_stdin_override_path = null;
+static string8 g_stdin_override_source = {0};
 static bool g_diag_json = false;
 
 static void diag_note_import_chain(void);
@@ -2903,12 +2905,19 @@ static const char *resolve_import_path(memops_arena *arena, string8 import_lit) 
     return canonicalize_path(arena, out);
 }
 
+static string8 read_i_source_for_path(memops_arena *arena, const char *path) {
+    if (g_stdin_override_path && path && cstr_equals(path, g_stdin_override_path)) {
+        return g_stdin_override_source;
+    }
+    return string8_read_file(arena, path);
+}
+
 static void semantic_add_program_symbols(Program *prog, Scope *base, Vec_string8 *structs, memops_arena *arena);
 
 static void semantic_add_import_symbols(Program *prog, Scope *base, Vec_string8 *structs, memops_arena *arena) {
     for (i32 i = 0; i < prog->i_imports.length; i++) {
         const char *path = resolve_import_path(arena, prog->i_imports.data[i]);
-        string8 input = string8_read_file(arena, path);
+        string8 input = read_i_source_for_path(arena, path);
         if (!input.data) {
             printf("%s:0:0: semantic error: failed to read import %s\n", g_source_path, path);
             diag_note_import_chain();
@@ -10149,7 +10158,7 @@ static void program_append_program(memops_arena *arena, Program *dst, Program *s
 }
 
 static Program parse_i_file(memops_arena *arena, const char *path) {
-    string8 input = string8_read_file(arena, path);
+    string8 input = read_i_source_for_path(arena, path);
     if (!input.data) {
         if (g_diag_json) {
             char message[1024];
@@ -10306,7 +10315,7 @@ static Program expand_i_imports(memops_arena *arena, Program *prog, Vec_string8 
         Vec_string8_append(arena, stack, path_s);
         import_chain = import_chain_from_stack(arena, stack);
 
-        string8 input_check = string8_read_file(arena, path);
+        string8 input_check = read_i_source_for_path(arena, path);
         if (!input_check.data) {
             if (g_diag_json) {
                 char message[1024];
@@ -10539,15 +10548,109 @@ static bool emit_native_monomorph_headers(memops_arena *arena, Program *prog, co
     return true;
 }
 
+static void cli_print_usage(void) {
+    printf(
+        "I compiler\n"
+        "\n"
+        "usage:\n"
+        "  I compile [input.i] [-o output.c] [--header output.h]\n"
+        "  I check   [input.i] [--diagnostics=json]\n"
+        "  I symbols [input.i] [--stdin|--stdin-path file]\n"
+        "  I lsp     [input.i] [--stdin|--stdin-path file]\n"
+        "\n"
+        "legacy usage:\n"
+        "  I [input.i] [output.c] [output.h]\n"
+        "  I --check [input.i] [--diagnostics=json]\n"
+        "  I [input.i] --symbols=json\n"
+        "  I [input.i] --lsp=json\n"
+        "\n"
+        "commands:\n"
+        "  compile   transpile I to C and a generated header\n"
+        "  check     parse, import, validate, and type-check only\n"
+        "  symbols   emit compiler symbol metadata as JSON\n"
+        "  lsp       emit diagnostics plus compiler symbol metadata as JSON\n"
+        "  help      print this help\n"
+        "\n"
+        "options:\n"
+        "  -o, --output <file>       output C file for compile\n"
+        "  -H, --header <file>       output header file for compile\n"
+        "  --check                   legacy check mode\n"
+        "  --diagnostics=json        emit diagnostics as JSON\n"
+        "  --symbols=json            legacy symbols JSON mode\n"
+        "  --lsp=json                legacy LSP JSON mode\n"
+        "  --stdin                   read input source from stdin\n"
+        "  --stdin-path <file>       override a source file with stdin text\n"
+        "  -h, --help                print this help\n"
+        "  --version                 print compiler version\n"
+    );
+}
+
+static void cli_print_version(void) {
+    printf("I compiler dev\n");
+}
+
+static bool cli_is_command(const char *arg) {
+    return cstr_equals(arg, "compile") ||
+           cstr_equals(arg, "check") ||
+           cstr_equals(arg, "symbols") ||
+           cstr_equals(arg, "lsp") ||
+           cstr_equals(arg, "help");
+}
+
+static void cli_error_json_or_text(const char *message) {
+    if (g_diag_json) {
+        diag_json_error("<cli>", 0, 0, "cli", message);
+    } else {
+        printf("i: error: %s\n", message);
+    }
+}
+
+static bool cli_expect_value(i32 argc, char *argv[], i32 *index, const char *option, const char **out_value) {
+    if (*index + 1 >= argc) {
+        char message[1024];
+        snprintf(message, sizeof(message), "%s expects a value", option);
+        cli_error_json_or_text(message);
+        return false;
+    }
+    *out_value = argv[++(*index)];
+    return true;
+}
+
 i32 main(i32 argc, char *argv[]) {
     bool check_only = false;
     bool symbols_json = false;
     bool lsp_json = false;
     bool read_source_from_stdin = false;
     const char *input_path = null;
+    const char *stdin_override_path_arg = null;
     const char *output_path = null;
     const char *header_path = null;
     i32 positional = 0;
+    const char *command = null;
+
+    if (argc > 1) {
+        const char *first = argv[1];
+        if (cstr_equals(first, "-h") || cstr_equals(first, "--help") || cstr_equals(first, "help")) {
+            cli_print_usage();
+            return 0;
+        }
+        if (cstr_equals(first, "--version") || cstr_equals(first, "version")) {
+            cli_print_version();
+            return 0;
+        }
+        if (cli_is_command(first)) {
+            command = first;
+            if (cstr_equals(command, "check")) {
+                check_only = true;
+            } else if (cstr_equals(command, "symbols")) {
+                symbols_json = true;
+                g_diag_json = true;
+            } else if (cstr_equals(command, "lsp")) {
+                lsp_json = true;
+                g_diag_json = true;
+            }
+        }
+    }
 
     for (i32 i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -10563,11 +10666,21 @@ i32 main(i32 argc, char *argv[]) {
             g_diag_json = true;
         } else if (cstr_equals(arg, "--lsp") && i + 1 < argc && cstr_equals(argv[i + 1], "json")) {
             g_diag_json = true;
+        } else if (cstr_equals(arg, "symbols") || cstr_equals(arg, "lsp")) {
+            g_diag_json = true;
         }
     }
 
-    for (i32 i = 1; i < argc; i++) {
+    for (i32 i = command ? 2 : 1; i < argc; i++) {
         const char *arg = argv[i];
+        if (cstr_equals(arg, "-h") || cstr_equals(arg, "--help")) {
+            cli_print_usage();
+            return 0;
+        }
+        if (cstr_equals(arg, "--version")) {
+            cli_print_version();
+            return 0;
+        }
         if (cstr_equals(arg, "--check")) {
             check_only = true;
             if (i + 1 < argc && !cstr_starts_with(argv[i + 1], "--") && !input_path) {
@@ -10575,8 +10688,40 @@ i32 main(i32 argc, char *argv[]) {
             }
             continue;
         }
+        if (cstr_equals(arg, "-o") || cstr_equals(arg, "--output")) {
+            if (!cli_expect_value(argc, argv, &i, arg, &output_path)) return 1;
+            continue;
+        }
+        if (cstr_starts_with(arg, "--output=")) {
+            output_path = arg + strlen("--output=");
+            continue;
+        }
+        if (cstr_equals(arg, "-H") || cstr_equals(arg, "--header")) {
+            if (!cli_expect_value(argc, argv, &i, arg, &header_path)) return 1;
+            continue;
+        }
+        if (cstr_starts_with(arg, "--header=")) {
+            header_path = arg + strlen("--header=");
+            continue;
+        }
         if (cstr_equals(arg, "--stdin")) {
             read_source_from_stdin = true;
+            continue;
+        }
+        if (cstr_starts_with(arg, "--stdin-path=")) {
+            stdin_override_path_arg = arg + strlen("--stdin-path=");
+            continue;
+        }
+        if (cstr_equals(arg, "--stdin-path")) {
+            if (i + 1 >= argc) {
+                if (g_diag_json) {
+                    diag_json_error("<cli>", 0, 0, "cli", "--stdin-path expects a file path");
+                    return 1;
+                }
+                printf("i: error: --stdin-path expects a file path\n");
+                return 1;
+            }
+            stdin_override_path_arg = argv[++i];
             continue;
         }
         if (cstr_starts_with(arg, "--lsp=")) {
@@ -10617,6 +10762,47 @@ i32 main(i32 argc, char *argv[]) {
                     return 1;
                 }
                 printf("i: error: unsupported lsp format %s\n", value);
+                return 1;
+            }
+            continue;
+        }
+        if (cstr_starts_with(arg, "--format=")) {
+            const char *value = arg + strlen("--format=");
+            if (cstr_equals(value, "json")) {
+                if (command && cstr_equals(command, "symbols")) {
+                    symbols_json = true;
+                    g_diag_json = true;
+                } else if (command && cstr_equals(command, "lsp")) {
+                    lsp_json = true;
+                    g_diag_json = true;
+                } else {
+                    g_diag_json = true;
+                }
+            } else {
+                char message[1024];
+                snprintf(message, sizeof(message), "unsupported format %s", value);
+                cli_error_json_or_text(message);
+                return 1;
+            }
+            continue;
+        }
+        if (cstr_equals(arg, "--format")) {
+            const char *value = null;
+            if (!cli_expect_value(argc, argv, &i, arg, &value)) return 1;
+            if (cstr_equals(value, "json")) {
+                if (command && cstr_equals(command, "symbols")) {
+                    symbols_json = true;
+                    g_diag_json = true;
+                } else if (command && cstr_equals(command, "lsp")) {
+                    lsp_json = true;
+                    g_diag_json = true;
+                } else {
+                    g_diag_json = true;
+                }
+            } else {
+                char message[1024];
+                snprintf(message, sizeof(message), "unsupported format %s", value);
+                cli_error_json_or_text(message);
                 return 1;
             }
             continue;
@@ -10715,9 +10901,9 @@ i32 main(i32 argc, char *argv[]) {
         }
         if (positional == 0 && !input_path) {
             input_path = arg;
-        } else if (positional <= 1 && !output_path) {
+        } else if ((!command || cstr_equals(command, "compile")) && positional <= 1 && !output_path) {
             output_path = arg;
-        } else if (positional <= 2 && !header_path) {
+        } else if ((!command || cstr_equals(command, "compile")) && positional <= 2 && !header_path) {
             header_path = arg;
         } else {
             if (g_diag_json) {
@@ -10738,15 +10924,40 @@ i32 main(i32 argc, char *argv[]) {
     memops_arena arena = {0};
     memops_arena_initialize(&arena);
 
-    string8 input = read_source_from_stdin ? read_stdin_string8(&arena) : string8_read_file(&arena, input_path);
+    const char *canonical_input_path = canonicalize_path(&arena, string8_from_cstr(&arena, input_path));
+    if (stdin_override_path_arg) {
+        g_stdin_override_path = canonicalize_path(&arena, string8_from_cstr(&arena, stdin_override_path_arg));
+        g_stdin_override_source = read_stdin_string8(&arena);
+        if (!g_stdin_override_source.data) {
+            if (g_diag_json) {
+                diag_json_error(stdin_override_path_arg, 0, 0, "io", "failed to read stdin");
+                return 1;
+            }
+            printf("i: error: failed to read stdin\n");
+            return 1;
+        }
+    }
+
+    bool input_from_stdin = read_source_from_stdin && !g_stdin_override_path;
+    if (g_stdin_override_path && cstr_equals(canonical_input_path, g_stdin_override_path)) {
+        input_from_stdin = true;
+    }
+    string8 input = {0};
+    if (g_stdin_override_path && cstr_equals(canonical_input_path, g_stdin_override_path)) {
+        input = g_stdin_override_source;
+    } else if (read_source_from_stdin && !g_stdin_override_path) {
+        input = read_stdin_string8(&arena);
+    } else {
+        input = string8_read_file(&arena, input_path);
+    }
     if (!input.data) {
         if (g_diag_json) {
             char message[1024];
-            snprintf(message, sizeof(message), "failed to read %s", read_source_from_stdin ? "stdin" : input_path);
+            snprintf(message, sizeof(message), "failed to read %s", input_from_stdin ? "stdin" : input_path);
             diag_json_error(input_path, 0, 0, "io", message);
             return 1;
         }
-        printf("i: error: failed to read %s\n", read_source_from_stdin ? "stdin" : input_path);
+        printf("i: error: failed to read %s\n", input_from_stdin ? "stdin" : input_path);
         return 1;
     }
 

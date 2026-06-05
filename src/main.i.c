@@ -381,11 +381,11 @@ void memops_arena_temp_end(memops_arena_temp temp);
 #line 9 "src/main.i"
 i32 main(i32 argc, char * * argv);
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:24:32 */
+/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:27:32 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_payload Array_payload_reserve(memops_arena * arena, u64 length);
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:30:27 */
+/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:34:27 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_i32 Array_i32_reserve(memops_arena * arena, u64 length);
 
@@ -581,38 +581,41 @@ payload p = {};
     #line 19 "src/main.i"
 char * name = payload_reflect.name;
     #line 20 "src/main.i"
-printf("name %p\n", name);
-    #line 22 "src/main.i"
-i32 len = 16;
-    #line 23 "src/main.i"
-memops_arena_temp temp = memops_arena_temp_begin(&(arena));
-    #line 24 "src/main.i"
-Array_payload payloads = Array_payload_reserve(temp.arena, 128);
-    #line 25 "src/main.i"
-for (i32 i = 0; (i < 128); i += 1) {
-        #line 26 "src/main.i"
-payloads.data[i] = {.x = i};
+printf("name %s\n", name);
+    #line 21 "src/main.i"
+for (i32 i = 0; (i < payload_reflect.field_count); i += 1) {
+        #line 22 "src/main.i"
+printf("field[%d] = %s\n", i, payload_reflect.fields[i].name);
     }
+    #line 25 "src/main.i"
+i32 len = 16;
+    #line 26 "src/main.i"
+memops_arena_temp temp = memops_arena_temp_begin(&(arena));
+    #line 27 "src/main.i"
+Array_payload payloads = Array_payload_reserve(temp.arena, 128);
     #line 28 "src/main.i"
+for (i32 i = 0; (i < 128); i += 1) {
+    }
+    #line 32 "src/main.i"
 memops_arena_temp_end(temp);
-    #line 30 "src/main.i"
+    #line 34 "src/main.i"
 Array_i32 numbers = Array_i32_reserve(&(arena), len);
-    #line 31 "src/main.i"
+    #line 35 "src/main.i"
 for (i32 i = 0; (i < len); i += 1) {
-        #line 32 "src/main.i"
+        #line 36 "src/main.i"
 numbers.data[i] = i;
     }
-    #line 34 "src/main.i"
+    #line 38 "src/main.i"
 for (i32 i = 0; (i < len); i += 1) {
-        #line 35 "src/main.i"
+        #line 39 "src/main.i"
 printf("i = %d, ", numbers.data[i]);
     }
-    #line 38 "src/main.i"
+    #line 42 "src/main.i"
 return 0;
 }
 
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:24:32 */
+/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:27:32 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_payload Array_payload_reserve(memops_arena * arena, u64 length) {
     #line 10 "C:\\devel\\i\\src\\runtime\\Array.i"
@@ -636,7 +639,7 @@ return arr;
 }
 
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:30:27 */
+/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:34:27 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_i32 Array_i32_reserve(memops_arena * arena, u64 length) {
     #line 10 "C:\\devel\\i\\src\\runtime\\Array.i"

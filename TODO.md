@@ -55,9 +55,20 @@ Generated C only needs to be valid, stable enough, and debuggable when necessary
 - [x] Workspace-symbol prefetch defaults to a longer idle debounce, applies compiler workspace symbols, and warms the reference index without blocking the live diagnostic path.
 - [x] The LSP reference index stores precise generic spans without duplicate simple-identifier locations, keeping `Array` and `Payload` references inside `Array<Payload>` distinct.
 - [x] The LSP reference-index builder skips expensive sanitizing/normalization on ordinary lines and simple identifiers, cutting Gini index construction from ~120ms to ~35-42ms and idle symbol prefetch from ~206ms to ~146ms locally.
-- [x] After compiler symbols are warmed, symbol-stable edits preserve the existing symbol graph and skip the idle `--symbols=json` prefetch entirely; the measured warmed Gini body-only edit has no pending symbol timer and a ~0ms symbol flush.
+- [x] Dirty `didChange` now uses a text-only hot path that preserves the warmed symbol graph immediately, defers compiler symbol refresh to the idle timer, and cuts large Gini file edit handling from ~12-32ms to ~0.2-0.4ms locally.
+- [x] Compiler diagnostics and symbol extraction support dirty imported modules through `--stdin-path`, so the LSP can check the real project entry while overriding the edited buffer text.
+- [x] Gini imported-module diagnostics now run through `src/gin_win32.i`, so edits in files like `gops.i` publish live red diagnostics for the edited file instead of being checked as fake standalone entries.
+- [x] LSP `didOpen` now uses a path-only buffer scan and leaves workspace semantics to compiler symbol prefetch, cutting large Gini file attach from ~30ms to ~1-2ms locally.
+- [x] Compiler workspace-symbol application loads imported documents with the same path-only scan before applying compiler metadata, cutting Gini idle symbol warmup from ~318ms to ~209ms locally.
+- [x] Cold `textDocument/semanticTokens/full` no longer forces synchronous compiler symbol warmup while idle prefetch is pending; it returns lexical current-buffer tokens instead, cutting Gini `gops.i` cold semantic tokens from ~275ms to ~16ms locally.
+- [x] Semantic token results are cached by document text and workspace index revision, making repeated cold/warm Gini token requests sub-millisecond locally.
+- [x] Default `textDocument/semanticTokens/full` now stays on the fast lexical path even after workspace symbols are warm; rich compiler-backed semantic tokens are opt-in through `I_LSP_RICH_SEMANTIC_TOKENS=1`.
+- [x] With the fast semantic-token default, measured Gini `gops.i` locally at cold semantic tokens ~18ms, warm semantic tokens ~2ms, document symbols ~2ms, completion ~12ms, references ~3ms, and live dirty diagnostics ~109ms.
+- [x] Cold `documentSymbol`, `completion`, and `documentHighlight` no longer synchronously force compiler symbol warmup while the idle prefetch is pending.
+- [x] Scheduled LSP diagnostics now preserve the file URI from compiler JSON and publish imported-file errors to the imported file, instead of filtering every compiler diagnostic back to the opened project entry.
+- [x] Scheduled LSP diagnostics remember which file URIs were published for each project-entry check and send empty diagnostics to stale imported-file URIs after a clean compiler run.
 - [x] Optional `I_LSP_TRACE` logging records live diagnostic publish counts and compiler diagnostic latency without writing to LSP stdout.
-- [x] The Neovim installer copies the actual `after/ftplugin/i.lua` LSP starter without failing on a missing legacy `ftplugin/i.lua`.
+- [x] The Neovim installer copies `ftdetect/i.vim`, `syntax/i.vim`, `ftplugin/i.lua`, and `after/ftplugin/i.lua`, so `*.i` buffers get both syntax and an attached `i-lsp` client.
 - [x] The Neovim I ftplugin only marks a buffer attached after `vim.lsp.start()` succeeds, runs the server from the project root, and enables underline/sign diagnostics with insert-mode updates.
 - [x] The LSP compiler-diagnostic cache keys on the `I.exe` binary timestamp, so it recovers when the compiler is built or rebuilt.
 - [x] Compiler-backed LSP workspaces parse/index imports without retaining Python fallback diagnostics; standalone `Workspace()` still keeps fallback diagnostics for tests and compiler-missing use.
@@ -98,6 +109,32 @@ Generated C only needs to be valid, stable enough, and debuggable when necessary
 - [x] Expanded the local `gcc.c-torture/compile` smoke corpus and fixed nested generic struct dependency emission exposed by the translated-I corpus.
 - [ ] Broaden compiler JSON output to every remaining ad hoc semantic/type/codegen diagnostic.
 - [ ] Move more LSP semantic ownership from Python helpers to compiler-backed checks.
+
+## Remaining LSP Work
+
+The current LSP is good enough to use. Future work should keep Python as transport/cache glue and avoid adding new compiler-like semantics there.
+
+- [ ] Add a cheap `i-lsp doctor` or `--self-check` path that reports which `I.exe` is used, whether it exists, filetype install paths, debounce settings, and whether compiler diagnostics are enabled.
+- [ ] Add a headless Neovim smoke test for `*.i` filetype detection, `i-lsp` attachment, and a real `publishDiagnostics` red-squiggle flow.
+- [ ] Move hover/definition/completion edge cases that still depend on Python inference into compiler `--lsp=json` metadata, especially generic instantiated fields, proc-pointer calls, enum members, aliases, and expected-type contexts.
+- [ ] Add compiler-provided completion contexts for proc args, struct literals, enum values, field access, and typed assignment so Python mostly formats completion items instead of deciding semantic matches.
+- [ ] Add compiler-provided reference/rename spans for project files, including generic names like `Array<T>reserve`, enum generated values, fields, globals, locals, and imported modules.
+- [ ] Add cancellable compiler-check workers or generation-aware subprocess cancellation if large projects make stale `I.exe --check` runs pile up during typing.
+- [ ] Keep semantic tokens lexical by default; only expand rich semantic tokens if the compiler can emit token data cheaply enough to stay invisible during editing.
+- [ ] Add optional trace timing summaries for `didOpen`, `didChange`, diagnostics, completion, symbols, semantic tokens, references, and rename, with Gini as the default perf fixture.
+- [ ] Later, consider replacing repeated subprocess calls with a long-lived native analysis process or compiler library mode while keeping the same JSON/LSP contract.
+
+## Debugger And Visual Studio Notes
+
+The current Visual Studio debugger path is good enough:
+
+- [x] Gini debug builds compile generated I C with CodeView/PDB flags (`/Zi /Od /Ob0 /RTC1`) and link with `/debug`.
+- [x] I emits `#line` mappings, so Visual Studio can step through `.i` source while debugging the generated C/PDB.
+- [x] Mapping the `.i` extension to the C/C++ editor in Visual Studio is acceptable syntax highlighting for now because I is intentionally C-shaped.
+- [x] Disassembly side-by-side with `.i` stepping works well enough for the current debugging workflow.
+- [ ] If Visual Studio highlighting becomes annoying, add a small VSIX/TextMate grammar for I instead of a full Visual Studio language service.
+- [ ] Add focused Natvis only where the default debugger view is not enough. Useful candidates are `string8`, arenas, generated arrays/vectors, math types, handles, and reflection metadata.
+- [ ] Keep generated C/PDB names stable and I-like where practical, but do not spend time making generated C pretty unless it directly improves debugging.
 
 ## 1. Compiler Diagnostics First
 
