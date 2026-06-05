@@ -138,6 +138,10 @@ payload_add:proc(p:*Payload, amount:i32)->i32 = {
     return p[0].value + amount;
 }
 
+consume_payload:proc(payload:Payload)->i32 = {
+    return payload.value;
+}
+
 mix3:proc(a:i32, b:i32, c:i32)->i32 = {
     return a + b + c;
 }
@@ -242,6 +246,12 @@ main:proc()->i32 = {{
     value:i32 = 1;
     score:i32 = v;
     payload_ptr:*Payload = p;
+    payload_type_field:i32 = Payload.;
+    payload_reflect_field:*const char = Payload<>.;
+    kind_reflect_field:u64 = Kind<>.;
+    call_struct_field:i32 = consume_payload({{ . }});
+    payload_array:Array<Payload> = Array<Payload>r;
+    payload_array_empty:Array<Payload> = Array<Payload>;
     return 0;
 }}
 """.strip()
@@ -565,7 +575,11 @@ main:proc()->i32 = {{
         print(structured_proc_hover)
         return 1
     structured_proc_completion = lsp.completion_to_lsp(structured_workspace, structured_proc)
-    if structured_proc_completion.get("detail") != "make_value:proc(value:i32)->i32":
+    if (
+        structured_proc_completion.get("detail") != "make_value:proc(value:i32)->i32"
+        or structured_proc_completion.get("insertTextFormat") != 2
+        or structured_proc_completion.get("insertText") != "make_value(${1:value})$0"
+    ):
         print("lsp: proc completion detail should prefer compiler-backed proc params/return metadata")
         print(structured_proc_completion)
         return 1
@@ -1795,6 +1809,39 @@ main:proc()->i32 = {
         print("lsp: expected textDocument/completion in struct literal to return field items")
         print(struct_completion_response)
         return 1
+    call_struct_line = next(i for i, line in enumerate(completion_context_lines) if "call_struct_field" in line)
+    call_struct_col = completion_context_lines[call_struct_line].rindex(".") + 1
+    call_struct_items = lsp.struct_literal_field_completions_at(workspace, completion_context_doc, call_struct_line, call_struct_col)
+    if (
+        not any(item.get("label") == "value" and item.get("detail") == "Payload.value: i32" for item in call_struct_items)
+        or not any(item.get("label") == "values" and item.get("detail") == "Payload.values: [4]i32" for item in call_struct_items)
+    ):
+        print("lsp: expected struct literal field completion in proc argument to use active parameter type")
+        print(call_struct_items)
+        return 1
+    call_struct_completion_server = CaptureServer()
+    call_struct_completion_server.workspace = workspace
+    call_struct_completion_server.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 26,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": completion_context_doc.uri},
+                "position": {"line": call_struct_line, "character": call_struct_col},
+            },
+        }
+    )
+    call_struct_completion_response = call_struct_completion_server.sent[-1] if call_struct_completion_server.sent else {}
+    call_struct_completion_items = call_struct_completion_response.get("result", {}).get("items", [])
+    if (
+        call_struct_completion_response.get("id") != 26
+        or not any(item.get("label") == "value" for item in call_struct_completion_items)
+        or any(item.get("label") == "Payload" for item in call_struct_completion_items)
+    ):
+        print("lsp: expected textDocument/completion in proc argument initializer to return field items")
+        print(call_struct_completion_response)
+        return 1
     enum_context_line = next(i for i, line in enumerate(completion_context_lines) if "k:Kind" in line)
     enum_context_col = completion_context_lines[enum_context_line].index("K;") + 1
     enum_context_items = lsp.enum_completions_at(workspace, completion_context_doc, enum_context_line, enum_context_col)
@@ -1875,6 +1922,158 @@ main:proc()->i32 = {
     ):
         print("lsp: expected textDocument/completion in typed assignment to return value items")
         print(expected_completion_response)
+        return 1
+
+    type_field_line = next(i for i, line in enumerate(completion_context_lines) if "payload_type_field" in line)
+    type_field_col = completion_context_lines[type_field_line].index(".") + 1
+    type_field_items = lsp.type_field_completions_at(
+        workspace,
+        completion_context_doc,
+        type_field_line,
+        type_field_col,
+    )
+    if not any(item.name == "value" and item.detail == "Payload.value: i32" for item in type_field_items):
+        print("lsp: expected type field completion after Payload.")
+        print(type_field_items)
+        return 1
+    reflect_field_line = next(i for i, line in enumerate(completion_context_lines) if "payload_reflect_field" in line)
+    reflect_field_col = completion_context_lines[reflect_field_line].index("Payload<>.") + len("Payload<>.")
+    reflect_field_items = lsp.reflect_field_completions_at(
+        workspace,
+        completion_context_doc,
+        reflect_field_line,
+        reflect_field_col,
+    )
+    if (
+        not any(item.name == "name" and item.detail == "Payload<>.name: *const char" for item in reflect_field_items)
+        or not any(item.name == "field_count" and item.detail == "Payload<>.field_count: u64" for item in reflect_field_items)
+        or not any(item.name == "fields" and item.detail == "Payload<>.fields: *const i_reflect_field" for item in reflect_field_items)
+        or any(item.name == "value" for item in reflect_field_items)
+    ):
+        print("lsp: expected Payload<>. completion to return reflection metadata fields only")
+        print(reflect_field_items)
+        return 1
+    reflect_enum_line = next(i for i, line in enumerate(completion_context_lines) if "kind_reflect_field" in line)
+    reflect_enum_col = completion_context_lines[reflect_enum_line].index("Kind<>.") + len("Kind<>.")
+    reflect_enum_items = lsp.reflect_field_completions_at(
+        workspace,
+        completion_context_doc,
+        reflect_enum_line,
+        reflect_enum_col,
+    )
+    if (
+        not any(item.name == "value_count" and item.detail == "Kind<>.value_count: u64" for item in reflect_enum_items)
+        or not any(item.name == "values" and item.detail == "Kind<>.values: *const i_reflect_enum_value" for item in reflect_enum_items)
+        or any(item.name == "field_count" for item in reflect_enum_items)
+    ):
+        print("lsp: expected Kind<>. completion to return enum reflection metadata fields only")
+        print(reflect_enum_items)
+        return 1
+    reflect_completion_server = CaptureServer()
+    reflect_completion_server.workspace = workspace
+    reflect_completion_server.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 126,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": completion_context_doc.uri},
+                "position": {"line": reflect_field_line, "character": reflect_field_col},
+            },
+        }
+    )
+    reflect_completion_response = reflect_completion_server.sent[-1] if reflect_completion_server.sent else {}
+    reflect_completion_items = reflect_completion_response.get("result", {}).get("items", [])
+    if (
+        reflect_completion_response.get("id") != 126
+        or not any(item.get("label") == "field_count" for item in reflect_completion_items)
+        or not any(item.get("label") == "fields" for item in reflect_completion_items)
+        or any(item.get("label") == "value" for item in reflect_completion_items)
+    ):
+        print("lsp: expected textDocument/completion after Payload<>. to return reflect metadata fields")
+        print(reflect_completion_response)
+        return 1
+    generic_owner_proc_line = next(i for i, line in enumerate(completion_context_lines) if "payload_array" in line)
+    generic_owner_proc_col = completion_context_lines[generic_owner_proc_line].index("Array<Payload>r") + len("Array<Payload>r")
+    generic_owner_proc_items = lsp.generic_owner_proc_completions_at(
+        workspace,
+        completion_context_doc,
+        generic_owner_proc_line,
+        generic_owner_proc_col,
+    )
+    if not any(
+        item.name == "Array<Payload>reserve"
+        and lsp.proc_signature_label_for_symbol(item, item.name) == "Array<Payload>reserve:proc(length:u64)->Array<Payload>"
+        for item in generic_owner_proc_items
+    ):
+        print("lsp: expected generic owner proc completion after Array<Payload>r")
+        print(generic_owner_proc_items)
+        return 1
+    generic_owner_proc_context_items = lsp.generic_owner_proc_completion_items_at(
+        workspace,
+        completion_context_doc,
+        generic_owner_proc_line,
+        generic_owner_proc_col,
+    )
+    typed_member_start = completion_context_lines[generic_owner_proc_line].index("Array<Payload>r") + len("Array<Payload>")
+    if not any(
+        item.get("label") == "reserve"
+        and item.get("detail") == "Array<Payload>reserve:proc(length:u64)->Array<Payload>"
+        and item.get("insertTextFormat") == 2
+        and item.get("insertText") == "reserve(${1:length})$0"
+        and item.get("textEdit", {}).get("range", {}).get("start", {}).get("character") == typed_member_start
+        and item.get("textEdit", {}).get("newText") == "reserve(${1:length})$0"
+        for item in generic_owner_proc_context_items
+    ):
+        print("lsp: expected generic owner proc context item to insert a member suffix snippet")
+        print(generic_owner_proc_context_items)
+        return 1
+    generic_owner_empty_line = next(i for i, line in enumerate(completion_context_lines) if "payload_array_empty" in line)
+    generic_owner_empty_col = completion_context_lines[generic_owner_empty_line].index("Array<Payload>;") + len("Array<Payload>")
+    generic_owner_empty_items = lsp.generic_owner_proc_completion_items_at(
+        workspace,
+        completion_context_doc,
+        generic_owner_empty_line,
+        generic_owner_empty_col,
+    )
+    if not any(
+        item.get("label") == "reserve"
+        and item.get("insertTextFormat") == 2
+        and item.get("textEdit", {}).get("range", {}).get("start", {}).get("character") == generic_owner_empty_col
+        and item.get("textEdit", {}).get("newText") == "reserve(${1:length})$0"
+        for item in generic_owner_empty_items
+    ):
+        print("lsp: expected generic owner proc context item after Array<Payload> to insert reserve snippet")
+        print(generic_owner_empty_items)
+        return 1
+    generic_owner_completion_server = CaptureServer()
+    generic_owner_completion_server.workspace = workspace
+    generic_owner_completion_server.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 26,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": completion_context_doc.uri},
+                "position": {"line": generic_owner_proc_line, "character": generic_owner_proc_col},
+            },
+        }
+    )
+    generic_owner_completion_response = generic_owner_completion_server.sent[-1] if generic_owner_completion_server.sent else {}
+    generic_owner_completion_items = generic_owner_completion_response.get("result", {}).get("items", [])
+    if (
+        generic_owner_completion_response.get("id") != 26
+        or not any(
+            item.get("label") == "reserve"
+            and item.get("detail") == "Array<Payload>reserve:proc(length:u64)->Array<Payload>"
+            and item.get("insertTextFormat") == 2
+            and item.get("textEdit", {}).get("newText") == "reserve(${1:length})$0"
+            for item in generic_owner_completion_items
+        )
+        or any(item.get("label") == "Payload" for item in generic_owner_completion_items)
+    ):
+        print("lsp: expected textDocument/completion after Array<Payload>r to return owner proc items")
+        print(generic_owner_completion_response)
         return 1
 
     if not any("type error: type 'Payload' has no field 'missing'" in diag.message for diag in doc.diagnostics):
@@ -2146,8 +2345,8 @@ main:proc()->i32 = {
         print("lsp: expected field hover/definition lookup for p.value")
         return 1
     field_refs = workspace.field_references(field)
-    if len(field_refs) != 7:
-        print("lsp: expected Payload.value references to include declaration and six usages")
+    if len(field_refs) != 8:
+        print("lsp: expected Payload.value references to include declaration and seven usages")
         print(field_refs)
         return 1
     highlight_server = lsp.LspServer()
@@ -2179,7 +2378,7 @@ main:proc()->i32 = {
         for uri, edits in field_rename.get("changes", {}).items()
         for edit in edits
     ]
-    if len(flattened_field_edits) != 7 or any(edit[3] != "payload_value" for edit in flattened_field_edits):
+    if len(flattened_field_edits) != 8 or any(edit[3] != "payload_value" for edit in flattened_field_edits):
         print("lsp: expected field-aware rename edits for Payload.value")
         print(field_rename)
         return 1
@@ -2595,7 +2794,8 @@ main:proc()->i32 = {
     generic_completion_lsp = lsp.completion_to_lsp(workspace, generic_completion)
     if (
         generic_completion_lsp.get("label") != "Array<T>reserve"
-        or generic_completion_lsp.get("insertText") != "Array<T>reserve"
+        or generic_completion_lsp.get("insertTextFormat") != 2
+        or generic_completion_lsp.get("insertText") != "Array<T>reserve(${1:length})$0"
         or generic_completion_lsp.get("filterText") != "Arrayreserve"
         or generic_completion_lsp.get("data", {}).get("kind") != "proc"
         or generic_completion_lsp.get("data", {}).get("name") != "Array<T>reserve"
@@ -2612,7 +2812,8 @@ main:proc()->i32 = {
     if (
         resolved_generic_completion.get("detail") != "Array<T>reserve:proc(length:u64)->Array<T>"
         or resolved_generic_completion.get("filterText") != "Arrayreserve"
-        or resolved_generic_completion.get("insertText") != "Array<T>reserve"
+        or resolved_generic_completion.get("insertTextFormat") != 2
+        or resolved_generic_completion.get("insertText") != "Array<T>reserve(${1:length})$0"
         or resolved_generic_completion.get("data") != generic_completion_lsp["data"]
     ):
         print("lsp: expected completionItem/resolve to rehydrate generic proc completion")

@@ -294,8 +294,11 @@ I_REFLECT_INLINE i32 i_reflect_enum_value_from_name(const i_reflect_enum *type, 
 structdecl(memops_arena);
 structdecl(memops_arena_temp);
 structdecl(payload);
+structdecl(Array_payload);
+structdecl(Array_i32);
+structdecl(Node_payload);
+structdecl(List_payload);
 
-#include "Array.h"
 
 #line 13 "C:\\devel\\i\\src\\runtime\\memops.i"
 structdef(memops_arena) {
@@ -321,20 +324,75 @@ structdef(memops_arena_temp) {
     u64 used;
 };
 
-#line 4 "src/main.i"
-structdef(payload) {
+#line 1 "<generated>"
+/* I monomorph: struct Array<T> -> Array_payload; declared at C:\devel\i\src\runtime\Array.i:4:1 */
+#line 4 "C:\\devel\\i\\src\\runtime\\Array.i"
+structdef(Array_payload) {
+#line 5 "C:\\devel\\i\\src\\runtime\\Array.i"
+    payload * data;
+#line 6 "C:\\devel\\i\\src\\runtime\\Array.i"
+    u64 length;
+};
+
+#line 1 "<generated>"
+/* I monomorph: struct Array<T> -> Array_i32; declared at C:\devel\i\src\runtime\Array.i:4:1 */
+#line 4 "C:\\devel\\i\\src\\runtime\\Array.i"
+structdef(Array_i32) {
+#line 5 "C:\\devel\\i\\src\\runtime\\Array.i"
+    i32 * data;
+#line 6 "C:\\devel\\i\\src\\runtime\\Array.i"
+    u64 length;
+};
+
+#line 1 "<generated>"
+/* I monomorph: struct Node<T> -> Node_payload; declared at C:\devel\i\src\runtime\Node.i:4:1 */
+#line 4 "C:\\devel\\i\\src\\runtime\\Node.i"
+structdef(Node_payload) {
+#line 5 "C:\\devel\\i\\src\\runtime\\Node.i"
+    Node_payload * next;
+#line 6 "C:\\devel\\i\\src\\runtime\\Node.i"
+    payload data;
+};
+
+#line 1 "<generated>"
+/* I monomorph: struct List<T> -> List_payload; declared at C:\devel\i\src\runtime\List.i:5:1 */
+#line 5 "C:\\devel\\i\\src\\runtime\\List.i"
+structdef(List_payload) {
+#line 6 "C:\\devel\\i\\src\\runtime\\List.i"
+    Node_payload * head;
+#line 7 "C:\\devel\\i\\src\\runtime\\List.i"
+    usize length;
+};
+
 #line 5 "src/main.i"
-    f32 x;
+structdef(payload) {
 #line 6 "src/main.i"
+    f32 x;
+#line 7 "src/main.i"
     u8 * y;
 };
 
 #line 1 "<generated>"
 extern const i_reflect_type memops_arena_reflect;
+#define memops_arena_reflected memops_arena_reflect
 #line 1 "<generated>"
 extern const i_reflect_type memops_arena_temp_reflect;
+#define memops_arena_temp_reflected memops_arena_temp_reflect
 #line 1 "<generated>"
 extern const i_reflect_type payload_reflect;
+#define payload_reflected payload_reflect
+#line 1 "<generated>"
+extern const i_reflect_type Array_payload_reflect;
+#define Array_payload_reflected Array_payload_reflect
+#line 1 "<generated>"
+extern const i_reflect_type Array_i32_reflect;
+#define Array_i32_reflected Array_i32_reflect
+#line 1 "<generated>"
+extern const i_reflect_type Node_payload_reflect;
+#define Node_payload_reflected Node_payload_reflect
+#line 1 "<generated>"
+extern const i_reflect_type List_payload_reflect;
+#define List_payload_reflected List_payload_reflect
 
 
 #line 27 "C:\\devel\\i\\src\\runtime\\memops.i"
@@ -361,13 +419,25 @@ void memops_arena_clear(memops_arena * arena);
 memops_arena_temp memops_arena_temp_begin(memops_arena * arena);
 #line 127 "C:\\devel\\i\\src\\runtime\\memops.i"
 void memops_arena_temp_end(memops_arena_temp temp);
-#line 9 "src/main.i"
+#line 10 "src/main.i"
 i32 main(i32 argc, char * * argv);
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:27:32 */
+/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:28:32 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_payload Array_payload_reserve(memops_arena * arena, u64 length);
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:34:27 */
+/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:35:27 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_i32 Array_i32_reserve(memops_arena * arena, u64 length);
+#line 1 "<generated>"
+/* I monomorph: proc Node<T>create -> Node_payload_create; declared at C:\devel\i\src\runtime\Node.i:9:1; instantiated at C:\devel\i\src\runtime\List.i:20:22 */
+#line 9 "C:\\devel\\i\\src\\runtime\\Node.i"
+Node_payload * Node_payload_create(memops_arena * arena, payload data);
+#line 1 "<generated>"
+/* I monomorph: proc List<T>create -> List_payload_create; declared at C:\devel\i\src\runtime\List.i:10:1; instantiated at src/main.i:44:19 */
+#line 10 "C:\\devel\\i\\src\\runtime\\List.i"
+List_payload * List_payload_create(memops_arena * arena);
+#line 1 "<generated>"
+/* I monomorph: proc List<T>append -> List_payload_append; declared at C:\devel\i\src\runtime\List.i:19:1; instantiated at src/main.i:45:5 */
+#line 19 "C:\\devel\\i\\src\\runtime\\List.i"
+void List_payload_append(memops_arena * arena, List_payload * list, payload item);

@@ -119,6 +119,107 @@ main:proc()->i32 = {
         expected_stdout="1 3\n",
     ),
     Case(
+        name="runtime_containers",
+        source=r'''
+cinclude "stdio.h"
+import "C:/devel/i/src/runtime/containers.i"
+
+main:proc()->i32 = {
+    arena:memops_arena = {};
+    memops_arena_initialize(&arena);
+
+    opt:Option<i32> = Option<i32>some(7);
+    none:Option<i32> = Option<i32>none();
+    ok:Result<i32> = Result<i32>ok(11);
+    err:Result<i32> = Result<i32>err(404);
+
+    arr:Array<i32> = Array<i32>reserve(&arena, 3);
+    arr.data[0] = 3;
+    arr.data[1] = 5;
+    arr.data[2] = 7;
+    arr_get:Option<i32> = Array<i32>get(&arr, 1);
+    arr_at:*i32 = Array<i32>at(&arr, 2);
+
+    vec:Vec<i32> = {};
+    Vec<i32>append(&arena, &vec, 10);
+    Vec<i32>append(&arena, &vec, 20);
+    Vec<i32>append(&arena, &vec, 30);
+    vec_get:Option<i32> = Vec<i32>get(&vec, 2);
+
+    list:*List<i32> = List<i32>create(&arena);
+    List<i32>append(&arena, list, 1);
+    List<i32>append(&arena, list, 2);
+    List<i32>prepend(&arena, list, 0);
+    list_removed:*Node<i32> = List<i32>remove_at(&arena, list, 1);
+    list_removed_value:*Node<i32> = List<i32>remove(&arena, list, 2);
+
+    dlist:*DList<i32> = DList<i32>create(&arena);
+    DList<i32>append(&arena, dlist, 4);
+    DList<i32>append(&arena, dlist, 5);
+    DList<i32>prepend(&arena, dlist, 3);
+    dlist_removed:*BiNode<i32> = DList<i32>remove_at(&arena, dlist, 2);
+    dlist_removed_value:*BiNode<i32> = DList<i32>remove(&arena, dlist, 3);
+
+    queue:*Queue<i32> = Queue<i32>create(&arena);
+    Queue<i32>enqueue(&arena, queue, 8);
+    Queue<i32>enqueue(&arena, queue, 9);
+    queue_removed:*Node<i32> = Queue<i32>dequeue(&arena, queue);
+    queue_peek:*Node<i32> = Queue<i32>peek(&arena, queue);
+
+    stack:*Stack<i32> = Stack<i32>create(&arena);
+    Stack<i32>push(&arena, stack, 12);
+    Stack<i32>push(&arena, stack, 13);
+    stack_removed:*Node<i32> = Stack<i32>pop(&arena, stack);
+    stack_peek:*Node<i32> = Stack<i32>peek(&arena, stack);
+
+    map:*Map<i32> = Map<i32>create(&arena);
+    Map<i32>set(&arena, map, "dog", 3);
+    Map<i32>set(&arena, map, "frog", 4);
+    Map<i32>set(&arena, map, "dog", 5);
+    map_dog:*i32 = Map<i32>try_emplace(&arena, map, "dog", 99);
+    map_bird:*i32 = Map<i32>try_emplace(&arena, map, "bird", 6);
+    it:MapIterator<i32> = MapIterator<i32>create(&arena, map);
+    map_sum:i32 = 0;
+    map_count:i32 = 0;
+    while (MapIterator<i32>next(&arena, &it)) {
+        map_sum += it.val;
+        map_count += 1;
+    }
+
+    printf("%d %d %d %d %llu %d %d %llu %d %llu %d %d %llu %d %d %llu %d %d %llu %d %d %llu %d %d %d %d\n",
+        Option<i32>unwrap(opt),
+        Option<i32>is_none(none),
+        Result<i32>unwrap(ok),
+        Result<i32>is_err(err),
+        arr.length,
+        Option<i32>unwrap(arr_get),
+        arr_at[0],
+        vec.length,
+        Option<i32>unwrap(vec_get),
+        list[0].length,
+        list_removed[0].data,
+        list_removed_value[0].data,
+        dlist[0].length,
+        dlist_removed[0].data,
+        dlist_removed_value[0].data,
+        queue[0].length,
+        queue_removed[0].data,
+        queue_peek[0].data,
+        stack[0].length,
+        stack_removed[0].data,
+        stack_peek[0].data,
+        Map<i32>length(&arena, map),
+        map_dog[0],
+        map_bird[0],
+        map_count,
+        map_sum);
+    return 0;
+}
+''',
+        expected_stdout="7 1 11 1 3 5 7 3 30 1 1 2 1 5 3 1 8 9 1 13 12 3 5 6 3 15\n",
+        generated_contains=("Option_i32_reflect", "Result_i32_reflect", "Array_i32_reflect", "Vec_i32_reflect", "List_i32_reflect", "DList_i32_reflect", "Queue_i32_reflect", "Stack_i32_reflect", "Map_i32_reflect"),
+    ),
+    Case(
         name="enum_reflect_preprocessor",
         source=r'''
 cinclude "stdio.h"
@@ -341,6 +442,24 @@ main:proc()->i32={
         header_contains=("extern const i_reflect_type Player_reflect;", "typedef enum Color"),
     ),
     Case(
+        name="reflect_angle_syntax",
+        source=r'''
+cinclude "stdio.h"
+
+Payload:struct = {
+    x:i32;
+    y:*u8;
+}
+
+main:proc()->i32 = {
+    printf("%s %llu %s\n", Payload<>.name, Payload<>.field_count, Payload<>.fields[1].name);
+    return 0;
+}
+''',
+        expected_stdout="Payload 2 y\n",
+        generated_contains=("Payload_reflect.name", "Payload_reflect.field_count", "Payload_reflect.fields[1].name"),
+    ),
+    Case(
         name="boring_c_surface",
         source=r'''
 cinclude "stdio.h"
@@ -495,6 +614,77 @@ main:proc()->i32 = {
             "const u32 g_map[2][3] = {[1] = {[2] = 9}};",
         ),
         header_contains=("extern Pair g_pairs[3];", "extern const u32 g_map[2][3];"),
+    ),
+    Case(
+        name="typed_compound_initializers",
+        source=r'''
+cinclude "stdio.h"
+
+Payload:struct = {
+    x:i32;
+    y:i32;
+}
+
+Box:struct<T> = {
+    value:T;
+    pair:[2]T;
+}
+
+take_payload:proc(p:Payload)->i32 = {
+    return p.x + p.y;
+}
+
+take_box:proc(box:Box<i32>)->i32 = {
+    return box.value + box.pair[0] + box.pair[1];
+}
+
+main:proc()->i32 = {
+    p:Payload = Payload{.x = 2, .y = 3};
+    sum:i32 = take_payload(Payload{.x = 4, .y = 5});
+    b:Box<i32> = Box<i32>{.value = 6, .pair = {7, 8}};
+    total:i32 = take_box(Box<i32>{.value = 1, .pair = {2, 3}}) + take_box(b);
+    printf("%d %d %d\n", p.x + p.y, sum, total);
+    return 0;
+}
+''',
+        expected_stdout="5 9 27\n",
+        generated_contains=(
+            "((Payload){.x = 4, .y = 5})",
+            "((Box_i32){.value = 1, .pair = {2, 3}})",
+            "Box_i32_reflect",
+        ),
+        header_contains=("structdecl(Payload);", "structdecl(Box_i32);"),
+    ),
+    Case(
+        name="generic_value_struct_order_and_bare_init_arg",
+        source=r'''
+cinclude "stdio.h"
+
+Box:struct<T> = {
+    value:T;
+}
+
+Payload:struct = {
+    x:i32;
+}
+
+take_box:proc(box:Box<Payload>)->i32 = {
+    return box.value.x;
+}
+
+main:proc()->i32 = {
+    value:i32 = take_box({.value = {.x = 42}});
+    printf("%d\n", value);
+    return 0;
+}
+''',
+        expected_stdout="42\n",
+        generated_contains=(
+            "take_box(((Box_Payload){.value = {.x = 42}}))",
+            "structdef(Payload)",
+            "structdef(Box_Payload)",
+        ),
+        header_contains=("structdecl(Payload);", "structdecl(Box_Payload);"),
     ),
     Case(
         name="postfix_address_deref",
@@ -2685,6 +2875,11 @@ main:proc()->i32 = {{
 cinclude "stdio.h"
 import "C:/devel/i/src/runtime/containers.i"
 
+NativeBox:struct<T> = {
+    value:T;
+    external;
+}
+
 main:proc()->i32 = {
     arena:memops_arena = {};
     memops_arena_initialize(arena.&);
@@ -2692,12 +2887,14 @@ main:proc()->i32 = {
     values.data[0] = 4;
     values.data[1] = 5;
     values.data[2] = 6;
-    printf("%llu %d\n", values.length, values.data[0] + values.data[1] + values.data[2]);
+    box:NativeBox<i32> = {};
+    box.value = values.data[0] + values.data[1] + values.data[2];
+    printf("%llu %d\n", values.length, box.value);
     return 0;
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
 
-    for stale in (TEST_DIR / "Array.h", TEST_DIR / "Array_i32.h"):
+    for stale in (TEST_DIR / "NativeBox.h", TEST_DIR / "NativeBox_i32.h"):
         if stale.exists():
             stale.unlink()
 
@@ -2706,17 +2903,17 @@ main:proc()->i32 = {
         print(translate.stdout)
         return translate.returncode
 
-    array_header = TEST_DIR / "Array.h"
-    array_i32_header = TEST_DIR / "Array_i32.h"
-    if not native_h.exists() or not array_header.exists() or not array_i32_header.exists():
+    native_box_header = TEST_DIR / "NativeBox.h"
+    native_box_i32_header = TEST_DIR / "NativeBox_i32.h"
+    if not native_h.exists() or not native_box_header.exists() or not native_box_i32_header.exists():
         print("native_monomorph: generated native headers missing")
         return 1
-    if '#include "Array_i32.h"' not in array_header.read_text(encoding="utf-8"):
-        print("native_monomorph: umbrella header missing Array_i32 include")
+    if '#include "NativeBox_i32.h"' not in native_box_header.read_text(encoding="utf-8"):
+        print("native_monomorph: umbrella header missing NativeBox_i32 include")
         return 1
-    array_i32_text = array_i32_header.read_text(encoding="utf-8")
-    if "structdef(Array_i32)" not in array_i32_text or "Array_i32_reserve" not in array_i32_text:
-        print("native_monomorph: concrete header missing struct or proc prototype")
+    native_box_i32_text = native_box_i32_header.read_text(encoding="utf-8")
+    if "structdef(NativeBox_i32)" not in native_box_i32_text or "i32 value;" not in native_box_i32_text:
+        print("native_monomorph: concrete header missing external struct")
         return 1
 
     compile_result = run([
@@ -2752,16 +2949,21 @@ main:proc()->i32 = {
     native_json_dir.mkdir(parents=True)
     native_json_i = TEST_DIR / "native_monomorph_json.i"
     native_json_c = native_json_dir / "native_monomorph_json.c"
-    native_json_blocker = native_json_dir / "Array_i32.h"
     native_json_i.write_text(r'''
 import "C:/devel/i/src/runtime/containers.i"
 
+NativeBox:struct<T> = {
+    value:T;
+    external;
+}
+
 main:proc()->i32 = {
     arena:memops_arena = {};
-    values:Array<i32> = Array<i32>reserve(arena.&, 1);
+    value:NativeBox<i32> = {};
     return 0;
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
+    native_json_blocker = native_json_dir / "NativeBox_i32.h"
     native_json_blocker.mkdir()
     native_json = run([str(I_EXE), str(native_json_i), str(native_json_c), "--diagnostics=json"])
     try:

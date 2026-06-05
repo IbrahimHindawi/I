@@ -46,7 +46,6 @@ main: proc(argc: i32, argv: **char)-> i32 = {
     numberchain = List<payload>create(&arena);
     List<payload>append(arena.&, numberchain, { .x = 3.16 });
     List<payload>append(arena.&, numberchain, { .x = 8.6 });
-    List<payload>append(arena.&, numberchain, {});
 
     node: *Node<payload> = numberchain.*.head;
     for (i: i32 = 0; i < numberchain.*.length; i += 1) {

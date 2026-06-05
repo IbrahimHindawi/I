@@ -293,8 +293,11 @@ I_REFLECT_INLINE i32 i_reflect_enum_value_from_name(const i_reflect_enum *type, 
 structdecl(memops_arena);
 structdecl(memops_arena_temp);
 structdecl(payload);
+structdecl(Array_payload);
+structdecl(Array_i32);
+structdecl(Node_payload);
+structdecl(List_payload);
 
-#include "Array.h"
 
 #line 13 "C:\\devel\\i\\src\\runtime\\memops.i"
 structdef(memops_arena) {
@@ -320,13 +323,81 @@ structdef(memops_arena_temp) {
     u64 used;
 };
 
-#line 4 "src/main.i"
-structdef(payload) {
+#line 1 "<generated>"
+/* I monomorph: struct Array<T> -> Array_payload; declared at C:\devel\i\src\runtime\Array.i:4:1 */
+#line 4 "C:\\devel\\i\\src\\runtime\\Array.i"
+structdef(Array_payload) {
+#line 5 "C:\\devel\\i\\src\\runtime\\Array.i"
+    payload * data;
+#line 6 "C:\\devel\\i\\src\\runtime\\Array.i"
+    u64 length;
+};
+
+#line 1 "<generated>"
+/* I monomorph: struct Array<T> -> Array_i32; declared at C:\devel\i\src\runtime\Array.i:4:1 */
+#line 4 "C:\\devel\\i\\src\\runtime\\Array.i"
+structdef(Array_i32) {
+#line 5 "C:\\devel\\i\\src\\runtime\\Array.i"
+    i32 * data;
+#line 6 "C:\\devel\\i\\src\\runtime\\Array.i"
+    u64 length;
+};
+
+#line 1 "<generated>"
+/* I monomorph: struct Node<T> -> Node_payload; declared at C:\devel\i\src\runtime\Node.i:4:1 */
+#line 4 "C:\\devel\\i\\src\\runtime\\Node.i"
+structdef(Node_payload) {
+#line 5 "C:\\devel\\i\\src\\runtime\\Node.i"
+    Node_payload * next;
+#line 6 "C:\\devel\\i\\src\\runtime\\Node.i"
+    payload data;
+};
+
+#line 1 "<generated>"
+/* I monomorph: struct List<T> -> List_payload; declared at C:\devel\i\src\runtime\List.i:5:1 */
+#line 5 "C:\\devel\\i\\src\\runtime\\List.i"
+structdef(List_payload) {
+#line 6 "C:\\devel\\i\\src\\runtime\\List.i"
+    Node_payload * head;
+#line 7 "C:\\devel\\i\\src\\runtime\\List.i"
+    usize length;
+};
+
 #line 5 "src/main.i"
-    f32 x;
+structdef(payload) {
 #line 6 "src/main.i"
+    f32 x;
+#line 7 "src/main.i"
     u8 * y;
 };
+
+#line 1 "<generated>"
+static const i_reflect_field i_reflect_fields_Array_payload[] = {
+    {"data", "ptr_payload", "", (u64)offsetof(Array_payload, data), (u64)sizeof(((Array_payload *)0)->data), (u64)__alignof__((( Array_payload *)0)->data), I_Reflect_Type_Ptr, 0, 1, "", "payload", "", 0},
+    {"length", "u64", "", (u64)offsetof(Array_payload, length), (u64)sizeof(((Array_payload *)0)->length), (u64)__alignof__((( Array_payload *)0)->length), I_Reflect_Type_Name, 0, 0, "u64", "", "", 0},
+};
+const i_reflect_type Array_payload_reflect = {"Array_payload", (u64)sizeof(Array_payload), (u64)__alignof__(Array_payload), 2, i_reflect_fields_Array_payload};
+
+#line 1 "<generated>"
+static const i_reflect_field i_reflect_fields_Array_i32[] = {
+    {"data", "ptr_i32", "", (u64)offsetof(Array_i32, data), (u64)sizeof(((Array_i32 *)0)->data), (u64)__alignof__((( Array_i32 *)0)->data), I_Reflect_Type_Ptr, 0, 1, "", "i32", "", 0},
+    {"length", "u64", "", (u64)offsetof(Array_i32, length), (u64)sizeof(((Array_i32 *)0)->length), (u64)__alignof__((( Array_i32 *)0)->length), I_Reflect_Type_Name, 0, 0, "u64", "", "", 0},
+};
+const i_reflect_type Array_i32_reflect = {"Array_i32", (u64)sizeof(Array_i32), (u64)__alignof__(Array_i32), 2, i_reflect_fields_Array_i32};
+
+#line 1 "<generated>"
+static const i_reflect_field i_reflect_fields_Node_payload[] = {
+    {"next", "ptr_Node_payload", "", (u64)offsetof(Node_payload, next), (u64)sizeof(((Node_payload *)0)->next), (u64)__alignof__((( Node_payload *)0)->next), I_Reflect_Type_Ptr, 0, 1, "", "Node_payload", "", 0},
+    {"data", "payload", "", (u64)offsetof(Node_payload, data), (u64)sizeof(((Node_payload *)0)->data), (u64)__alignof__((( Node_payload *)0)->data), I_Reflect_Type_Name, 0, 0, "payload", "", "", 0},
+};
+const i_reflect_type Node_payload_reflect = {"Node_payload", (u64)sizeof(Node_payload), (u64)__alignof__(Node_payload), 2, i_reflect_fields_Node_payload};
+
+#line 1 "<generated>"
+static const i_reflect_field i_reflect_fields_List_payload[] = {
+    {"head", "ptr_Node_payload", "", (u64)offsetof(List_payload, head), (u64)sizeof(((List_payload *)0)->head), (u64)__alignof__((( List_payload *)0)->head), I_Reflect_Type_Ptr, 0, 1, "", "Node_payload", "", 0},
+    {"length", "usize", "", (u64)offsetof(List_payload, length), (u64)sizeof(((List_payload *)0)->length), (u64)__alignof__((( List_payload *)0)->length), I_Reflect_Type_Name, 0, 0, "usize", "", "", 0},
+};
+const i_reflect_type List_payload_reflect = {"List_payload", (u64)sizeof(List_payload), (u64)__alignof__(List_payload), 2, i_reflect_fields_List_payload};
 
 #line 1 "<generated>"
 static const i_reflect_field i_reflect_fields_memops_arena[] = {
@@ -378,16 +449,28 @@ void memops_arena_clear(memops_arena * arena);
 memops_arena_temp memops_arena_temp_begin(memops_arena * arena);
 #line 127 "C:\\devel\\i\\src\\runtime\\memops.i"
 void memops_arena_temp_end(memops_arena_temp temp);
-#line 9 "src/main.i"
+#line 10 "src/main.i"
 i32 main(i32 argc, char * * argv);
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:27:32 */
+/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:28:32 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_payload Array_payload_reserve(memops_arena * arena, u64 length);
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:34:27 */
+/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:35:27 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_i32 Array_i32_reserve(memops_arena * arena, u64 length);
+#line 1 "<generated>"
+/* I monomorph: proc Node<T>create -> Node_payload_create; declared at C:\devel\i\src\runtime\Node.i:9:1; instantiated at C:\devel\i\src\runtime\List.i:20:22 */
+#line 9 "C:\\devel\\i\\src\\runtime\\Node.i"
+Node_payload * Node_payload_create(memops_arena * arena, payload data);
+#line 1 "<generated>"
+/* I monomorph: proc List<T>create -> List_payload_create; declared at C:\devel\i\src\runtime\List.i:10:1; instantiated at src/main.i:44:19 */
+#line 10 "C:\\devel\\i\\src\\runtime\\List.i"
+List_payload * List_payload_create(memops_arena * arena);
+#line 1 "<generated>"
+/* I monomorph: proc List<T>append -> List_payload_append; declared at C:\devel\i\src\runtime\List.i:19:1; instantiated at src/main.i:45:5 */
+#line 19 "C:\\devel\\i\\src\\runtime\\List.i"
+void List_payload_append(memops_arena * arena, List_payload * list, payload item);
 
 #line 27 "C:\\devel\\i\\src\\runtime\\memops.i"
 bool memops_is_power_of_two(usize x) {
@@ -564,58 +647,75 @@ temp.arena[0].used = temp.used;
 temp.arena[0].cursor = (temp.arena[0].base + temp.used);
 }
 
-#line 9 "src/main.i"
+#line 10 "src/main.i"
 i32 main(i32 argc, char * * argv) {
-    #line 10 "src/main.i"
+    #line 11 "src/main.i"
 printf("Hello, World!\n");
-    #line 12 "src/main.i"
-i32 num = 0;
     #line 13 "src/main.i"
+i32 num = 0;
+    #line 14 "src/main.i"
 printf("num = %d\n", num);
-    #line 15 "src/main.i"
-memops_arena arena = {};
     #line 16 "src/main.i"
+memops_arena arena = {};
+    #line 17 "src/main.i"
 memops_arena_initialize(&(arena));
-    #line 18 "src/main.i"
-payload p = {};
     #line 19 "src/main.i"
-char * name = payload_reflect.name;
+payload p = {};
     #line 20 "src/main.i"
-printf("name %s\n", name);
+char * name = payload_reflect.name;
     #line 21 "src/main.i"
+printf("name %s\n", name);
+    #line 22 "src/main.i"
 for (i32 i = 0; (i < payload_reflect.field_count); i += 1) {
-        #line 22 "src/main.i"
+        #line 23 "src/main.i"
 printf("field[%d] = %s\n", i, payload_reflect.fields[i].name);
     }
-    #line 25 "src/main.i"
-i32 len = 16;
     #line 26 "src/main.i"
-memops_arena_temp temp = memops_arena_temp_begin(&(arena));
+i32 len = 16;
     #line 27 "src/main.i"
-Array_payload payloads = Array_payload_reserve(temp.arena, 128);
+memops_arena_temp temp = memops_arena_temp_begin(&(arena));
     #line 28 "src/main.i"
+Array_payload payloads = Array_payload_reserve(temp.arena, 128);
+    #line 29 "src/main.i"
 for (i32 i = 0; (i < 128); i += 1) {
     }
-    #line 32 "src/main.i"
+    #line 33 "src/main.i"
 memops_arena_temp_end(temp);
-    #line 34 "src/main.i"
-Array_i32 numbers = Array_i32_reserve(&(arena), len);
     #line 35 "src/main.i"
+Array_i32 numbers = Array_i32_reserve(&(arena), len);
+    #line 36 "src/main.i"
 for (i32 i = 0; (i < len); i += 1) {
-        #line 36 "src/main.i"
+        #line 37 "src/main.i"
 numbers.data[i] = i;
     }
-    #line 38 "src/main.i"
+    #line 39 "src/main.i"
 for (i32 i = 0; (i < len); i += 1) {
-        #line 39 "src/main.i"
+        #line 40 "src/main.i"
 printf("i = %d, ", numbers.data[i]);
     }
-    #line 42 "src/main.i"
+    #line 43 "src/main.i"
+List_payload * numberchain;
+    #line 44 "src/main.i"
+numberchain = List_payload_create(&(arena));
+    #line 45 "src/main.i"
+List_payload_append(&(arena), numberchain, {.x = 3.16});
+    #line 46 "src/main.i"
+List_payload_append(&(arena), numberchain, {.x = 8.6});
+    #line 48 "src/main.i"
+Node_payload * node = numberchain[0].head;
+    #line 49 "src/main.i"
+for (i32 i = 0; (i < numberchain[0].length); i += 1) {
+        #line 50 "src/main.i"
+printf("%f", node[0].data.x);
+        #line 51 "src/main.i"
+node = node[0].next;
+    }
+    #line 54 "src/main.i"
 return 0;
 }
 
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:27:32 */
+/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:28:32 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_payload Array_payload_reserve(memops_arena * arena, u64 length) {
     #line 10 "C:\\devel\\i\\src\\runtime\\Array.i"
@@ -626,20 +726,24 @@ if ((length == 0)) {
 return arr;
     }
     #line 14 "C:\\devel\\i\\src\\runtime\\Array.i"
-arr.data = ((payload *)(memops_arena_push(arena, (sizeof(payload) * length), _Alignof(payload))));
+arr.data = ((payload *)(memops_arena_push_zero(arena, (sizeof(payload) * length), _Alignof(payload))));
     #line 15 "C:\\devel\\i\\src\\runtime\\Array.i"
 if ((arr.data == 0)) {
         #line 16 "C:\\devel\\i\\src\\runtime\\Array.i"
+printf("I runtime: Array reserve allocation failure\n");
+        #line 17 "C:\\devel\\i\\src\\runtime\\Array.i"
+exit(1);
+        #line 18 "C:\\devel\\i\\src\\runtime\\Array.i"
 return arr;
     }
-    #line 18 "C:\\devel\\i\\src\\runtime\\Array.i"
+    #line 20 "C:\\devel\\i\\src\\runtime\\Array.i"
 arr.length = length;
-    #line 19 "C:\\devel\\i\\src\\runtime\\Array.i"
+    #line 21 "C:\\devel\\i\\src\\runtime\\Array.i"
 return arr;
 }
 
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:34:27 */
+/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:35:27 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_i32 Array_i32_reserve(memops_arena * arena, u64 length) {
     #line 10 "C:\\devel\\i\\src\\runtime\\Array.i"
@@ -650,15 +754,85 @@ if ((length == 0)) {
 return arr;
     }
     #line 14 "C:\\devel\\i\\src\\runtime\\Array.i"
-arr.data = ((i32 *)(memops_arena_push(arena, (sizeof(i32) * length), _Alignof(i32))));
+arr.data = ((i32 *)(memops_arena_push_zero(arena, (sizeof(i32) * length), _Alignof(i32))));
     #line 15 "C:\\devel\\i\\src\\runtime\\Array.i"
 if ((arr.data == 0)) {
         #line 16 "C:\\devel\\i\\src\\runtime\\Array.i"
+printf("I runtime: Array reserve allocation failure\n");
+        #line 17 "C:\\devel\\i\\src\\runtime\\Array.i"
+exit(1);
+        #line 18 "C:\\devel\\i\\src\\runtime\\Array.i"
 return arr;
     }
-    #line 18 "C:\\devel\\i\\src\\runtime\\Array.i"
+    #line 20 "C:\\devel\\i\\src\\runtime\\Array.i"
 arr.length = length;
-    #line 19 "C:\\devel\\i\\src\\runtime\\Array.i"
+    #line 21 "C:\\devel\\i\\src\\runtime\\Array.i"
 return arr;
+}
+
+#line 1 "<generated>"
+/* I monomorph: proc Node<T>create -> Node_payload_create; declared at C:\devel\i\src\runtime\Node.i:9:1; instantiated at C:\devel\i\src\runtime\List.i:20:22 */
+#line 9 "C:\\devel\\i\\src\\runtime\\Node.i"
+Node_payload * Node_payload_create(memops_arena * arena, payload data) {
+    #line 10 "C:\\devel\\i\\src\\runtime\\Node.i"
+Node_payload * node = ((Node_payload *)(memops_arena_push_zero(arena, sizeof(Node_payload), _Alignof(Node_payload))));
+    #line 11 "C:\\devel\\i\\src\\runtime\\Node.i"
+if ((node == 0)) {
+        #line 12 "C:\\devel\\i\\src\\runtime\\Node.i"
+printf("I runtime: Node allocation failure\n");
+        #line 13 "C:\\devel\\i\\src\\runtime\\Node.i"
+exit(1);
+    }
+    #line 15 "C:\\devel\\i\\src\\runtime\\Node.i"
+node[0].next = 0;
+    #line 16 "C:\\devel\\i\\src\\runtime\\Node.i"
+node[0].data = data;
+    #line 17 "C:\\devel\\i\\src\\runtime\\Node.i"
+return node;
+}
+
+#line 1 "<generated>"
+/* I monomorph: proc List<T>create -> List_payload_create; declared at C:\devel\i\src\runtime\List.i:10:1; instantiated at src/main.i:44:19 */
+#line 10 "C:\\devel\\i\\src\\runtime\\List.i"
+List_payload * List_payload_create(memops_arena * arena) {
+    #line 11 "C:\\devel\\i\\src\\runtime\\List.i"
+List_payload * list = ((List_payload *)(memops_arena_push_zero(arena, sizeof(List_payload), _Alignof(List_payload))));
+    #line 12 "C:\\devel\\i\\src\\runtime\\List.i"
+if ((list == 0)) {
+        #line 13 "C:\\devel\\i\\src\\runtime\\List.i"
+printf("I runtime: List allocation failure\n");
+        #line 14 "C:\\devel\\i\\src\\runtime\\List.i"
+exit(1);
+    }
+    #line 16 "C:\\devel\\i\\src\\runtime\\List.i"
+return list;
+}
+
+#line 1 "<generated>"
+/* I monomorph: proc List<T>append -> List_payload_append; declared at C:\devel\i\src\runtime\List.i:19:1; instantiated at src/main.i:45:5 */
+#line 19 "C:\\devel\\i\\src\\runtime\\List.i"
+void List_payload_append(memops_arena * arena, List_payload * list, payload item) {
+    #line 20 "C:\\devel\\i\\src\\runtime\\List.i"
+Node_payload * node = Node_payload_create(arena, item);
+    #line 21 "C:\\devel\\i\\src\\runtime\\List.i"
+if ((list[0].head == 0)) {
+        #line 22 "C:\\devel\\i\\src\\runtime\\List.i"
+list[0].head = node;
+        #line 23 "C:\\devel\\i\\src\\runtime\\List.i"
+list[0].length += 1;
+        #line 24 "C:\\devel\\i\\src\\runtime\\List.i"
+return;
+    }
+    #line 26 "C:\\devel\\i\\src\\runtime\\List.i"
+Node_payload * iter = list[0].head;
+    #line 27 "C:\\devel\\i\\src\\runtime\\List.i"
+while ((iter[0].next != 0)) {
+        #line 28 "C:\\devel\\i\\src\\runtime\\List.i"
+iter = iter[0].next;
+    }
+    #line 30 "C:\\devel\\i\\src\\runtime\\List.i"
+iter[0].next = node;
+    #line 31 "C:\\devel\\i\\src\\runtime\\List.i"
+list[0].length += 1;
 }
 
