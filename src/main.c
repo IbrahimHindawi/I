@@ -563,6 +563,7 @@ struct ProcDecl {
     string8 type_param;
     string8 constraint;
     string8 callconv;
+    TypeExpr *angle_type;
     Vec_voidptr params; // Param*
     TypeExpr *ret_type;
     Vec_voidptr body; // Stmt*
@@ -1286,12 +1287,6 @@ static TypeExpr *type_new(memops_arena *arena, TypeKind kind) {
 }
 
 static TypeExpr *parse_type(Parser *p);
-
-static bool token_is_generic_param_name(Token *t) {
-    if (!t || t->kind != Token_Identifier || t->text.length == 0) return false;
-    u8 c = t->text.data[0];
-    return (c >= 'A' && c <= 'Z');
-}
 
 static string8 type_mangle_concrete(memops_arena *arena, TypeExpr *type) {
     string8 out = string8_reserve(arena, 32);
@@ -2475,10 +2470,7 @@ static ProcDecl *parse_proc_decl(Parser *p, Token *name_tok) {
     if (parser_match(p, Token_LAngle)) {
         Token *first = parser_peek(p);
         Token *second = parser_peek_n(p, 1);
-        bool generic_param_form =
-            first->kind == Token_Identifier &&
-            (second->kind == Token_Colon ||
-             (second->kind == Token_RAngle && token_is_generic_param_name(first)));
+        bool generic_param_form = first->kind == Token_Identifier && second->kind == Token_Colon;
 
         if (generic_param_form) {
             Token *param_tok = parser_expect(p, Token_Identifier, "expected type param");
@@ -2490,15 +2482,8 @@ static ProcDecl *parse_proc_decl(Parser *p, Token *name_tok) {
             }
             parser_expect_generic_close(p);
         } else {
-            TypeExpr *spec = parse_type(p);
+            decl->angle_type = parse_type(p);
             parser_expect_generic_close(p);
-            string8 suffix = type_mangle_concrete(p->arena, spec);
-            string8 full_name = string8_reserve(p->arena, decl->name.length + 1 + suffix.length);
-            string8_append_bytes(p->arena, &full_name, decl->name.data, decl->name.length);
-            string8_append_cstr(p->arena, &full_name, "_");
-            string8_append_bytes(p->arena, &full_name, suffix.data, suffix.length);
-            decl->name = full_name;
-            decl->is_generic = false;
         }
     }
 
@@ -3402,6 +3387,11 @@ static bool semantic_builtin_type_name(string8 name) {
            string8_equals_cstr(&name, "usize") ||
            string8_equals_cstr(&name, "b32") ||
            string8_equals_cstr(&name, "void") ||
+           string8_equals_cstr(&name, "i_reflect_type_kind") ||
+           string8_equals_cstr(&name, "i_reflect_field") ||
+           string8_equals_cstr(&name, "i_reflect_type") ||
+           string8_equals_cstr(&name, "i_reflect_enum_value") ||
+           string8_equals_cstr(&name, "i_reflect_enum") ||
            string8_equals_cstr(&name, "BOOL") ||
            string8_equals_cstr(&name, "BOOLEAN") ||
            string8_equals_cstr(&name, "ATOM") ||
@@ -3464,6 +3454,35 @@ static bool semantic_builtin_type_name(string8 name) {
            string8_equals_cstr(&name, "HMODULE") ||
            string8_equals_cstr(&name, "HMENU") ||
            string8_equals_cstr(&name, "HWND");
+}
+
+static bool semantic_intrinsic_type_name(string8 name) {
+    return string8_equals_cstr(&name, "bool") ||
+           string8_equals_cstr(&name, "char") ||
+           string8_equals_cstr(&name, "f32") ||
+           string8_equals_cstr(&name, "f64") ||
+           string8_equals_cstr(&name, "i8") ||
+           string8_equals_cstr(&name, "i16") ||
+           string8_equals_cstr(&name, "i32") ||
+           string8_equals_cstr(&name, "i64") ||
+           string8_equals_cstr(&name, "u8") ||
+           string8_equals_cstr(&name, "u16") ||
+           string8_equals_cstr(&name, "u32") ||
+           string8_equals_cstr(&name, "u64") ||
+           string8_equals_cstr(&name, "usize") ||
+           string8_equals_cstr(&name, "b32") ||
+           string8_equals_cstr(&name, "void") ||
+           string8_equals_cstr(&name, "i_reflect_type_kind") ||
+           string8_equals_cstr(&name, "i_reflect_field") ||
+           string8_equals_cstr(&name, "i_reflect_type") ||
+           string8_equals_cstr(&name, "i_reflect_enum_value") ||
+           string8_equals_cstr(&name, "i_reflect_enum") ||
+           string8_equals_cstr(&name, "long") ||
+           string8_equals_cstr(&name, "ulong") ||
+           string8_equals_cstr(&name, "short") ||
+           string8_equals_cstr(&name, "int") ||
+           string8_equals_cstr(&name, "float") ||
+           string8_equals_cstr(&name, "double");
 }
 
 static void semantic_error_name_path(const char *msg, string8 name, const char *path, i32 line, i32 col) {
@@ -3725,6 +3744,52 @@ static void semantic_collect_external_type_names(TypeExpr *type, Vec_string8 *kn
     }
 }
 
+static bool semantic_known_type_name(Vec_string8 *known_types, string8 name) {
+    return semantic_intrinsic_type_name(name) || scope_has(known_types, name);
+}
+
+static void semantic_resolve_proc_angle_types(Program *prog, Vec_string8 *known_types, memops_arena *arena) {
+    for (i32 i = 0; i < prog->procs.length; i++) {
+        ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
+        if (!decl->angle_type) continue;
+
+        TypeExpr *angle = decl->angle_type;
+        if (angle->kind == Type_Name && !semantic_known_type_name(known_types, angle->name)) {
+            decl->type_param = angle->name;
+            decl->is_generic = true;
+            decl->angle_type = null;
+            continue;
+        }
+
+        semantic_check_type(prog, angle, known_types, (string8){0}, decl->source_path);
+        string8 suffix = type_mangle_concrete(arena, angle);
+        string8 full_name = string8_reserve(arena, decl->name.length + 1 + suffix.length);
+        string8_append_bytes(arena, &full_name, decl->name.data, decl->name.length);
+        string8_append_cstr(arena, &full_name, "_");
+        string8_append_bytes(arena, &full_name, suffix.data, suffix.length);
+        decl->name = full_name;
+        decl->is_generic = false;
+        decl->angle_type = null;
+    }
+}
+
+static Vec_string8 semantic_collect_known_type_names(Program *prog, memops_arena *arena) {
+    Vec_string8 known_types = Vec_string8_reserve(arena, prog->aliases.length + prog->structs.length + prog->enums.length + 8);
+    for (i32 i = 0; i < prog->aliases.length; i++) {
+        AliasDecl *decl = (AliasDecl *)prog->aliases.data[i];
+        if (!scope_has(&known_types, decl->name)) Vec_string8_append(arena, &known_types, decl->name);
+    }
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (!scope_has(&known_types, decl->name)) Vec_string8_append(arena, &known_types, decl->name);
+    }
+    for (i32 i = 0; i < prog->enums.length; i++) {
+        EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
+        if (!scope_has(&known_types, decl->name)) Vec_string8_append(arena, &known_types, decl->name);
+    }
+    return known_types;
+}
+
 static void collect_generic_struct_instances(Program *prog, StructDecl *decl, Vec_string8 *out, memops_arena *arena);
 
 static void semantic_check_program(Program *prog, memops_arena *arena) {
@@ -3866,6 +3931,8 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
             semantic_decl_site_add_checked(arena, &global_sites, "duplicate generated global declaration", c_name, decl->source_path, decl->import_chain, item->line, item->col);
         }
     }
+
+    semantic_resolve_proc_angle_types(prog, &structs, arena);
 
     for (i32 i = 0; i < prog->procs.length; i++) {
         ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
@@ -5395,6 +5462,8 @@ typedef struct TypeScope {
     Vec_voidptr types; // TypeExpr*
 } TypeScope;
 
+static TypeExpr *type_name_expr_const(memops_arena *arena, const char *name);
+
 static TypeScope type_scope_make(memops_arena *arena, i32 cap) {
     TypeScope s = {0};
     s.names = Vec_string8_reserve(arena, cap);
@@ -5416,6 +5485,38 @@ static void type_scope_add(memops_arena *arena, TypeScope *s, string8 name, Type
     ptr_array_append(arena, &s->types, type);
 }
 
+static TypeExpr *reflect_global_type(memops_arena *arena, const char *type_name) {
+    return type_name_expr_const(arena, type_name);
+}
+
+static void type_scope_add_reflection_globals(memops_arena *arena, TypeScope *scope, Program *prog) {
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (decl->is_external) continue;
+        string8 reflect_name = concat_name2(arena, decl->name, "_", string8_from_cstr(arena, "reflect"));
+        type_scope_add(arena, scope, reflect_name, reflect_global_type(arena, "i_reflect_type"));
+        if (decl->is_generic) {
+            Vec_string8 instances = Vec_string8_reserve(arena, 4);
+            collect_generic_struct_instances(prog, decl, &instances, arena);
+            for (i32 j = 0; j < instances.length; j++) {
+                string8 concrete_name = string8_reserve(arena, decl->name.length + 1 + instances.data[j].length + 8);
+                string8_append_bytes(arena, &concrete_name, decl->name.data, decl->name.length);
+                string8_append_cstr(arena, &concrete_name, "_");
+                string8_append_bytes(arena, &concrete_name, instances.data[j].data, instances.data[j].length);
+                string8_append_cstr(arena, &concrete_name, "_reflect");
+                type_scope_add(arena, scope, concrete_name, reflect_global_type(arena, "i_reflect_type"));
+            }
+        }
+    }
+
+    for (i32 i = 0; i < prog->enums.length; i++) {
+        EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
+        if (decl->is_external) continue;
+        string8 reflect_name = concat_name2(arena, decl->name, "_", string8_from_cstr(arena, "reflect"));
+        type_scope_add(arena, scope, reflect_name, reflect_global_type(arena, "i_reflect_enum"));
+    }
+}
+
 static TypeExpr *type_scope_lookup(TypeScope *s, string8 name) {
     for (i32 i = s->names.length - 1; i >= 0; i--) {
         if (string8_equals(&s->names.data[i], &name)) {
@@ -5429,6 +5530,22 @@ static TypeExpr *type_name_expr(memops_arena *arena, const char *name) {
     TypeExpr *t = type_new(arena, Type_Name);
     t->name = string8_from_cstr(arena, name);
     return t;
+}
+
+static TypeExpr *type_name_expr_const(memops_arena *arena, const char *name) {
+    TypeExpr *t = type_name_expr(arena, name);
+    t->is_const = true;
+    return t;
+}
+
+static TypeExpr *type_ptr_to(memops_arena *arena, TypeExpr *elem) {
+    TypeExpr *ptr = type_new(arena, Type_Ptr);
+    ptr->elem = elem;
+    return ptr;
+}
+
+static TypeExpr *type_ptr_to_const_name(memops_arena *arena, const char *name) {
+    return type_ptr_to(arena, type_name_expr_const(arena, name));
 }
 
 static TypeExpr *clone_type_expr(memops_arena *arena, TypeExpr *src) {
@@ -5496,9 +5613,59 @@ static bool type_is_c_float_array_name(string8 name);
 static bool type_expr_equal_resolved(Program *prog, TypeExpr *a, TypeExpr *b);
 static TypeExpr *type_c_float_array_index_type(memops_arena *arena, string8 name);
 
+static TypeExpr *reflect_builtin_field_type(TypeExpr *base_type, string8 field_name, memops_arena *arena) {
+    if (!base_type || base_type->kind != Type_Name) return null;
+    string8 base_name = base_type->name;
+
+    if (string8_equals_cstr(&base_name, "i_reflect_field")) {
+        if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "type")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "attrs")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "offset")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "size")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "align")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "kind")) return type_name_expr(arena, "i32");
+        if (string8_equals_cstr(&field_name, "array_count")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "pointer_depth")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "base_type")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "elem_type")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "generic_arg_type")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "is_const")) return type_name_expr(arena, "u64");
+        return null;
+    }
+
+    if (string8_equals_cstr(&base_name, "i_reflect_type")) {
+        if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "size")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "align")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "field_count")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "fields")) return type_ptr_to(arena, type_name_expr_const(arena, "i_reflect_field"));
+        return null;
+    }
+
+    if (string8_equals_cstr(&base_name, "i_reflect_enum_value")) {
+        if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "value")) return type_name_expr(arena, "i32");
+        return null;
+    }
+
+    if (string8_equals_cstr(&base_name, "i_reflect_enum")) {
+        if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "size")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "align")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "value_count")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "values")) return type_ptr_to(arena, type_name_expr_const(arena, "i_reflect_enum_value"));
+        return null;
+    }
+
+    return null;
+}
+
 static TypeExpr *lookup_field_type(Program *prog, TypeExpr *base_type, string8 field_name, memops_arena *arena) {
     if (!base_type) return null;
     base_type = resolve_alias_type(prog, base_type);
+    TypeExpr *reflect_field = reflect_builtin_field_type(base_type, field_name, arena);
+    if (reflect_field) return reflect_field;
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
         if (base_type->kind == Type_Name && !decl->is_generic) {
@@ -8434,6 +8601,7 @@ static void type_check_stmt(
 
 static void type_check_program(Program *prog, memops_arena *arena) {
     TypeScope globals = type_scope_make(arena, 64);
+    type_scope_add_reflection_globals(arena, &globals, prog);
     for (i32 i = 0; i < prog->globals.length; i++) {
         Stmt *g = (Stmt *)prog->globals.data[i];
         const char *prev_diag_source_path = g_diag_source_path;
@@ -8472,224 +8640,252 @@ static void type_check_program(Program *prog, memops_arena *arena) {
     }
 }
 
-static const char *printf_spec_for_type(TypeExpr *type) {
-    if (!type) return null;
-    if (type->kind == Type_Ptr) return "%p";
-    if (type->kind != Type_Name) return null;
-    if (string8_equals_cstr(&type->name, "u8")) return "%d";
-    if (string8_equals_cstr(&type->name, "u16")) return "%d";
-    if (string8_equals_cstr(&type->name, "u32")) return "%u";
-    if (string8_equals_cstr(&type->name, "u64")) return "%llu";
-    if (string8_equals_cstr(&type->name, "i8")) return "%d";
-    if (string8_equals_cstr(&type->name, "i16")) return "%d";
-    if (string8_equals_cstr(&type->name, "i32")) return "%d";
-    if (string8_equals_cstr(&type->name, "i64")) return "%lld";
-    if (string8_equals_cstr(&type->name, "usize")) return "%zu";
-    if (string8_equals_cstr(&type->name, "b32")) return "%d";
-    if (string8_equals_cstr(&type->name, "f32")) return "%f";
-    if (string8_equals_cstr(&type->name, "f64")) return "%f";
-    if (string8_equals_cstr(&type->name, "char")) return "%c";
-    return null;
+static const char *printfmt_path(const char *path) {
+    return path ? path : g_source_path;
 }
 
-static void rewrite_printf_call(Expr *call, TypeScope *scope, Program *prog, memops_arena *arena) {
-    if (!call || call->kind != Expr_Call || call->args.length < 1) return;
-    if (!string8_equals_cstr(&call->name, "printf")) return;
-
-    Expr *fmt = (Expr *)call->args.data[0];
-    if (!fmt || fmt->kind != Expr_String) return;
-
-    string8 in = fmt->string_lit;
-    if (in.length < 2 || in.data[0] != '"' || in.data[in.length - 1] != '"') {
-        return;
-    }
-
-    i32 placeholder_count = 0;
-    for (u64 i = 1; i + 1 < in.length; i++) {
-        if (in.data[i] == '{' && (i + 1) < (in.length - 1) && in.data[i + 1] == '}') {
-            placeholder_count++;
-            i++;
-        }
-    }
-    if (placeholder_count == 0) {
-        return;
-    }
-
-    i32 value_count = call->args.length - 1;
-    const char **specs = memops_arena_push(
-        arena,
-        sizeof(const char *) * (value_count > 0 ? value_count : 1),
-        _Alignof(const char *)
-    );
-    for (i32 i = 0; i < value_count; i++) {
-        Expr *arg = (Expr *)call->args.data[i + 1];
-        TypeExpr *ty = infer_expr_type(arg, scope, prog, arena);
-        const char *spec = printf_spec_for_type(ty);
-        if (!spec) {
-            if (g_diag_json) {
-                char message[256];
-                snprintf(message, sizeof(message), "cannot infer '{}' format for printf arg %d", (int)(i + 1));
-                diag_json_error(g_source_path, arg->line, arg->col, "format", message);
-                exit(1);
-            }
-            printf("%s:%d:%d: format error: cannot infer '{}' format for printf arg %d\n", g_source_path, arg->line, arg->col, (int)(i + 1));
-            exit(1);
-        }
-        specs[i] = spec;
-    }
-
-    string8 out = string8_reserve(arena, in.length + 32);
-    string8_append_byte(arena, &out, '"');
-    i32 used = 0;
-    for (u64 i = 1; i + 1 < in.length; i++) {
-        if (in.data[i] == '{' && (i + 1) < (in.length - 1) && in.data[i + 1] == '}') {
-            if (used >= value_count) {
-                if (g_diag_json) {
-                    diag_json_error(g_source_path, fmt->line, fmt->col, "format", "too many '{}' placeholders in printf format");
-                    exit(1);
-                }
-                printf("%s:%d:%d: format error: too many '{}' placeholders in printf format\n", g_source_path, fmt->line, fmt->col);
-                exit(1);
-            }
-            string8_append_cstr(arena, &out, specs[used]);
-            used++;
-            i++;
-            continue;
-        }
-        string8_append_byte(arena, &out, in.data[i]);
-    }
-    string8_append_byte(arena, &out, '"');
-
-    if (used != value_count) {
-        if (g_diag_json) {
-            char message[256];
-            snprintf(message, sizeof(message), "printf placeholder count (%d) does not match arg count (%d)", used, value_count);
-            diag_json_error(g_source_path, fmt->line, fmt->col, "format", message);
-            exit(1);
-        }
-        printf("%s:%d:%d: format error: printf placeholder count (%d) does not match arg count (%d)\n",
-               g_source_path, fmt->line, fmt->col, used, value_count);
+static void printfmt_error_at(const char *path, i32 line, i32 col, const char *message) {
+    if (g_diag_json) {
+        diag_json_error(printfmt_path(path), line, col, "format", message);
         exit(1);
     }
-
-    fmt->string_lit = out;
+    printf("%s:%d:%d: format error: %s\n", printfmt_path(path), line, col, message);
+    exit(1);
 }
 
-static void rewrite_printf_in_expr(Expr *e, TypeScope *scope, Program *prog, memops_arena *arena);
-static void rewrite_printf_in_stmt(Stmt *s, TypeScope *scope, Program *prog, memops_arena *arena);
+static bool expr_is_printfmt_call(Expr *e) {
+    return e && e->kind == Expr_Call && string8_equals_cstr(&e->name, "printfmt");
+}
 
-static void rewrite_printf_in_expr(Expr *e, TypeScope *scope, Program *prog, memops_arena *arena) {
+static i32 printfmt_count_placeholders(string8 lit) {
+    if (lit.length < 2 || lit.data[0] != '"' || lit.data[lit.length - 1] != '"') return -1;
+    i32 count = 0;
+    for (u64 i = 1; i + 1 < lit.length; i++) {
+        if (lit.data[i] == '{' && (i + 1) < (lit.length - 1) && lit.data[i + 1] == '}') {
+            count++;
+            i++;
+        }
+    }
+    return count;
+}
+
+static Expr *printfmt_string_expr(memops_arena *arena, u8 *data, u64 length, i32 line, i32 col) {
+    Expr *e = expr_new(arena, Expr_String);
+    e->string_lit = string8_reserve(arena, length + 2);
+    string8_append_byte(arena, &e->string_lit, '"');
+    string8_append_bytes(arena, &e->string_lit, data, length);
+    string8_append_byte(arena, &e->string_lit, '"');
+    e->line = line;
+    e->col = col;
+    return e;
+}
+
+static Expr *printfmt_call_expr(memops_arena *arena, const char *name, i32 line, i32 col) {
+    Expr *call = expr_new(arena, Expr_Call);
+    call->name = string8_from_cstr(arena, name);
+    call->args = ptr_array_reserve(arena, 2);
+    call->type_args = ptr_array_reserve(arena, 1);
+    call->line = line;
+    call->col = col;
+    return call;
+}
+
+static Stmt *printfmt_expr_stmt(memops_arena *arena, Expr *expr, Stmt *source) {
+    Stmt *stmt = memops_arena_push_struct(arena, Stmt);
+    memset(stmt, 0, sizeof(Stmt));
+    stmt->kind = Stmt_Expr;
+    stmt->expr = expr;
+    stmt->source_path = source ? source->source_path : null;
+    stmt->import_chain = source ? source->import_chain : null;
+    stmt->line = expr ? expr->line : (source ? source->line : 0);
+    stmt->col = expr ? expr->col : (source ? source->col : 0);
+    return stmt;
+}
+
+static void printfmt_append_print_cstr(memops_arena *arena, Vec_voidptr *out, Stmt *source, u8 *data, u64 length, i32 line, i32 col) {
+    if (length == 0) return;
+    Expr *arg = printfmt_string_expr(arena, data, length, line, col);
+    Expr *call = printfmt_call_expr(arena, "print_cstr", line, col);
+    ptr_array_append(arena, &call->args, arg);
+    ptr_array_append(arena, out, printfmt_expr_stmt(arena, call, source));
+}
+
+static void printfmt_append_print_arg(memops_arena *arena, Vec_voidptr *out, Stmt *source, Expr *arg, i32 arg_index, TypeScope *scope, Program *prog) {
+    TypeExpr *type = infer_expr_type(arg, scope, prog, arena);
+    if (!type) {
+        char message[256];
+        snprintf(message, sizeof(message), "cannot infer printfmt arg %d type", (int)arg_index);
+        printfmt_error_at(source ? source->source_path : null, arg->line, arg->col, message);
+    }
+    Expr *call = printfmt_call_expr(arena, "print", arg->line, arg->col);
+    ptr_array_append(arena, &call->args, arg);
+    ptr_array_append(arena, &call->type_args, clone_type_expr(arena, type));
+    ptr_array_append(arena, out, printfmt_expr_stmt(arena, call, source));
+}
+
+static void rewrite_printfmt_in_expr(Expr *e, const char *path);
+static void rewrite_printfmt_stmt_in_place(Stmt *s, TypeScope *scope, Program *prog, memops_arena *arena);
+static void rewrite_printfmt_body(Vec_voidptr *body, TypeScope *scope, Program *prog, memops_arena *arena);
+
+static void rewrite_printfmt_in_expr(Expr *e, const char *path) {
     if (!e) return;
-    if (e->kind == Expr_Call) {
-        rewrite_printf_call(e, scope, prog, arena);
+    if (expr_is_printfmt_call(e)) {
+        printfmt_error_at(path, e->line, e->col, "printfmt can only be used as a statement");
+    }
+    if (e->kind == Expr_Call || e->kind == Expr_InitList || e->kind == Expr_CompoundInit) {
         for (i32 i = 0; i < e->args.length; i++) {
-            rewrite_printf_in_expr((Expr *)e->args.data[i], scope, prog, arena);
+            rewrite_printfmt_in_expr((Expr *)e->args.data[i], path);
+        }
+        for (i32 i = 0; i < e->designators.length; i++) {
+            rewrite_printfmt_in_expr((Expr *)e->designators.data[i], path);
         }
         return;
     }
     if (e->kind == Expr_Binary) {
-        rewrite_printf_in_expr(e->left, scope, prog, arena);
-        rewrite_printf_in_expr(e->right, scope, prog, arena);
+        rewrite_printfmt_in_expr(e->left, path);
+        rewrite_printfmt_in_expr(e->right, path);
         return;
     }
     if (e->kind == Expr_Ternary) {
-        rewrite_printf_in_expr(e->left, scope, prog, arena);
-        rewrite_printf_in_expr(e->right, scope, prog, arena);
-        rewrite_printf_in_expr(e->third, scope, prog, arena);
+        rewrite_printfmt_in_expr(e->left, path);
+        rewrite_printfmt_in_expr(e->right, path);
+        rewrite_printfmt_in_expr(e->third, path);
         return;
     }
     if (e->kind == Expr_Addr || e->kind == Expr_Cast || e->kind == Expr_Unary) {
-        rewrite_printf_in_expr(e->inner, scope, prog, arena);
+        rewrite_printfmt_in_expr(e->inner, path);
         return;
     }
     if (e->kind == Expr_Index) {
-        rewrite_printf_in_expr(e->base, scope, prog, arena);
-        rewrite_printf_in_expr(e->index_expr, scope, prog, arena);
+        rewrite_printfmt_in_expr(e->base, path);
+        rewrite_printfmt_in_expr(e->index_expr, path);
         return;
     }
     if (e->kind == Expr_Field) {
-        rewrite_printf_in_expr(e->base, scope, prog, arena);
+        rewrite_printfmt_in_expr(e->base, path);
         return;
     }
 }
 
-static void rewrite_printf_in_stmt(Stmt *s, TypeScope *scope, Program *prog, memops_arena *arena) {
+static void rewrite_printfmt_call_stmt(Stmt *stmt, TypeScope *scope, Program *prog, memops_arena *arena, Vec_voidptr *out) {
+    Expr *call = stmt->expr;
+    if (call->args.length < 1) {
+        printfmt_error_at(stmt->source_path, call->line, call->col, "printfmt expects a string literal format");
+    }
+    Expr *fmt = (Expr *)call->args.data[0];
+    if (!fmt || fmt->kind != Expr_String) {
+        printfmt_error_at(stmt->source_path, call->line, call->col, "printfmt expects a string literal format");
+    }
+
+    string8 lit = fmt->string_lit;
+    i32 placeholder_count = printfmt_count_placeholders(lit);
+    if (placeholder_count < 0) {
+        printfmt_error_at(stmt->source_path, fmt->line, fmt->col, "printfmt expects a normal string literal format");
+    }
+    i32 value_count = call->args.length - 1;
+    if (placeholder_count != value_count) {
+        char message[256];
+        snprintf(message, sizeof(message), "printfmt placeholder count (%d) does not match arg count (%d)", placeholder_count, value_count);
+        printfmt_error_at(stmt->source_path, fmt->line, fmt->col, message);
+    }
+
+    u64 chunk_start = 1;
+    i32 arg_index = 0;
+    for (u64 i = 1; i + 1 < lit.length; i++) {
+        if (lit.data[i] == '{' && (i + 1) < (lit.length - 1) && lit.data[i + 1] == '}') {
+            printfmt_append_print_cstr(arena, out, stmt, lit.data + chunk_start, i - chunk_start, fmt->line, fmt->col);
+            Expr *arg = (Expr *)call->args.data[arg_index + 1];
+            printfmt_append_print_arg(arena, out, stmt, arg, arg_index + 1, scope, prog);
+            arg_index++;
+            i++;
+            chunk_start = i + 1;
+        }
+    }
+    printfmt_append_print_cstr(arena, out, stmt, lit.data + chunk_start, (lit.length - 1) - chunk_start, fmt->line, fmt->col);
+}
+
+static void rewrite_printfmt_stmt_in_place(Stmt *s, TypeScope *scope, Program *prog, memops_arena *arena) {
     if (!s) return;
+    const char *path = s->source_path;
     if (s->kind == Stmt_Var) {
-        rewrite_printf_in_expr(s->expr, scope, prog, arena);
+        rewrite_printfmt_in_expr(s->expr, path);
         type_scope_add(arena, scope, s->name, s->type);
         return;
     }
+    if (s->kind == Stmt_Expr && expr_is_printfmt_call(s->expr)) {
+        printfmt_error_at(path, s->line, s->col, "printfmt cannot be used in this statement position");
+    }
     if (s->kind == Stmt_Assign || s->kind == Stmt_Expr || s->kind == Stmt_Return) {
-        rewrite_printf_in_expr(s->expr, scope, prog, arena);
+        rewrite_printfmt_in_expr(s->expr, path);
         return;
     }
     if (s->kind == Stmt_For) {
         TypeScope loop_scope = type_scope_copy(arena, scope);
-        if (s->for_init) rewrite_printf_in_stmt(s->for_init, &loop_scope, prog, arena);
-        if (s->for_cond) rewrite_printf_in_expr(s->for_cond, &loop_scope, prog, arena);
-        if (s->for_step) rewrite_printf_in_stmt(s->for_step, &loop_scope, prog, arena);
-        for (i32 i = 0; i < s->for_body.length; i++) {
-            rewrite_printf_in_stmt((Stmt *)s->for_body.data[i], &loop_scope, prog, arena);
-        }
+        if (s->for_init) rewrite_printfmt_stmt_in_place(s->for_init, &loop_scope, prog, arena);
+        if (s->for_cond) rewrite_printfmt_in_expr(s->for_cond, path);
+        if (s->for_step) rewrite_printfmt_stmt_in_place(s->for_step, &loop_scope, prog, arena);
+        rewrite_printfmt_body(&s->for_body, &loop_scope, prog, arena);
         return;
     }
     if (s->kind == Stmt_If) {
-        rewrite_printf_in_expr(s->if_cond, scope, prog, arena);
+        rewrite_printfmt_in_expr(s->if_cond, path);
         TypeScope then_scope = type_scope_copy(arena, scope);
-        for (i32 i = 0; i < s->if_then_body.length; i++) {
-            rewrite_printf_in_stmt((Stmt *)s->if_then_body.data[i], &then_scope, prog, arena);
-        }
+        rewrite_printfmt_body(&s->if_then_body, &then_scope, prog, arena);
         if (s->if_else_if) {
             TypeScope else_if_scope = type_scope_copy(arena, scope);
-            rewrite_printf_in_stmt(s->if_else_if, &else_if_scope, prog, arena);
+            rewrite_printfmt_stmt_in_place(s->if_else_if, &else_if_scope, prog, arena);
         } else {
             TypeScope else_scope = type_scope_copy(arena, scope);
-            for (i32 i = 0; i < s->if_else_body.length; i++) {
-                rewrite_printf_in_stmt((Stmt *)s->if_else_body.data[i], &else_scope, prog, arena);
-            }
+            rewrite_printfmt_body(&s->if_else_body, &else_scope, prog, arena);
         }
         return;
     }
     if (s->kind == Stmt_While) {
-        rewrite_printf_in_expr(s->while_cond, scope, prog, arena);
+        rewrite_printfmt_in_expr(s->while_cond, path);
         TypeScope loop_scope = type_scope_copy(arena, scope);
-        for (i32 i = 0; i < s->while_body.length; i++) {
-            rewrite_printf_in_stmt((Stmt *)s->while_body.data[i], &loop_scope, prog, arena);
-        }
+        rewrite_printfmt_body(&s->while_body, &loop_scope, prog, arena);
         return;
     }
     if (s->kind == Stmt_DoWhile) {
         TypeScope loop_scope = type_scope_copy(arena, scope);
-        for (i32 i = 0; i < s->while_body.length; i++) {
-            rewrite_printf_in_stmt((Stmt *)s->while_body.data[i], &loop_scope, prog, arena);
-        }
-        rewrite_printf_in_expr(s->while_cond, &loop_scope, prog, arena);
+        rewrite_printfmt_body(&s->while_body, &loop_scope, prog, arena);
+        rewrite_printfmt_in_expr(s->while_cond, path);
         return;
     }
     if (s->kind == Stmt_Switch) {
-        rewrite_printf_in_expr(s->switch_expr, scope, prog, arena);
+        rewrite_printfmt_in_expr(s->switch_expr, path);
         for (i32 i = 0; i < s->switch_cases.length; i++) {
             SwitchCase *sc = (SwitchCase *)s->switch_cases.data[i];
-            rewrite_printf_in_expr(sc->expr, scope, prog, arena);
+            rewrite_printfmt_in_expr(sc->expr, path);
             TypeScope case_scope = type_scope_copy(arena, scope);
-            for (i32 j = 0; j < sc->body.length; j++) {
-                rewrite_printf_in_stmt((Stmt *)sc->body.data[j], &case_scope, prog, arena);
-            }
+            rewrite_printfmt_body(&sc->body, &case_scope, prog, arena);
         }
         TypeScope default_scope = type_scope_copy(arena, scope);
-        for (i32 i = 0; i < s->switch_default_body.length; i++) {
-            rewrite_printf_in_stmt((Stmt *)s->switch_default_body.data[i], &default_scope, prog, arena);
-        }
+        rewrite_printfmt_body(&s->switch_default_body, &default_scope, prog, arena);
         return;
     }
 }
 
-static void rewrite_printf_formats(Program *prog, memops_arena *arena) {
+static void rewrite_printfmt_body(Vec_voidptr *body, TypeScope *scope, Program *prog, memops_arena *arena) {
+    Vec_voidptr rewritten = ptr_array_reserve(arena, body->length + 8);
+    for (i32 i = 0; i < body->length; i++) {
+        Stmt *s = (Stmt *)body->data[i];
+        if (s && s->kind == Stmt_Expr && expr_is_printfmt_call(s->expr)) {
+            rewrite_printfmt_call_stmt(s, scope, prog, arena, &rewritten);
+            continue;
+        }
+        rewrite_printfmt_stmt_in_place(s, scope, prog, arena);
+        ptr_array_append(arena, &rewritten, s);
+    }
+    *body = rewritten;
+}
+
+static void rewrite_printfmt_formats(Program *prog, memops_arena *arena) {
     TypeScope globals = type_scope_make(arena, 64);
+    type_scope_add_reflection_globals(arena, &globals, prog);
     for (i32 i = 0; i < prog->globals.length; i++) {
         Stmt *g = (Stmt *)prog->globals.data[i];
-        rewrite_printf_in_expr(g->expr, &globals, prog, arena);
+        rewrite_printfmt_in_expr(g->expr, g->source_path);
         type_scope_add(arena, &globals, g->name, g->type);
     }
 
@@ -8700,9 +8896,7 @@ static void rewrite_printf_formats(Program *prog, memops_arena *arena) {
             Param *param = (Param *)p->params.data[j];
             type_scope_add(arena, &scope, param->name, param->type);
         }
-        for (i32 j = 0; j < p->body.length; j++) {
-            rewrite_printf_in_stmt((Stmt *)p->body.data[j], &scope, prog, arena);
-        }
+        rewrite_printfmt_body(&p->body, &scope, prog, arena);
     }
 }
 
@@ -11239,6 +11433,8 @@ i32 main(i32 argc, char *argv[]) {
         Vec_string8_append(&arena, &import_stack, string8_from_cstr(&arena, input_path));
     }
     prog = expand_i_imports(&arena, &prog, &visited_imports, &import_stack);
+    Vec_string8 symbol_known_types = semantic_collect_known_type_names(&prog, &arena);
+    semantic_resolve_proc_angle_types(&prog, &symbol_known_types, &arena);
     if (symbols_json) {
         emit_symbols_json(&arena, &prog);
         return 0;
@@ -11246,7 +11442,7 @@ i32 main(i32 argc, char *argv[]) {
     semantic_check_program(&prog, &arena);
     validate_generic_constraints(&prog, &arena);
     type_check_program(&prog, &arena);
-    rewrite_printf_formats(&prog, &arena);
+    rewrite_printfmt_formats(&prog, &arena);
 
     if (lsp_json) {
         emit_lsp_json(&arena, &prog);

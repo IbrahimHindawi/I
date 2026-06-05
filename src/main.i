@@ -2,6 +2,7 @@ import "runtime/memops.i"
 import "runtime/Array.i"
 import "runtime/Node.i"
 import "runtime/List.i"
+import "runtime/Print.i"
 
 payload: struct = {
     x: f32;
@@ -12,7 +13,7 @@ main: proc(argc: i32, argv: **char)-> i32 = {
     printf("Hello, World!\n");
 
     num: i32 = 0;
-    printf("num = {}\n", num);
+    printfmt("num = {}\n", num);
 
     # array: *[]i32 = {};
 
@@ -20,10 +21,10 @@ main: proc(argc: i32, argv: **char)-> i32 = {
     memops_arena_initialize(&arena);
 
     p: payload = {};
-    name: *char = payload<>.name;
-    printf("name %s\n", name);
+    name: *const char = payload<>.name;
+    printfmt("name {}\n", name);
     for (i: i32 = 0; i < payload<>.field_count; i += 1) {
-        printf("field[%d] = %s\n", i, payload<>.fields[i].name);
+        printfmt("field[{}] = {}\n", i, payload<>.fields[i].name);
     }
 
     len: i32 = 16;
@@ -39,7 +40,7 @@ main: proc(argc: i32, argv: **char)-> i32 = {
         numbers.data[i] = i; 
     }
     for (i: i32 = 0; i < len; i += 1 ) {
-        printf("i = {}, ", numbers.data[i]); 
+        printfmt("i = {}, ", numbers.data[i]); 
     }
 
     numberchain: *List<payload>;

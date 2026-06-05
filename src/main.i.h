@@ -344,6 +344,14 @@ structdef(Array_i32) {
     u64 length;
 };
 
+#line 7 "src/main.i"
+structdef(payload) {
+#line 8 "src/main.i"
+    f32 x;
+#line 9 "src/main.i"
+    u8 * y;
+};
+
 #line 1 "<generated>"
 /* I monomorph: struct Node<T> -> Node_payload; declared at C:\devel\i\src\runtime\Node.i:4:1 */
 #line 4 "C:\\devel\\i\\src\\runtime\\Node.i"
@@ -362,14 +370,6 @@ structdef(List_payload) {
     Node_payload * head;
 #line 7 "C:\\devel\\i\\src\\runtime\\List.i"
     usize length;
-};
-
-#line 5 "src/main.i"
-structdef(payload) {
-#line 6 "src/main.i"
-    f32 x;
-#line 7 "src/main.i"
-    u8 * y;
 };
 
 #line 1 "<generated>"
@@ -419,14 +419,48 @@ void memops_arena_clear(memops_arena * arena);
 memops_arena_temp memops_arena_temp_begin(memops_arena * arena);
 #line 127 "C:\\devel\\i\\src\\runtime\\memops.i"
 void memops_arena_temp_end(memops_arena_temp temp);
-#line 10 "src/main.i"
+#line 3 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_cstr(const char * text);
+#line 11 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_i8(i8 x);
+#line 15 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_i16(i16 x);
+#line 19 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_i32(i32 x);
+#line 23 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_i64(i64 x);
+#line 27 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_u8(u8 x);
+#line 31 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_u16(u16 x);
+#line 35 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_u32(u32 x);
+#line 39 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_u64(u64 x);
+#line 43 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_usize(usize x);
+#line 47 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_f32(f32 x);
+#line 51 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_f64(f64 x);
+#line 55 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_char(char x);
+#line 59 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_bool(bool x);
+#line 67 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_b32(b32 x);
+#line 75 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_ptr_char(char * x);
+#line 79 "C:\\devel\\i\\src\\runtime\\Print.i"
+void print_ptr_const_char(const char * x);
+#line 12 "src/main.i"
 i32 main(i32 argc, char * * argv);
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:28:32 */
+/* I monomorph: proc Array<T>reserve -> Array_payload_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:32:32 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_payload Array_payload_reserve(memops_arena * arena, u64 length);
 #line 1 "<generated>"
-/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:35:27 */
+/* I monomorph: proc Array<T>reserve -> Array_i32_reserve; declared at C:\devel\i\src\runtime\Array.i:9:1; instantiated at src/main.i:38:27 */
 #line 9 "C:\\devel\\i\\src\\runtime\\Array.i"
 Array_i32 Array_i32_reserve(memops_arena * arena, u64 length);
 #line 1 "<generated>"
@@ -434,10 +468,10 @@ Array_i32 Array_i32_reserve(memops_arena * arena, u64 length);
 #line 9 "C:\\devel\\i\\src\\runtime\\Node.i"
 Node_payload * Node_payload_create(memops_arena * arena, payload data);
 #line 1 "<generated>"
-/* I monomorph: proc List<T>create -> List_payload_create; declared at C:\devel\i\src\runtime\List.i:10:1; instantiated at src/main.i:44:19 */
+/* I monomorph: proc List<T>create -> List_payload_create; declared at C:\devel\i\src\runtime\List.i:10:1; instantiated at src/main.i:47:19 */
 #line 10 "C:\\devel\\i\\src\\runtime\\List.i"
 List_payload * List_payload_create(memops_arena * arena);
 #line 1 "<generated>"
-/* I monomorph: proc List<T>append -> List_payload_append; declared at C:\devel\i\src\runtime\List.i:19:1; instantiated at src/main.i:45:5 */
+/* I monomorph: proc List<T>append -> List_payload_append; declared at C:\devel\i\src\runtime\List.i:19:1; instantiated at src/main.i:48:5 */
 #line 19 "C:\\devel\\i\\src\\runtime\\List.i"
 void List_payload_append(memops_arena * arena, List_payload * list, payload item);

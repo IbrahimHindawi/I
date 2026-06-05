@@ -119,6 +119,38 @@ main:proc()->i32 = {
         expected_stdout="1 3\n",
     ),
     Case(
+        name="printfmt",
+        source=r'''
+cinclude "stdio.h"
+import "C:/devel/i/src/runtime/Print.i"
+
+Payload: struct = {
+    x: i32;
+    y: f32;
+}
+
+print: proc<Payload>(value: Payload)->void = {
+    printfmt("Payload{x: {}, y: {}}", value.x, value.y);
+}
+
+main: proc()->i32 = {
+    count: u64 = 4;
+    label: *const char = "hi";
+    p: Payload = {.x = 7, .y = 2.5};
+    i: i32 = 1;
+    printfmt("a {} {} {} {}\n", 3, count, 1.5, label);
+    printfmt("{}\n", p);
+    printfmt("field[{}] = {}\n", i, Payload<>.fields[i].name);
+    print<i32>(9);
+    print_cstr("\n");
+    printf("{} stays raw\n");
+    return 0;
+}
+''',
+        expected_stdout="a 3 4 1.500000 hi\nPayload{x: 7, y: 2.500000}\nfield[1] = y\n9\n{} stays raw\n",
+        generated_contains=("print_i32(3);", "print_u64(count);", "print_f32(1.5);", "print_ptr_const_char(label);", "print_Payload(p);", "print_ptr_const_char(Payload_reflect.fields[i].name);", "printf(\"{} stays raw\\n\");"),
+    ),
+    Case(
         name="runtime_containers",
         source=r'''
 cinclude "stdio.h"
@@ -1864,15 +1896,9 @@ $
 
     check_json_format_i = TEST_DIR / "check_json_format.i"
     check_json_format_i.write_text(r'''
-cinclude "stdio.h"
-
-Payload:struct = {
-    value:i32;
-}
-
 main:proc()->i32 = {
-    payload:Payload = {};
-    printf("{}\n", payload);
+    fmt:*const char = "{}\n";
+    printfmt(fmt, 1);
     return 0;
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
@@ -1889,9 +1915,9 @@ main:proc()->i32 = {
         or not check_json_format_data
         or check_json_format_data[0].get("category") != "format"
         or check_json_format_data[0].get("file") != str(check_json_format_i)
-        or "cannot infer '{}' format for printf arg 1" not in check_json_format_data[0].get("message", "")
+        or "printfmt expects a string literal format" not in check_json_format_data[0].get("message", "")
     ):
-        print("check_json_format: expected structured printf format diagnostic")
+        print("check_json_format: expected structured printfmt format diagnostic")
         print(check_json_format.stdout)
         return 1
     print("ok check_json_format")
@@ -1901,21 +1927,21 @@ main:proc()->i32 = {
             "check_json_format_too_many_placeholders",
             r'''
 main:proc()->i32 = {
-    printf("{} {}\n", 1);
+    printfmt("{} {}\n", 1);
     return 0;
 }
 ''',
-            "too many '{}' placeholders in printf format",
+            "printfmt placeholder count (2) does not match arg count (1)",
         ),
         (
             "check_json_format_count_mismatch",
             r'''
 main:proc()->i32 = {
-    printf("{}\n", 1, 2);
+    printfmt("{}\n", 1, 2);
     return 0;
 }
 ''',
-            "printf placeholder count (1) does not match arg count (2)",
+            "printfmt placeholder count (1) does not match arg count (2)",
         ),
     )
     for case_name, source, message in check_json_format_cases:
