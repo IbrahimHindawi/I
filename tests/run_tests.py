@@ -323,6 +323,30 @@ main:proc()->i32 = {
         generated_contains=("make_local_Payload", "make_option_Payload", "id_option_Payload", "Holder_Payload_make", "Holder_Payload_reflect", "Option_Payload_reflect", "Result_Payload_reflect", "Vec_Payload_reflect", "Option_Payload_some", "Result_Payload_ok", "Vec_Payload_get"),
     ),
     Case(
+        name="generic_delayed_numeric_algorithms",
+        source=r'''
+cinclude "stdio.h"
+
+add:proc<T>(x:T, y:T)->T = {
+    return x + y;
+}
+
+min_value:proc<T>(x:T, y:T)->T = {
+    if (x < y) {
+        return x;
+    }
+    return y;
+}
+
+main:proc()->i32 = {
+    printf("%d %d %.2f\n", add<i32>(5, 6), min_value<i32>(9, 3), add<f32>(1.5, 2.25));
+    return 0;
+}
+''',
+        expected_stdout="11 3 3.75\n",
+        generated_contains=("add_i32", "add_f32", "min_value_i32"),
+    ),
+    Case(
         name="nested_generic_reflection",
         source=r'''
 cinclude "stdio.h"
@@ -4006,6 +4030,35 @@ main:proc()->i32 = {
         print(generic_proc_arg_mismatch.stdout)
         return 1
     print("ok generic_proc_arg_mismatch")
+
+    generic_delayed_invalid_instance_i = TEST_DIR / "generic_delayed_invalid_instance.i"
+    generic_delayed_invalid_instance_c = TEST_DIR / "generic_delayed_invalid_instance.c"
+    generic_delayed_invalid_instance_i.write_text(r'''
+Payload:struct = {
+    value:i32;
+}
+
+add:proc<T>(x:T, y:T)->T = {
+    return x + y;
+}
+
+main:proc()->i32 = {
+    payload:Payload = {};
+    result:Payload = add<Payload>(payload, payload);
+    return result.value;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    generic_delayed_invalid_instance = run([str(I_EXE), str(generic_delayed_invalid_instance_i), str(generic_delayed_invalid_instance_c)])
+    if (
+        generic_delayed_invalid_instance.returncode == 0
+        or str(generic_delayed_invalid_instance_i) not in generic_delayed_invalid_instance.stdout
+        or "type error: operator '+' cannot be applied to 'Payload' and 'Payload'" not in generic_delayed_invalid_instance.stdout
+        or "return x + y;" not in generic_delayed_invalid_instance.stdout
+    ):
+        print("generic_delayed_invalid_instance: expected concrete generic body diagnostic")
+        print(generic_delayed_invalid_instance.stdout)
+        return 1
+    print("ok generic_delayed_invalid_instance")
 
     type_pointer_i = TEST_DIR / "type_pointer_value.i"
     type_pointer_c = TEST_DIR / "type_pointer_value.c"

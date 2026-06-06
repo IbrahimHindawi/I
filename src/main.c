@@ -5742,9 +5742,11 @@ static void validate_generic_constraints(Program *prog, memops_arena *arena) {
 typedef struct TypeScope {
     Vec_string8 names;
     Vec_voidptr types; // TypeExpr*
+    TypeSub sub;
 } TypeScope;
 
 static TypeExpr *type_name_expr_const(memops_arena *arena, const char *name);
+static TypeExpr *substitute_type_param(memops_arena *arena, TypeExpr *src, string8 param, TypeExpr *arg);
 
 static TypeScope type_scope_make(memops_arena *arena, i32 cap) {
     TypeScope s = {0};
@@ -5755,11 +5757,17 @@ static TypeScope type_scope_make(memops_arena *arena, i32 cap) {
 
 static TypeScope type_scope_copy(memops_arena *arena, TypeScope *src) {
     TypeScope dst = type_scope_make(arena, src->names.length + 8);
+    dst.sub = src->sub;
     for (i32 i = 0; i < src->names.length; i++) {
         Vec_string8_append(arena, &dst.names, src->names.data[i]);
         ptr_array_append(arena, &dst.types, src->types.data[i]);
     }
     return dst;
+}
+
+static TypeExpr *type_scope_apply_sub(TypeScope *scope, memops_arena *arena, TypeExpr *type) {
+    if (!scope || !scope->sub.has || !type) return type;
+    return substitute_type_param(arena, type, scope->sub.param, scope->sub.arg);
 }
 
 static void type_scope_add(memops_arena *arena, TypeScope *s, string8 name, TypeExpr *type) {
@@ -6082,7 +6090,7 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, Program *prog, memop
             return ptr_t;
         }
         TypeExpr *scope_type = type_scope_lookup(scope, e->name);
-        if (scope_type) return scope_type;
+        if (scope_type) return type_scope_apply_sub(scope, arena, scope_type);
         EnumDecl *enum_decl = lookup_enum_constant_decl(arena, prog, e->name);
         if (enum_decl) return type_name_expr_from_string(arena, enum_decl->name);
         return proc_decl_pointer_type(arena, lookup_proc_decl(prog, e->name));
@@ -6125,10 +6133,10 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, Program *prog, memop
         return infer_expr_type(e->inner, scope, prog, arena);
     }
     if (e->kind == Expr_Cast) {
-        return e->cast_type;
+        return type_scope_apply_sub(scope, arena, e->cast_type);
     }
     if (e->kind == Expr_CompoundInit) {
-        return e->cast_type;
+        return type_scope_apply_sub(scope, arena, e->cast_type);
     }
     if (e->kind == Expr_Index) {
         TypeExpr *base = infer_expr_type(e->base, scope, prog, arena);
@@ -6156,9 +6164,10 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, Program *prog, memop
         if (decl) {
             TypeExpr *type_arg = generic_call_type_arg(e);
             if (decl->is_generic && type_arg) {
+                type_arg = type_scope_apply_sub(scope, arena, type_arg);
                 return substitute_type_param(arena, decl->ret_type, decl->type_param, type_arg);
             }
-            return decl->ret_type;
+            return type_scope_apply_sub(scope, arena, decl->ret_type);
         }
         TypeExpr *callee_type = type_scope_lookup(scope, e->name);
         TypeExpr *proc_type = type_proc_from_callable_type(prog, callee_type);
@@ -8317,6 +8326,7 @@ static void type_check_initializer_against(
     memops_arena *arena
 ) {
     if (!init || !expected) return;
+    expected = type_scope_apply_sub(scope, arena, expected);
     if (init->kind == Expr_ZeroInit) {
         init->cast_type = expected;
         return;
@@ -8506,6 +8516,9 @@ static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_
     }
 
     TypeExpr *type_arg = generic_call_type_arg(call);
+    if (type_arg) {
+        type_arg = type_scope_apply_sub(scope, arena, type_arg);
+    }
     for (i32 i = 0; i < call->args.length && i < decl->params.length; i++) {
         Param *param = (Param *)decl->params.data[i];
         TypeExpr *expected = param->type;
@@ -8550,13 +8563,15 @@ static void type_check_expr(Expr *e, TypeScope *scope, Program *prog, memops_are
     if (e->kind == Expr_Cast) {
         type_check_expr(e->inner, scope, prog, arena);
         TypeExpr *actual = infer_expr_type(e->inner, scope, prog, arena);
-        if (!type_allows_cast(prog, e->cast_type, actual)) {
-            type_error_cast(prog, e->cast_type, actual, e->line, e->col, arena);
+        TypeExpr *cast_type = type_scope_apply_sub(scope, arena, e->cast_type);
+        if (!type_allows_cast(prog, cast_type, actual)) {
+            type_error_cast(prog, cast_type, actual, e->line, e->col, arena);
         }
         return;
     }
     if (e->kind == Expr_CompoundInit) {
-        type_check_initializer_against(e->inner, e->cast_type, scope, prog, arena);
+        TypeExpr *compound_type = type_scope_apply_sub(scope, arena, e->cast_type);
+        type_check_initializer_against(e->inner, compound_type, scope, prog, arena);
         if (e->inner && e->inner->kind != Expr_InitList && e->inner->kind != Expr_ZeroInit) {
             type_check_expr(e->inner, scope, prog, arena);
         }
@@ -8738,11 +8753,12 @@ static void type_check_stmt(
     }
     g_diag_import_chain = s->import_chain;
     if (s->kind == Stmt_Var) {
+        TypeExpr *local_type = type_scope_apply_sub(scope, arena, s->type);
         type_check_expr(s->expr, scope, prog, arena);
-        type_check_initializer_against(s->expr, s->type, scope, prog, arena);
+        type_check_initializer_against(s->expr, local_type, scope, prog, arena);
         TypeExpr *actual = infer_expr_type(s->expr, scope, prog, arena);
-        check_assignment_compatible("initializer", prog, s->type, actual, s->line, s->col, arena);
-        type_scope_add(arena, scope, s->name, s->type);
+        check_assignment_compatible("initializer", prog, local_type, actual, s->line, s->col, arena);
+        type_scope_add(arena, scope, s->name, local_type);
         g_diag_source_path = prev_diag_source_path;
         g_diag_import_chain = prev_diag_import_chain;
         return;
@@ -8881,6 +8897,61 @@ static void type_check_stmt(
     g_diag_import_chain = prev_diag_import_chain;
 }
 
+static void type_check_proc_body(
+    Program *prog,
+    ProcDecl *p,
+    TypeScope *globals,
+    TypeSub sub,
+    memops_arena *arena
+) {
+    const char *prev_diag_source_path = g_diag_source_path;
+    const char *prev_diag_import_chain = g_diag_import_chain;
+    if (p->source_path) {
+        g_diag_source_path = p->source_path;
+    }
+    g_diag_import_chain = p->import_chain;
+
+    TypeScope scope = type_scope_copy(arena, globals);
+    scope.sub = sub;
+    for (i32 j = 0; j < p->params.length; j++) {
+        Param *param = (Param *)p->params.data[j];
+        TypeExpr *param_type = type_scope_apply_sub(&scope, arena, param->type);
+        type_scope_add(arena, &scope, param->name, param_type);
+    }
+
+    TypeExpr *return_type = type_scope_apply_sub(&scope, arena, p->ret_type);
+    for (i32 j = 0; j < p->body.length; j++) {
+        type_check_stmt((Stmt *)p->body.data[j], &scope, prog, return_type, p, arena);
+    }
+
+    g_diag_source_path = prev_diag_source_path;
+    g_diag_import_chain = prev_diag_import_chain;
+}
+
+static void type_check_generic_proc_instances(
+    Program *prog,
+    TypeScope *globals,
+    memops_arena *arena
+) {
+    for (i32 i = 0; i < prog->procs.length; i++) {
+        ProcDecl *p = (ProcDecl *)prog->procs.data[i];
+        if (!p->is_generic || p->is_external) continue;
+
+        Vec_string8 instances = Vec_string8_reserve(arena, 4);
+        Vec_voidptr instance_sites = ptr_array_reserve(arena, 4);
+        collect_generic_proc_instances_with_sites(prog, p, &instances, &instance_sites, arena);
+        for (i32 j = 0; j < instances.length; j++) {
+            TypeExpr *arg = type_new(arena, Type_Name);
+            arg->name = instances.data[j];
+            TypeSub sub = {0};
+            sub.has = true;
+            sub.param = p->type_param;
+            sub.arg = arg;
+            type_check_proc_body(prog, p, globals, sub, arena);
+        }
+    }
+}
+
 static void type_check_program(Program *prog, memops_arena *arena) {
     TypeScope globals = type_scope_make(arena, 64);
     type_scope_add_reflection_globals(arena, &globals, prog);
@@ -8903,23 +8974,11 @@ static void type_check_program(Program *prog, memops_arena *arena) {
 
     for (i32 i = 0; i < prog->procs.length; i++) {
         ProcDecl *p = (ProcDecl *)prog->procs.data[i];
-        const char *prev_diag_source_path = g_diag_source_path;
-        const char *prev_diag_import_chain = g_diag_import_chain;
-        if (p->source_path) {
-            g_diag_source_path = p->source_path;
-        }
-        g_diag_import_chain = p->import_chain;
-        TypeScope scope = type_scope_copy(arena, &globals);
-        for (i32 j = 0; j < p->params.length; j++) {
-            Param *param = (Param *)p->params.data[j];
-            type_scope_add(arena, &scope, param->name, param->type);
-        }
-        for (i32 j = 0; j < p->body.length; j++) {
-            type_check_stmt((Stmt *)p->body.data[j], &scope, prog, p->ret_type, p, arena);
-        }
-        g_diag_source_path = prev_diag_source_path;
-        g_diag_import_chain = prev_diag_import_chain;
+        if (p->is_generic) continue;
+        type_check_proc_body(prog, p, &globals, (TypeSub){0}, arena);
     }
+
+    type_check_generic_proc_instances(prog, &globals, arena);
 }
 
 static const char *printfmt_path(const char *path) {
