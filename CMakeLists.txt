@@ -8,6 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include_directories(extern/haikal/src/meta_arena/gen)
 include_directories(extern/haikal/src/runtime)
+include_directories(src)
 
 add_subdirectory(extern/haikal)
 
@@ -17,6 +18,11 @@ add_executable(${PROJECT_NAME}
     src/string8slice.c
 )
 add_dependencies(${PROJECT_NAME} haikal)
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/src/std"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/std"
+)
 
 set(LLVM_ROOT "C:/Program Files/LLVM" CACHE PATH "LLVM install root")
 find_path(LIBCLANG_INCLUDE_DIR clang-c/Index.h
@@ -33,9 +39,6 @@ if (LIBCLANG_INCLUDE_DIR AND LIBCLANG_LIBRARY)
     target_include_directories(ibind PRIVATE ${LIBCLANG_INCLUDE_DIR})
     target_link_libraries(ibind PRIVATE ${LIBCLANG_LIBRARY})
     if (WIN32)
-        target_compile_definitions(ibind PRIVATE _CRT_SECURE_NO_WARNINGS)
-    endif()
-    if (WIN32)
         add_custom_command(TARGET ibind POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${LLVM_ROOT}/bin/libclang.dll"
@@ -46,12 +49,6 @@ else()
     message(WARNING "libclang not found; ibind will not be built")
 endif()
 
-if (WIN32)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE _CRT_SECURE_NO_WARNINGS)
-    if (CMAKE_C_COMPILER_ID MATCHES "Clang")
-        target_compile_options(${PROJECT_NAME} PRIVATE -Wno-macro-redefined)
-    endif()
-endif()
 # add_subdirectory(extern) # in case of modules...
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")

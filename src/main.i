@@ -1,8 +1,8 @@
-import "runtime/memops.i"
-import "runtime/Array.i"
-import "runtime/Node.i"
-import "runtime/List.i"
-import "runtime/Print.i"
+import "std/memops.i"
+import "std/Array.i"
+import "std/Node.i"
+import "std/List.i"
+import "std/Print.i"
 
 payload: struct = {
     x: f32;

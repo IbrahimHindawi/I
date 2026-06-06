@@ -48,7 +48,7 @@ def compile_one(i_exe: Path, cc: str, suite: Path, source: Path, build_dir: Path
         "-I",
         "src",
         "-I",
-        "src/runtime",
+        "src/std",
         "-o",
         str(obj_path),
         "-Wno-everything",

@@ -28,7 +28,7 @@ CASES = (
         name="basic_generics",
         source=r'''
 cinclude "stdio.h"
-import "C:/devel/i/src/runtime/memops.i"
+import "C:/devel/i/src/std/memops.i"
 
 memops_arena_push_array:proc<T>(arena:*memops_arena, count:u64)->*void={
     alloc_size:u64 = sizeof(T) * count;
@@ -122,7 +122,7 @@ main:proc()->i32 = {
         name="printfmt",
         source=r'''
 cinclude "stdio.h"
-import "C:/devel/i/src/runtime/Print.i"
+import "C:/devel/i/src/std/Print.i"
 
 Payload: struct = {
     x: i32;
@@ -154,7 +154,7 @@ main: proc()->i32 = {
         name="reflection_print_runtime",
         source=r'''
 cinclude "stdio.h"
-import "C:/devel/i/src/runtime/containers.i"
+import "C:/devel/i/src/std/containers.i"
 
 i_reflect_field:struct = {
     name:*const char;
@@ -258,7 +258,7 @@ main:proc()->i32 = {
         name="generic_dependency_closure",
         source=r'''
 cinclude "stdio.h"
-import "C:/devel/i/src/runtime/containers.i"
+import "C:/devel/i/src/std/containers.i"
 
 Payload:struct = {
     x:i32;
@@ -326,7 +326,7 @@ main:proc()->i32 = {
         name="nested_generic_reflection",
         source=r'''
 cinclude "stdio.h"
-import "C:/devel/i/src/runtime/containers.i"
+import "C:/devel/i/src/std/containers.i"
 
 Payload:struct = {
     x:i32;
@@ -371,7 +371,7 @@ main:proc()->i32 = {
         name="runtime_containers",
         source=r'''
 cinclude "stdio.h"
-import "C:/devel/i/src/runtime/containers.i"
+import "C:/devel/i/src/std/containers.i"
 
 main:proc()->i32 = {
     arena:memops_arena = {};
@@ -467,6 +467,39 @@ main:proc()->i32 = {
 ''',
         expected_stdout="7 1 11 1 3 5 7 3 30 1 1 2 1 5 3 1 8 9 1 13 12 3 5 6 3 15\n",
         generated_contains=("Option_i32_reflect", "Result_i32_reflect", "Array_i32_reflect", "Vec_i32_reflect", "List_i32_reflect", "DList_i32_reflect", "Queue_i32_reflect", "Stack_i32_reflect", "Map_i32_reflect"),
+    ),
+    Case(
+        name="runtime_string8",
+        source=r'''
+cinclude "stdio.h"
+import "C:/devel/i/src/std/string8.i"
+
+main:proc()->i32 = {
+    arena:memops_arena = {};
+    memops_arena_initialize(&arena);
+
+    text:string8 = string8_from_cstr(&arena, "hello");
+    string8_append_byte(&arena, &text, cast(44, u8));
+    string8_append_cstr(&arena, &text, "world");
+
+    parts:Vec<string8slice> = string8slice_split_from_string8(&arena, text, cast(44, u8));
+    owned:Vec<string8> = string8_split_char(&arena, text, cast(44, u8));
+    copy:string8 = string8_copy_from_slice(&arena, parts.data[1].data, parts.data[1].length);
+
+    printf("%llu %d %d %d ",
+        text.length,
+        string8_equals_cstr(&text, "hello,world"),
+        string8slice_equals_cstr(parts.data[0], "hello"),
+        string8_equals_cstr(&owned.data[1], "world"));
+    string8_print(&text);
+    printf(" ");
+    string8slice_print(parts.data[0]);
+    printf(" %s %llu %llu\n", string8_to_cstr_temp(&arena, copy), parts.length, owned.length);
+    return 0;
+}
+''',
+        expected_stdout="11 1 1 1 hello,world hello world 2 2\n",
+        generated_contains=("string8_reflect", "string8slice_reflect", "Vec_string8_reflect", "Vec_string8slice_reflect"),
     ),
     Case(
         name="enum_reflect_preprocessor",
@@ -1099,7 +1132,7 @@ def main() -> int:
             "-I",
             "src",
             "-I",
-            "src/runtime",
+            "src/std",
             "-o",
             str(exe),
         ])
@@ -1143,6 +1176,7 @@ main:proc()->i32 = {
         or "usage:" not in cli_help.stdout
         or "I compile [input.i]" not in cli_help.stdout
         or "I check   [input.i]" not in cli_help.stdout
+        or "--importdir <dir>" not in cli_help.stdout
     ):
         print("cli_help: expected readable command-line help")
         print(cli_help.stdout)
@@ -1189,6 +1223,73 @@ main:proc()->i32 = {
         print(cli_compile.stdout)
         return 1
     print("ok cli_compile_command")
+
+    cli_no_header_c = TEST_DIR / "cli_no_header.c"
+    cli_no_header_h = TEST_DIR / "cli_no_header.h"
+    for path in (cli_no_header_c, cli_no_header_h):
+        if path.exists():
+            path.unlink()
+    cli_no_header = run(
+        [
+            str(I_EXE),
+            "compile",
+            str(check_i),
+            "-o",
+            str(cli_no_header_c),
+            "--no-header",
+        ]
+    )
+    if (
+        cli_no_header.returncode != 0
+        or not cli_no_header_c.exists()
+        or cli_no_header_h.exists()
+        or f"i: generated {cli_no_header_c}" not in cli_no_header.stdout
+    ):
+        print("cli_no_header_command: expected compile command to generate only C output")
+        print(cli_no_header.stdout)
+        return 1
+    print("ok cli_no_header_command")
+
+    cli_importdir_root = TEST_DIR / "cli_importdir_root"
+    cli_importdir_std = cli_importdir_root / "std"
+    cli_importdir_std.mkdir(parents=True, exist_ok=True)
+    (cli_importdir_std / "importdir_smoke.i").write_text(r'''
+ImportDirPayload:struct = {
+    value:i32;
+}
+
+importdir_value:proc()->i32 = {
+    payload:ImportDirPayload = {.value = 42};
+    return payload.value;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    cli_importdir_i = TEST_DIR / "cli_importdir.i"
+    cli_importdir_i.write_text(r'''
+import "std/importdir_smoke.i"
+
+main:proc()->i32 = {
+    return importdir_value();
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    cli_importdir = run([
+        str(I_EXE),
+        "check",
+        str(cli_importdir_i),
+        "--importdir",
+        str(cli_importdir_root),
+        "--diagnostics=json",
+    ])
+    try:
+        cli_importdir_data = json.loads(cli_importdir.stdout)
+    except json.JSONDecodeError:
+        print("cli_importdir: expected JSON diagnostics")
+        print(cli_importdir.stdout)
+        return 1
+    if cli_importdir.returncode != 0 or cli_importdir_data != []:
+        print("cli_importdir: expected --importdir to resolve imported module")
+        print(cli_importdir.stdout)
+        return 1
+    print("ok cli_importdir")
 
     cli_symbols = run([str(I_EXE), "symbols", str(check_i)])
     try:
@@ -2744,7 +2845,7 @@ main:proc()->i32 = {
         "-I",
         "src",
         "-I",
-        "src/runtime",
+        "src/std",
         "-o",
         str(TEST_DIR / "generated_line_map_mono_param_error.exe"),
     ])
@@ -2779,7 +2880,7 @@ main:proc()->i32 = {
         "-I",
         "src",
         "-I",
-        "src/runtime",
+        "src/std",
         "-o",
         str(TEST_DIR / "generated_line_map_error.exe"),
     ])
@@ -2817,7 +2918,7 @@ main:proc()->i32 = {
         "-I",
         "src",
         "-I",
-        "src/runtime",
+        "src/std",
         "-o",
         str(TEST_DIR / "generated_line_map_param_error.exe"),
     ])
@@ -2856,7 +2957,7 @@ main:proc()->i32 = {
         "-I",
         "src",
         "-I",
-        "src/runtime",
+        "src/std",
         "-o",
         str(TEST_DIR / "generated_line_map_field_error.exe"),
     ])
@@ -2900,7 +3001,7 @@ main:proc()->i32 = {{
         "-I",
         "src",
         "-I",
-        "src/runtime",
+        "src/std",
         "-o",
         str(TEST_DIR / "generated_line_map_import_app.exe"),
     ])
@@ -2948,7 +3049,7 @@ main:proc()->i32 = {{
         "-I",
         "src",
         "-I",
-        "src/runtime",
+        "src/std",
         "-o",
         str(app_exe),
     ])
@@ -3041,7 +3142,7 @@ main:proc()->i32 = {{
         "-I",
         "src",
         "-I",
-        "src/runtime",
+        "src/std",
         "-o",
         str(diamond_app_exe),
     ])
@@ -3096,7 +3197,7 @@ main:proc()->i32 = {{
         "-I",
         "src",
         "-I",
-        "src/runtime",
+        "src/std",
         "-o",
         str(diamond_rev_app_exe),
     ])
@@ -3116,7 +3217,7 @@ main:proc()->i32 = {{
     native_exe = TEST_DIR / "native_monomorph.exe"
     native_i.write_text(r'''
 cinclude "stdio.h"
-import "C:/devel/i/src/runtime/containers.i"
+import "C:/devel/i/src/std/containers.i"
 
 NativeBox:struct<T> = {
     value:T;
@@ -3167,7 +3268,7 @@ main:proc()->i32 = {
         "-I",
         "src",
         "-I",
-        "src/runtime",
+        "src/std",
         "-o",
         str(native_exe),
     ])
@@ -3193,7 +3294,7 @@ main:proc()->i32 = {
     native_json_i = TEST_DIR / "native_monomorph_json.i"
     native_json_c = native_json_dir / "native_monomorph_json.c"
     native_json_i.write_text(r'''
-import "C:/devel/i/src/runtime/containers.i"
+import "C:/devel/i/src/std/containers.i"
 
 NativeBox:struct<T> = {
     value:T;

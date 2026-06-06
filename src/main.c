@@ -52,6 +52,15 @@ bool i32_eq(i32 a, i32 b) { return a == b; }
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <time.h>
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 
 #include "string8.h"
 #include "string8slice.h"
@@ -62,6 +71,53 @@ static const char *g_diag_import_chain = null;
 static const char *g_stdin_override_path = null;
 static string8 g_stdin_override_source = {0};
 static bool g_diag_json = false;
+static bool g_profile = false;
+static const char *g_import_dirs[64] = {0};
+static i32 g_import_dir_count = 0;
+
+static double g_profile_import_probe_ms = 0.0;
+static double g_profile_import_read_ms = 0.0;
+static double g_profile_import_lex_ms = 0.0;
+static double g_profile_import_parse_ms = 0.0;
+static i32 g_profile_import_parse_count = 0;
+
+static double profile_now_ms(void) {
+#if defined(_WIN32)
+    static LARGE_INTEGER freq;
+    static bool initialized = false;
+    LARGE_INTEGER now;
+    if (!initialized) {
+        QueryPerformanceFrequency(&freq);
+        initialized = true;
+    }
+    QueryPerformanceCounter(&now);
+    return ((double)now.QuadPart * 1000.0) / (double)freq.QuadPart;
+#else
+    return ((double)clock() * 1000.0) / (double)CLOCKS_PER_SEC;
+#endif
+}
+
+static void profile_mark(const char *label, double *last_ms, double start_ms) {
+    if (!g_profile) return;
+    double now = profile_now_ms();
+    fprintf(
+        stderr,
+        "i profile: %-28s %8.3f ms  total %8.3f ms\n",
+        label,
+        now - *last_ms,
+        now - start_ms
+    );
+    *last_ms = now;
+}
+
+static void profile_import_summary(void) {
+    if (!g_profile) return;
+    fprintf(stderr, "i profile: imports parsed              %8d\n", g_profile_import_parse_count);
+    fprintf(stderr, "i profile: import probe reads          %8.3f ms\n", g_profile_import_probe_ms);
+    fprintf(stderr, "i profile: import source reads         %8.3f ms\n", g_profile_import_read_ms);
+    fprintf(stderr, "i profile: import lex                  %8.3f ms\n", g_profile_import_lex_ms);
+    fprintf(stderr, "i profile: import parse                %8.3f ms\n", g_profile_import_parse_ms);
+}
 
 static void diag_note_import_chain(void);
 
@@ -71,6 +127,30 @@ static bool cstr_equals(const char *a, const char *b) {
 
 static bool cstr_starts_with(const char *s, const char *prefix) {
     return s && prefix && strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+static FILE *i_fopen(const char *path, const char *mode) {
+#if defined(_WIN32)
+    FILE *file = null;
+    if (fopen_s(&file, path, mode) != 0) return null;
+    return file;
+#else
+    return fopen(path, mode);
+#endif
+}
+
+static bool file_exists_cstr(const char *path) {
+    if (!path) return false;
+    FILE *file = i_fopen(path, "rb");
+    if (!file) return false;
+    fclose(file);
+    return true;
+}
+
+static void add_import_dir(const char *dir) {
+    if (!dir || !dir[0]) return;
+    if (g_import_dir_count >= 64) return;
+    g_import_dirs[g_import_dir_count++] = dir;
 }
 
 static void diag_json_print_cstr(const char *s) {
@@ -2712,7 +2792,7 @@ static const char *diag_current_path(void) {
 
 static void diag_print_file_context_range(const char *path, i32 line, i32 col, i32 range_len) {
     if (!path || line <= 0 || col <= 0 || path[0] == '<') return;
-    FILE *f = fopen(path, "rb");
+    FILE *f = i_fopen(path, "rb");
     if (!f) return;
     char buf[4096];
     i32 current = 1;
@@ -2941,6 +3021,36 @@ static const char *canonicalize_path(memops_arena *arena, string8 path) {
     return (const char *)nul_path.data;
 }
 
+static const char *current_exe_path(memops_arena *arena, const char *argv0) {
+#if defined(_WIN32)
+    char buffer[4096];
+    DWORD len = GetModuleFileNameA(NULL, buffer, sizeof(buffer));
+    if (len > 0 && len < sizeof(buffer)) {
+        return canonicalize_path(arena, string8_from_cstr(arena, buffer));
+    }
+#endif
+    return canonicalize_path(arena, string8_from_cstr(arena, argv0));
+}
+
+static const char *exe_import_root(memops_arena *arena, const char *argv0) {
+    if (!argv0 || !argv0[0]) return null;
+    const char *exe_path = current_exe_path(arena, argv0);
+    u64 exe_len = (u64)strlen(exe_path);
+    u64 dir_len = 0;
+    for (u64 i = exe_len; i > 0; i--) {
+        char c = exe_path[i - 1];
+        if (c == '/' || c == '\\') {
+            dir_len = i;
+            break;
+        }
+    }
+    if (dir_len == 0) return null;
+
+    string8 dir = string8_reserve(arena, dir_len + 1);
+    string8_append_bytes(arena, &dir, (u8 *)exe_path, dir_len);
+    return canonicalize_path(arena, dir);
+}
+
 static const char *resolve_import_path(memops_arena *arena, string8 import_lit) {
     string8 import_path = string_lit_inner(arena, import_lit);
     if (import_path.length >= 2 && import_path.data[1] == ':') {
@@ -2963,7 +3073,30 @@ static const char *resolve_import_path(memops_arena *arena, string8 import_lit) 
     string8 out = string8_reserve(arena, dir_len + import_path.length + 1);
     string8_append_bytes(arena, &out, (u8 *)source, dir_len);
     string8_append_bytes(arena, &out, import_path.data, import_path.length);
-    return canonicalize_path(arena, out);
+    const char *source_relative = canonicalize_path(arena, out);
+    if (file_exists_cstr(source_relative)) {
+        return source_relative;
+    }
+
+    for (i32 i = 0; i < g_import_dir_count; i++) {
+        string8 dir = string8_from_cstr(arena, g_import_dirs[i]);
+        u64 needs_slash = 0;
+        if (dir.length > 0) {
+            u8 last = dir.data[dir.length - 1];
+            needs_slash = (last != '/' && last != '\\');
+        }
+
+        string8 candidate = string8_reserve(arena, dir.length + needs_slash + import_path.length + 1);
+        string8_append_bytes(arena, &candidate, dir.data, dir.length);
+        if (needs_slash) string8_append_byte(arena, &candidate, '/');
+        string8_append_bytes(arena, &candidate, import_path.data, import_path.length);
+        const char *canonical = canonicalize_path(arena, candidate);
+        if (file_exists_cstr(canonical)) {
+            return canonical;
+        }
+    }
+
+    return source_relative;
 }
 
 static string8 read_i_source_for_path(memops_arena *arena, const char *path) {
@@ -9051,6 +9184,7 @@ static void rewrite_printfmt_formats(Program *prog, memops_arena *arena) {
 
 static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, string8 generic_name);
 static void emit_expr_value(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, string8 generic_name);
+static void emit_expr_condition(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, string8 generic_name);
 static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, string8 generic_name);
 static void emit_proc_monomorph_comment(memops_arena *arena, string8 *out, ProcDecl *decl, string8 type_mangled, GenericInstanceSite *site);
 static void emit_line_directive_path(memops_arena *arena, string8 *out, const char *path, i32 line);
@@ -9123,7 +9257,7 @@ static void emit_compound_literal_type(memops_arena *arena, string8 *out, TypeEx
 
 static void emit_if_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, string8 generic_name) {
     emit_cstr(arena, out, "if (");
-    emit_expr(arena, out, s->if_cond, sub, generic_name);
+    emit_expr_condition(arena, out, s->if_cond, sub, generic_name);
     emit_cstr(arena, out, ") {\n");
     for (i32 i = 0; i < s->if_then_body.length; i++) {
         emit_cstr(arena, out, "        ");
@@ -9154,6 +9288,64 @@ static void emit_expr_value(memops_arena *arena, string8 *out, Expr *e, TypeSub 
         emit_cstr(arena, out, ")");
         emit_expr(arena, out, e, sub, generic_name);
         emit_cstr(arena, out, ")");
+        return;
+    }
+    emit_expr(arena, out, e, sub, generic_name);
+}
+
+static void emit_binary_op(memops_arena *arena, string8 *out, TokenKind op) {
+    if (op == Token_Plus) {
+        emit_cstr(arena, out, " + ");
+    } else if (op == Token_Minus) {
+        emit_cstr(arena, out, " - ");
+    } else if (op == Token_Star) {
+        emit_cstr(arena, out, " * ");
+    } else if (op == Token_Slash) {
+        emit_cstr(arena, out, " / ");
+    } else if (op == Token_Percent) {
+        emit_cstr(arena, out, " % ");
+    } else if (op == Token_LAngle) {
+        emit_cstr(arena, out, " < ");
+    } else if (op == Token_RAngle) {
+        emit_cstr(arena, out, " > ");
+    } else if (op == Token_LessEqual) {
+        emit_cstr(arena, out, " <= ");
+    } else if (op == Token_GreaterEqual) {
+        emit_cstr(arena, out, " >= ");
+    } else if (op == Token_EqualEqual) {
+        emit_cstr(arena, out, " == ");
+    } else if (op == Token_BangEqual) {
+        emit_cstr(arena, out, " != ");
+    } else if (op == Token_Ampersand) {
+        emit_cstr(arena, out, " & ");
+    } else if (op == Token_Caret) {
+        emit_cstr(arena, out, " ^ ");
+    } else if (op == Token_Pipe) {
+        emit_cstr(arena, out, " | ");
+    } else if (op == Token_Keyword_And) {
+        emit_cstr(arena, out, " && ");
+    } else if (op == Token_Keyword_Or) {
+        emit_cstr(arena, out, " || ");
+    } else if (op == Token_Keyword_Shl) {
+        emit_cstr(arena, out, " << ");
+    } else if (op == Token_Keyword_Shr) {
+        emit_cstr(arena, out, " >> ");
+    } else {
+        emit_cstr(arena, out, " /* unsupported op */ ");
+    }
+}
+
+static void emit_binary_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, string8 generic_name, bool wrap) {
+    if (wrap) emit_cstr(arena, out, "(");
+    emit_expr(arena, out, e->left, sub, generic_name);
+    emit_binary_op(arena, out, e->op);
+    emit_expr(arena, out, e->right, sub, generic_name);
+    if (wrap) emit_cstr(arena, out, ")");
+}
+
+static void emit_expr_condition(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, string8 generic_name) {
+    if (e && e->kind == Expr_Binary) {
+        emit_binary_expr(arena, out, e, sub, generic_name, false);
         return;
     }
     emit_expr(arena, out, e, sub, generic_name);
@@ -9267,49 +9459,7 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
         return;
     }
     if (e->kind == Expr_Binary) {
-        emit_cstr(arena, out, "(");
-        emit_expr(arena, out, e->left, sub, generic_name);
-        if (e->op == Token_Plus) {
-            emit_cstr(arena, out, " + ");
-        } else if (e->op == Token_Minus) {
-            emit_cstr(arena, out, " - ");
-        } else if (e->op == Token_Star) {
-            emit_cstr(arena, out, " * ");
-        } else if (e->op == Token_Slash) {
-            emit_cstr(arena, out, " / ");
-        } else if (e->op == Token_Percent) {
-            emit_cstr(arena, out, " % ");
-        } else if (e->op == Token_LAngle) {
-            emit_cstr(arena, out, " < ");
-        } else if (e->op == Token_RAngle) {
-            emit_cstr(arena, out, " > ");
-        } else if (e->op == Token_LessEqual) {
-            emit_cstr(arena, out, " <= ");
-        } else if (e->op == Token_GreaterEqual) {
-            emit_cstr(arena, out, " >= ");
-        } else if (e->op == Token_EqualEqual) {
-            emit_cstr(arena, out, " == ");
-        } else if (e->op == Token_BangEqual) {
-            emit_cstr(arena, out, " != ");
-        } else if (e->op == Token_Ampersand) {
-            emit_cstr(arena, out, " & ");
-        } else if (e->op == Token_Caret) {
-            emit_cstr(arena, out, " ^ ");
-        } else if (e->op == Token_Pipe) {
-            emit_cstr(arena, out, " | ");
-        } else if (e->op == Token_Keyword_And) {
-            emit_cstr(arena, out, " && ");
-        } else if (e->op == Token_Keyword_Or) {
-            emit_cstr(arena, out, " || ");
-        } else if (e->op == Token_Keyword_Shl) {
-            emit_cstr(arena, out, " << ");
-        } else if (e->op == Token_Keyword_Shr) {
-            emit_cstr(arena, out, " >> ");
-        } else {
-            emit_cstr(arena, out, " /* unsupported op */ ");
-        }
-        emit_expr(arena, out, e->right, sub, generic_name);
-        emit_cstr(arena, out, ")");
+        emit_binary_expr(arena, out, e, sub, generic_name, true);
         return;
     }
     if (e->kind == Expr_Ternary) {
@@ -9408,7 +9558,7 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
         }
         emit_cstr(arena, out, "; ");
         if (s->for_cond) {
-            emit_expr(arena, out, s->for_cond, sub, generic_name);
+            emit_expr_condition(arena, out, s->for_cond, sub, generic_name);
         }
         emit_cstr(arena, out, "; ");
         if (s->for_step) {
@@ -9440,7 +9590,7 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
     }
     if (s->kind == Stmt_While) {
         emit_cstr(arena, out, "while (");
-        emit_expr(arena, out, s->while_cond, sub, generic_name);
+        emit_expr_condition(arena, out, s->while_cond, sub, generic_name);
         emit_cstr(arena, out, ") {\n");
         for (i32 i = 0; i < s->while_body.length; i++) {
             emit_cstr(arena, out, "        ");
@@ -9456,7 +9606,7 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
             emit_stmt(arena, out, (Stmt *)s->while_body.data[i], sub, generic_name);
         }
         emit_cstr(arena, out, "    } while (");
-        emit_expr(arena, out, s->while_cond, sub, generic_name);
+        emit_expr_condition(arena, out, s->while_cond, sub, generic_name);
         emit_cstr(arena, out, ");\n");
         return;
     }
@@ -10762,7 +10912,9 @@ static void program_append_program(memops_arena *arena, Program *dst, Program *s
 }
 
 static Program parse_i_file(memops_arena *arena, const char *path) {
+    double profile_step = profile_now_ms();
     string8 input = read_i_source_for_path(arena, path);
+    if (g_profile) g_profile_import_read_ms += profile_now_ms() - profile_step;
     if (!input.data) {
         if (g_diag_json) {
             char message[1024];
@@ -10779,7 +10931,9 @@ static Program parse_i_file(memops_arena *arena, const char *path) {
     g_source_path = path;
 
     Vec_Token tokens = {0};
+    profile_step = profile_now_ms();
     lex_tokens(arena, input, &tokens);
+    if (g_profile) g_profile_import_lex_ms += profile_now_ms() - profile_step;
 
     Parser parser = {0};
     parser.arena = arena;
@@ -10787,8 +10941,13 @@ static Program parse_i_file(memops_arena *arena, const char *path) {
     parser.tokens = tokens;
     parser.index = 0;
 
+    profile_step = profile_now_ms();
     Program prog = parse_program(&parser);
     prog.preprocessor_lines = collect_preprocessor_lines(arena, input);
+    if (g_profile) {
+        g_profile_import_parse_ms += profile_now_ms() - profile_step;
+        g_profile_import_parse_count += 1;
+    }
 
     g_source_path = prev_source_path;
     return prog;
@@ -10919,7 +11078,9 @@ static Program expand_i_imports(memops_arena *arena, Program *prog, Vec_string8 
         Vec_string8_append(arena, stack, path_s);
         import_chain = import_chain_from_stack(arena, stack);
 
+        double profile_probe_start = profile_now_ms();
         string8 input_check = read_i_source_for_path(arena, path);
+        if (g_profile) g_profile_import_probe_ms += profile_now_ms() - profile_probe_start;
         if (!input_check.data) {
             if (g_diag_json) {
                 char message[1024];
@@ -10964,7 +11125,60 @@ static Program expand_i_imports(memops_arena *arena, Program *prog, Vec_string8 
 }
 
 static bool write_string8_to_file(const char *path, string8 data) {
-    FILE *f = fopen(path, "wb");
+    char dir[4096];
+    size_t len = strlen(path);
+    if (len >= sizeof(dir)) return false;
+    memcpy(dir, path, len + 1);
+    for (size_t i = 0; i < len; i++) {
+        if (dir[i] != '/' && dir[i] != '\\') continue;
+        if (i == 0) continue;
+#if defined(_WIN32)
+        if (i == 2 && dir[1] == ':') continue;
+#endif
+        char saved = dir[i];
+        dir[i] = 0;
+        if (dir[0]) {
+#if defined(_WIN32)
+            if (!CreateDirectoryA(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+                dir[i] = saved;
+                return false;
+            }
+#else
+            if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
+                dir[i] = saved;
+                return false;
+            }
+#endif
+        }
+        dir[i] = saved;
+    }
+
+    FILE *existing = i_fopen(path, "rb");
+    if (existing) {
+        bool same = false;
+        if (fseek(existing, 0, SEEK_END) == 0) {
+            long size = ftell(existing);
+            if (size >= 0 && (u64)size == data.length && fseek(existing, 0, SEEK_SET) == 0) {
+                same = true;
+                u8 buf[8192];
+                u64 offset = 0;
+                while (offset < data.length) {
+                    u64 remaining = data.length - offset;
+                    size_t want = remaining < sizeof(buf) ? (size_t)remaining : sizeof(buf);
+                    size_t got = fread(buf, 1, want, existing);
+                    if (got != want || memcmp(buf, data.data + offset, want) != 0) {
+                        same = false;
+                        break;
+                    }
+                    offset += got;
+                }
+            }
+        }
+        fclose(existing);
+        if (same) return true;
+    }
+
+    FILE *f = i_fopen(path, "wb");
     if (!f) return false;
     fwrite(data.data, 1, data.length, f);
     fclose(f);
@@ -11157,7 +11371,7 @@ static void cli_print_usage(void) {
         "I compiler\n"
         "\n"
         "usage:\n"
-        "  I compile [input.i] [-o output.c] [--header output.h]\n"
+        "  I compile [input.i] [-o output.c] [--header output.h] [--no-header]\n"
         "  I check   [input.i] [--diagnostics=json]\n"
         "  I symbols [input.i] [--stdin|--stdin-path file]\n"
         "  I lsp     [input.i] [--stdin|--stdin-path file]\n"
@@ -11169,7 +11383,7 @@ static void cli_print_usage(void) {
         "  I [input.i] --lsp=json\n"
         "\n"
         "commands:\n"
-        "  compile   transpile I to C and a generated header\n"
+        "  compile   transpile I to C and optionally a generated header\n"
         "  check     parse, import, validate, and type-check only\n"
         "  symbols   emit compiler symbol metadata as JSON\n"
         "  lsp       emit diagnostics plus compiler symbol metadata as JSON\n"
@@ -11178,10 +11392,13 @@ static void cli_print_usage(void) {
         "options:\n"
         "  -o, --output <file>       output C file for compile\n"
         "  -H, --header <file>       output header file for compile\n"
+        "  --no-header               skip generated header emission\n"
+        "  -I, --importdir <dir>     add an I import search directory\n"
         "  --check                   legacy check mode\n"
         "  --diagnostics=json        emit diagnostics as JSON\n"
         "  --symbols=json            legacy symbols JSON mode\n"
         "  --lsp=json                legacy LSP JSON mode\n"
+        "  --profile                 print compiler phase timings to stderr\n"
         "  --stdin                   read input source from stdin\n"
         "  --stdin-path <file>       override a source file with stdin text\n"
         "  -h, --help                print this help\n"
@@ -11221,9 +11438,12 @@ static bool cli_expect_value(i32 argc, char *argv[], i32 *index, const char *opt
 }
 
 i32 main(i32 argc, char *argv[]) {
+    double profile_start = profile_now_ms();
+    double profile_last = profile_start;
     bool check_only = false;
     bool symbols_json = false;
     bool lsp_json = false;
+    bool emit_header = true;
     bool read_source_from_stdin = false;
     const char *input_path = null;
     const char *stdin_override_path_arg = null;
@@ -11272,6 +11492,8 @@ i32 main(i32 argc, char *argv[]) {
             g_diag_json = true;
         } else if (cstr_equals(arg, "symbols") || cstr_equals(arg, "lsp")) {
             g_diag_json = true;
+        } else if (cstr_equals(arg, "--profile")) {
+            g_profile = true;
         }
     }
 
@@ -11284,6 +11506,14 @@ i32 main(i32 argc, char *argv[]) {
         if (cstr_equals(arg, "--version")) {
             cli_print_version();
             return 0;
+        }
+        if (cstr_equals(arg, "--profile")) {
+            g_profile = true;
+            continue;
+        }
+        if (cstr_equals(arg, "--no-header")) {
+            emit_header = false;
+            continue;
         }
         if (cstr_equals(arg, "--check")) {
             check_only = true;
@@ -11306,6 +11536,32 @@ i32 main(i32 argc, char *argv[]) {
         }
         if (cstr_starts_with(arg, "--header=")) {
             header_path = arg + strlen("--header=");
+            continue;
+        }
+        if (cstr_equals(arg, "-I") || cstr_equals(arg, "--importdir") || cstr_equals(arg, "--import-dir")) {
+            const char *dir = null;
+            if (!cli_expect_value(argc, argv, &i, arg, &dir)) return 1;
+            if (g_import_dir_count >= 64) {
+                cli_error_json_or_text("too many import directories");
+                return 1;
+            }
+            add_import_dir(dir);
+            continue;
+        }
+        if (cstr_starts_with(arg, "--importdir=")) {
+            if (g_import_dir_count >= 64) {
+                cli_error_json_or_text("too many import directories");
+                return 1;
+            }
+            add_import_dir(arg + strlen("--importdir="));
+            continue;
+        }
+        if (cstr_starts_with(arg, "--import-dir=")) {
+            if (g_import_dir_count >= 64) {
+                cli_error_json_or_text("too many import directories");
+                return 1;
+            }
+            add_import_dir(arg + strlen("--import-dir="));
             continue;
         }
         if (cstr_equals(arg, "--stdin")) {
@@ -11521,12 +11777,18 @@ i32 main(i32 argc, char *argv[]) {
         }
         positional++;
     }
+    profile_mark("cli", &profile_last, profile_start);
     if (!input_path) input_path = "src/main.i";
-    if (!output_path) output_path = "src/main.i.c";
+    if (!output_path) output_path = "build/i_gen/main.c";
+    if (!emit_header && header_path) {
+        cli_error_json_or_text("--no-header cannot be used with --header or a positional header path");
+        return 1;
+    }
     g_source_path = input_path;
 
     memops_arena arena = {0};
     memops_arena_initialize(&arena);
+    add_import_dir(exe_import_root(&arena, argv[0]));
 
     const char *canonical_input_path = canonicalize_path(&arena, string8_from_cstr(&arena, input_path));
     if (stdin_override_path_arg) {
@@ -11546,6 +11808,7 @@ i32 main(i32 argc, char *argv[]) {
     if (g_stdin_override_path && cstr_equals(canonical_input_path, g_stdin_override_path)) {
         input_from_stdin = true;
     }
+    profile_mark("setup", &profile_last, profile_start);
     string8 input = {0};
     if (g_stdin_override_path && cstr_equals(canonical_input_path, g_stdin_override_path)) {
         input = g_stdin_override_source;
@@ -11564,9 +11827,11 @@ i32 main(i32 argc, char *argv[]) {
         printf("i: error: failed to read %s\n", input_from_stdin ? "stdin" : input_path);
         return 1;
     }
+    profile_mark("read entry", &profile_last, profile_start);
 
     Vec_Token tokens = {0};
     lex_tokens(&arena, input, &tokens);
+    profile_mark("lex entry", &profile_last, profile_start);
 
     Parser parser = {0};
     parser.arena = &arena;
@@ -11576,25 +11841,35 @@ i32 main(i32 argc, char *argv[]) {
 
     Program prog = parse_program(&parser);
     prog.preprocessor_lines = collect_preprocessor_lines(&arena, input);
+    profile_mark("parse entry", &profile_last, profile_start);
     Vec_string8 visited_imports = Vec_string8_reserve(&arena, 8);
     Vec_string8 import_stack = Vec_string8_reserve(&arena, 8);
     if (argc > 1) {
         Vec_string8_append(&arena, &import_stack, string8_from_cstr(&arena, input_path));
     }
     prog = expand_i_imports(&arena, &prog, &visited_imports, &import_stack);
+    profile_mark("expand imports", &profile_last, profile_start);
+    profile_import_summary();
     Vec_string8 symbol_known_types = semantic_collect_known_type_names(&prog, &arena);
     semantic_resolve_proc_angle_types(&prog, &symbol_known_types, &arena);
+    profile_mark("resolve symbols", &profile_last, profile_start);
     if (symbols_json) {
         emit_symbols_json(&arena, &prog);
+        profile_mark("emit symbols json", &profile_last, profile_start);
         return 0;
     }
     semantic_check_program(&prog, &arena);
+    profile_mark("semantic check", &profile_last, profile_start);
     validate_generic_constraints(&prog, &arena);
+    profile_mark("generic constraints", &profile_last, profile_start);
     type_check_program(&prog, &arena);
+    profile_mark("type check", &profile_last, profile_start);
     rewrite_printfmt_formats(&prog, &arena);
+    profile_mark("printfmt rewrite", &profile_last, profile_start);
 
     if (lsp_json) {
         emit_lsp_json(&arena, &prog);
+        profile_mark("emit lsp json", &profile_last, profile_start);
         return 0;
     }
 
@@ -11604,16 +11879,22 @@ i32 main(i32 argc, char *argv[]) {
         } else {
             printf("i: checked %s\n", input_path);
         }
+        profile_mark("check done", &profile_last, profile_start);
         return 0;
     }
 
     string8 output = string8_reserve(&arena, input.length * 2 + 1024);
     emit_program(&arena, &prog, &output);
+    profile_mark("emit c", &profile_last, profile_start);
 
-    string8 header_output = string8_reserve(&arena, input.length + 1024);
-    emit_header_program(&arena, &prog, &header_output);
-    if (!header_path) {
-        header_path = derive_header_path(&arena, output_path);
+    string8 header_output = {0};
+    if (emit_header) {
+        header_output = string8_reserve(&arena, input.length + 1024);
+        emit_header_program(&arena, &prog, &header_output);
+        profile_mark("emit header", &profile_last, profile_start);
+        if (!header_path) {
+            header_path = derive_header_path(&arena, output_path);
+        }
     }
 
     if (!write_string8_to_file(output_path, output)) {
@@ -11626,21 +11907,31 @@ i32 main(i32 argc, char *argv[]) {
         printf("i: error: failed to write %s\n", output_path);
         return 1;
     }
-    if (!write_string8_to_file(header_path, header_output)) {
-        if (g_diag_json) {
-            char message[1024];
-            snprintf(message, sizeof(message), "failed to write %s", header_path);
-            diag_json_error(header_path, 0, 0, "io", message);
+    profile_mark("write c", &profile_last, profile_start);
+    if (emit_header) {
+        if (!write_string8_to_file(header_path, header_output)) {
+            if (g_diag_json) {
+                char message[1024];
+                snprintf(message, sizeof(message), "failed to write %s", header_path);
+                diag_json_error(header_path, 0, 0, "io", message);
+                return 1;
+            }
+            printf("i: error: failed to write %s\n", header_path);
             return 1;
         }
-        printf("i: error: failed to write %s\n", header_path);
-        return 1;
+        profile_mark("write header", &profile_last, profile_start);
     }
     if (!emit_native_monomorph_headers(&arena, &prog, output_path)) {
         return 1;
     }
+    profile_mark("native mono headers", &profile_last, profile_start);
 
-    printf("i: generated %s and %s\n", output_path, header_path);
+    if (emit_header) {
+        printf("i: generated %s and %s\n", output_path, header_path);
+    } else {
+        printf("i: generated %s\n", output_path);
+    }
+    profile_mark("total", &profile_last, profile_start);
     return 0;
 }
 

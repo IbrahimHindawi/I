@@ -24,6 +24,8 @@ typedef struct emitted_name_node {
 
 static emitted_name_node *g_emitted_opaque_records = 0;
 
+static char *ibind_strdup(const char *s);
+
 static char *cxstr_dup(CXString s) {
     const char *c = clang_getCString(s);
     char *out = 0;
@@ -33,7 +35,25 @@ static char *cxstr_dup(CXString s) {
         if (out) memcpy(out, c, n + 1);
     }
     clang_disposeString(s);
-    return out ? out : _strdup("");
+    return out ? out : ibind_strdup("");
+}
+
+static char *ibind_strdup(const char *s) {
+    if (!s) s = "";
+    size_t n = strlen(s);
+    char *out = (char *)malloc(n + 1);
+    if (out) memcpy(out, s, n + 1);
+    return out;
+}
+
+static FILE *ibind_fopen(const char *path, const char *mode) {
+#if defined(_WIN32)
+    FILE *file = 0;
+    if (fopen_s(&file, path, mode) != 0) return 0;
+    return file;
+#else
+    return fopen(path, mode);
+#endif
 }
 
 static void sb_reserve(string_builder *sb, size_t add) {
@@ -159,7 +179,7 @@ static void emitted_name_add(emitted_name_node **head, const char *name) {
         fprintf(stderr, "ibind: out of memory\n");
         exit(1);
     }
-    node->name = _strdup(name);
+    node->name = ibind_strdup(name);
     node->next = *head;
     *head = node;
 }
@@ -674,12 +694,12 @@ static enum CXChildVisitResult record_field_visitor(CXCursor child, CXCursor par
         return CXChildVisit_Continue;
     }
 
-    char *name = kind == CXCursor_FieldDecl ? cxstr_dup(clang_getCursorSpelling(child)) : _strdup("");
+    char *name = kind == CXCursor_FieldDecl ? cxstr_dup(clang_getCursorSpelling(child)) : ibind_strdup("");
     char fallback[64];
     if (name[0] == 0) {
         snprintf(fallback, sizeof(fallback), "_anon%d", ctx->anon_index);
         free(name);
-        name = _strdup(fallback);
+        name = ibind_strdup(fallback);
     }
 
     CXCursor anon = kind == CXCursor_FieldDecl ? field_anonymous_record_decl(child) : child;
@@ -687,7 +707,7 @@ static enum CXChildVisitResult record_field_visitor(CXCursor child, CXCursor par
     if (!clang_Cursor_isNull(anon)) {
         char forced[512];
         snprintf(forced, sizeof(forced), "%s_anon%d", ctx->owner, ctx->anon_index++);
-        type_s = _strdup(forced);
+        type_s = ibind_strdup(forced);
     } else {
         CXType field_type = clang_getCursorType(child);
         type_s = emit_cursor_proc_type_if_available(child, field_type);
@@ -773,7 +793,7 @@ static void emit_function(CXCursor c, FILE *out) {
         if (arg_name[0] == 0) {
             snprintf(fallback, sizeof(fallback), "arg%d", i);
             free(arg_name);
-            arg_name = _strdup(fallback);
+            arg_name = ibind_strdup(fallback);
         }
         char *arg_clean = sanitize_ident(arg_name);
         CXType arg_type = clang_getArgType(fn, (unsigned)i);
@@ -1272,7 +1292,7 @@ int main(int argc, char **argv) {
         clang_disposeDiagnostic(diag);
     }
 
-    FILE *out = fopen(output, "wb");
+    FILE *out = ibind_fopen(output, "wb");
     if (!out) {
         fprintf(stderr, "ibind: failed to write %s\n", output);
         clang_disposeTranslationUnit(tu);

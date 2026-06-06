@@ -1,6 +1,6 @@
 #define max_alloc_size 0x10000000000
 
-cinclude "runtime/memops_os.h"
+cinclude "std/memops_os.h"
 cinclude "stdlib.h"
 cinclude "stdio.h"
 cinclude "string.h"

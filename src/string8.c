@@ -2,6 +2,16 @@
 #include <string.h>
 #include <stdio.h>
 
+static FILE *string8_fopen(const char *path, const char *mode) {
+#if defined(_WIN32)
+    FILE *file = null;
+    if (fopen_s(&file, path, mode) != 0) return null;
+    return file;
+#else
+    return fopen(path, mode);
+#endif
+}
+
 static void string8_terminate(string8 *s) {
     s->data[s->length] = 0;
 }
@@ -80,7 +90,7 @@ void string8_clear(string8 *s) {
 }
 
 string8 string8_read_file(memops_arena *arena, const char *filename) {
-    FILE *f = fopen(filename, "rb");
+    FILE *f = string8_fopen(filename, "rb");
     if (!f) return (string8){0};
 
     fseek(f, 0, SEEK_END);

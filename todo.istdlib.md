@@ -1,13 +1,13 @@
-# I Stdlib Runtime Port
+# I Stdlib Container Port
 
-This document tracks the pure-I runtime/container port from haikal's `meta_arena` templates.
+This document tracks the pure-I std/container port from haikal's `meta_arena` templates.
 
 ## Scope
 
-- [x] Add `Option<T>` in `src/runtime/Option.i`.
-- [x] Add `Result<T>` in `src/runtime/Result.i`.
-- [x] Port `Array<T>` from haikal meta_arena to `src/runtime/Array.i`.
-- [x] Port `Vec<T>` from haikal meta_arena to `src/runtime/Vec.i`.
+- [x] Add `Option<T>` in `src/std/Option.i`.
+- [x] Add `Result<T>` in `src/std/Result.i`.
+- [x] Port `Array<T>` from haikal meta_arena to `src/std/Array.i`.
+- [x] Port `Vec<T>` from haikal meta_arena to `src/std/Vec.i`.
 - [x] Port `Node<T>` and `BiNode<T>`.
 - [x] Port `List<T>` and `DList<T>`.
 - [x] Port `Queue<T>` and `Stack<T>`.
@@ -15,7 +15,7 @@ This document tracks the pure-I runtime/container port from haikal's `meta_arena
 - [x] Add equality-based `List<T>remove` / `DList<T>remove` using bytewise generic equality.
 - [ ] Decide whether `Result` should become `Result<T, E>` after multi-parameter generics exist.
 - [ ] Decide whether `Map_T0_T1.h` should come back as `Map<K, V>` after multi-parameter generics exist; the existing haikal file is malloc-based/incomplete, not a meta_arena port target.
-- [ ] Replace remaining haikal-generated meta_arena container usage in downstream projects with runtime imports.
+- [ ] Replace remaining haikal-generated meta_arena container usage in downstream projects with std imports.
 
 ## Current Language Notes
 
