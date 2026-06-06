@@ -151,6 +151,223 @@ main: proc()->i32 = {
         generated_contains=("print_i32(3);", "print_u64(count);", "print_f32(1.5);", "print_ptr_const_char(label);", "print_Payload(p);", "print_ptr_const_char(Payload_reflect.fields[i].name);", "printf(\"{} stays raw\\n\");"),
     ),
     Case(
+        name="reflection_print_runtime",
+        source=r'''
+cinclude "stdio.h"
+import "C:/devel/i/src/runtime/containers.i"
+
+i_reflect_field:struct = {
+    name:*const char;
+    type:*const char;
+    attrs:*const char;
+    offset:u64;
+    size:u64;
+    align:u64;
+    kind:i32;
+    array_count:u64;
+    pointer_depth:u64;
+    base_type:*const char;
+    elem_type:*const char;
+    generic_arg_type:*const char;
+    is_const:u64;
+    external;
+}
+
+i_reflect_type:struct = {
+    name:*const char;
+    size:u64;
+    align:u64;
+    field_count:u64;
+    fields:*const i_reflect_field;
+    external;
+}
+
+i_reflect_enum_value:struct = {
+    name:*const char;
+    value:i32;
+    external;
+}
+
+i_reflect_enum:struct = {
+    name:*const char;
+    size:u64;
+    align:u64;
+    value_count:u64;
+    values:*const i_reflect_enum_value;
+    external;
+}
+
+Kind:enum = {
+    Idle = 1,
+    Run,
+}
+
+Payload:struct = {
+    x:i32;
+    kind:Kind;
+}
+
+reflect_type_name:proc(type:*const i_reflect_type)->*const char = {
+    return type[0].name;
+}
+
+reflect_enum_name:proc(type:*const i_reflect_enum, value:i32)->*const char = {
+    for (i:u64 = 0; i < type[0].value_count; i += 1) {
+        if (type[0].values[i].value == value) {
+            return type[0].values[i].name;
+        }
+    }
+    return "unknown";
+}
+
+print:proc<Kind>(value:Kind)->void = {
+    print_cstr(reflect_enum_name(Kind<>.&, value));
+}
+
+print:proc<Payload>(value:Payload)->void = {
+    printfmt("{}({}, {})", reflect_type_name(Payload<>.&), value.x, value.kind);
+}
+
+main:proc()->i32 = {
+    arena:memops_arena = {};
+    memops_arena_initialize(&arena);
+
+    payload:Payload = {.x = 9, .kind = Kind_Run};
+    opt:Option<Kind> = Option<Kind>some(Kind_Run);
+    missing:Option<Kind> = Option<Kind>none();
+    ok_payload:Result<Payload> = Result<Payload>ok(payload);
+    bad_payload:Result<Payload> = Result<Payload>err(7);
+    vec:Vec<Payload> = {};
+    Vec<Payload>append(&arena, &vec, payload);
+
+    printfmt("{} {} {} {} {} {} {}\n",
+        Payload<>.fields[1].name,
+        Option<Kind>unwrap(opt),
+        Option<Kind>is_none(missing),
+        Result<Payload>unwrap(ok_payload),
+        Result<Payload>is_err(bad_payload),
+        bad_payload.error,
+        Vec<Payload>get(&vec, 0).value);
+    return 0;
+}
+''',
+        expected_stdout="kind Run true Payload(9, Run) true 7 Payload(9, Run)\n",
+        generated_contains=("&(Kind_reflect)", "&(Payload_reflect)", "print_Kind", "print_Payload", "Payload_reflect.fields[1].name", "Option_Kind_reflect", "Result_Payload_reflect", "Vec_Payload_reflect", "Option_Kind_some", "Result_Payload_ok", "Vec_Payload_append"),
+    ),
+    Case(
+        name="generic_dependency_closure",
+        source=r'''
+cinclude "stdio.h"
+import "C:/devel/i/src/runtime/containers.i"
+
+Payload:struct = {
+    x:i32;
+}
+
+Holder:struct<T> = {
+    item:T;
+    opt:Option<T>;
+    res:Result<T>;
+    vec:Vec<T>;
+}
+
+print:proc<Payload>(value:Payload)->void = {
+    printfmt("Payload({})", value.x);
+}
+
+make_local:proc<T>(arena:*memops_arena, value:T)->T = {
+    vec:Vec<T> = {};
+    Vec<T>append(arena, &vec, value);
+    opt:Option<T> = Vec<T>get(&vec, 0);
+    res:Result<T> = Result<T>ok(Option<T>unwrap(opt));
+    return Result<T>unwrap(res);
+}
+
+make_option:proc<T>(value:T)->Option<T> = {
+    return Option<T>some(value);
+}
+
+id_option:proc<T>(value:Option<T>)->T = {
+    return Option<T>unwrap(value);
+}
+
+Holder<T>make:proc<T>(arena:*memops_arena, value:T)->Holder<T> = {
+    holder:Holder<T> = {};
+    holder.item = value;
+    holder.opt = Option<T>some(value);
+    holder.res = Result<T>ok(value);
+    Vec<T>append(arena, &holder.vec, value);
+    return holder;
+}
+
+main:proc()->i32 = {
+    arena:memops_arena = {};
+    memops_arena_initialize(&arena);
+
+    a:Payload = make_local<Payload>(&arena, {.x = 3});
+    b:Payload = id_option<Payload>(make_option<Payload>({.x = 5}));
+    holder:Holder<Payload> = Holder<Payload>make(&arena, {.x = 7});
+
+    printfmt("{} {} {}\n", a, b, Result<Payload>unwrap(holder.res));
+    printf("%s %llu %s %s %s %s\n",
+        Holder_Payload_reflect.name,
+        Holder_Payload_reflect.field_count,
+        Holder_Payload_reflect.fields[0].name,
+        Holder_Payload_reflect.fields[1].name,
+        Holder_Payload_reflect.fields[2].name,
+        Holder_Payload_reflect.fields[3].name);
+    return 0;
+}
+''',
+        expected_stdout="Payload(3) Payload(5) Payload(7)\nHolder_Payload 4 item opt res vec\n",
+        generated_contains=("make_local_Payload", "make_option_Payload", "id_option_Payload", "Holder_Payload_make", "Holder_Payload_reflect", "Option_Payload_reflect", "Result_Payload_reflect", "Vec_Payload_reflect", "Option_Payload_some", "Result_Payload_ok", "Vec_Payload_get"),
+    ),
+    Case(
+        name="nested_generic_reflection",
+        source=r'''
+cinclude "stdio.h"
+import "C:/devel/i/src/runtime/containers.i"
+
+Payload:struct = {
+    x:i32;
+}
+
+Pair:struct<T> = {
+    value:T;
+}
+
+Wrap:struct<T> = {
+    pair:Pair<T>;
+    maybe:Option<Pair<T>>;
+}
+
+Pair<T>make:proc<T>(value:T)->Pair<T> = {
+    pair:Pair<T> = {.value = value};
+    return pair;
+}
+
+main:proc()->i32 = {
+    pair:Pair<Payload> = Pair<Payload>make({.x = 11});
+    wrap:Wrap<Payload> = {};
+    wrap.pair = pair;
+    wrap.maybe = Option<Pair<Payload>>some(pair);
+    unboxed:Pair<Payload> = Option<Pair<Payload>>unwrap(wrap.maybe);
+
+    printf("%d %s %s %s %s %s %s\n",
+        unboxed.value.x,
+        Pair_Payload_reflect.name,
+        Wrap_Payload_reflect.name,
+        Option_Pair_Payload_reflect.name,
+        Wrap_Payload_reflect.fields[0].type,
+        Wrap_Payload_reflect.fields[1].type,
+        Wrap_Payload_reflect.fields[1].generic_arg_type);
+    return 0;
+}
+''',
+        expected_stdout="11 Pair_Payload Wrap_Payload Option_Pair_Payload Pair_Payload Option_Pair_Payload Pair_Payload\n",
+        generated_contains=("Pair_Payload_reflect", "Wrap_Payload_reflect", "Option_Pair_Payload_reflect", "Pair_Payload_make", "Option_Pair_Payload_some", "Option_Pair_Payload_unwrap"),
+    ),
+    Case(
         name="runtime_containers",
         source=r'''
 cinclude "stdio.h"

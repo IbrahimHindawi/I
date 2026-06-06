@@ -4696,12 +4696,14 @@ static i32 array_string8_index(Vec_string8 *arr, string8 value) {
     return -1;
 }
 
+static bool type_is_concrete_under_sub(TypeExpr *type, TypeSub sub);
+
 static void collect_type_instances(TypeExpr *type, string8 base, Vec_string8 *out, memops_arena *arena) {
     if (!type) return;
     if (type->kind == Type_Generic && string8_equals_name(type->name, base)) {
         if (type->args.length == 1) {
             TypeExpr *arg = (TypeExpr *)type->args.data[0];
-            if (arg->kind == Type_Name && string8_is_symbolic_type_name(arg->name)) {
+            if (!type_is_concrete_under_sub(arg, (TypeSub){0})) {
                 return;
             }
             string8 mangle = type_mangle(arena, arg, (TypeSub){0});
@@ -4735,9 +4737,7 @@ static void collect_type_instances_sub(TypeExpr *type, string8 base, Vec_string8
     if (type->kind == Type_Generic && string8_equals_name(type->name, base)) {
         if (type->args.length == 1) {
             TypeExpr *arg = (TypeExpr *)type->args.data[0];
-            if (arg->kind == Type_Name &&
-                string8_is_symbolic_type_name(arg->name) &&
-                (!sub.has || !string8_equals_name(arg->name, sub.param))) {
+            if (!type_is_concrete_under_sub(arg, sub)) {
                 return;
             }
             string8 mangle = type_mangle(arena, arg, sub);
@@ -4768,6 +4768,9 @@ static void collect_type_instances_sub(TypeExpr *type, string8 base, Vec_string8
 
 static void collect_type_instances_from_stmt(Stmt *s, string8 base, Vec_string8 *out, memops_arena *arena);
 static void collect_type_instances_from_expr(Expr *e, string8 base, Vec_string8 *out, memops_arena *arena);
+static void collect_type_instances_from_stmt_sub(Stmt *s, string8 base, Vec_string8 *out, memops_arena *arena, TypeSub sub);
+static void collect_type_instances_from_expr_sub(Expr *e, string8 base, Vec_string8 *out, memops_arena *arena, TypeSub sub);
+static bool type_is_concrete_under_sub(TypeExpr *type, TypeSub sub);
 
 static void collect_type_instances_from_stmt(Stmt *s, string8 base, Vec_string8 *out, memops_arena *arena) {
     if (!s) return;
@@ -4834,7 +4837,7 @@ static void collect_type_instances_from_expr(Expr *e, string8 base, Vec_string8 
             string8_equals(&owner, &base) &&
             e->type_args.length == 1) {
             TypeExpr *arg = (TypeExpr *)e->type_args.data[0];
-            if (arg->kind != Type_Name || !string8_is_symbolic_type_name(arg->name)) {
+            if (type_is_concrete_under_sub(arg, (TypeSub){0})) {
                 string8 mangle = type_mangle(arena, arg, (TypeSub){0});
                 if (!array_string8_contains(out, mangle)) {
                     Vec_string8_append(arena, out, mangle);
@@ -4884,6 +4887,130 @@ static void collect_type_instances_from_expr(Expr *e, string8 base, Vec_string8 
     }
 }
 
+static void collect_type_instances_from_stmt_sub(Stmt *s, string8 base, Vec_string8 *out, memops_arena *arena, TypeSub sub) {
+    if (!s) return;
+    if (s->kind == Stmt_Var) {
+        collect_type_instances_sub(s->type, base, out, arena, sub);
+        collect_type_instances_from_expr_sub(s->expr, base, out, arena, sub);
+    } else if (s->kind == Stmt_Assign) {
+        collect_type_instances_from_expr_sub(s->lhs, base, out, arena, sub);
+        collect_type_instances_from_expr_sub(s->expr, base, out, arena, sub);
+    } else if (s->kind == Stmt_Return) {
+        collect_type_instances_from_expr_sub(s->expr, base, out, arena, sub);
+    } else if (s->kind == Stmt_Expr) {
+        collect_type_instances_from_expr_sub(s->expr, base, out, arena, sub);
+    } else if (s->kind == Stmt_For) {
+        collect_type_instances_from_stmt_sub(s->for_init, base, out, arena, sub);
+        collect_type_instances_from_expr_sub(s->for_cond, base, out, arena, sub);
+        collect_type_instances_from_stmt_sub(s->for_step, base, out, arena, sub);
+        for (i32 i = 0; i < s->for_body.length; i++) {
+            collect_type_instances_from_stmt_sub((Stmt *)s->for_body.data[i], base, out, arena, sub);
+        }
+    } else if (s->kind == Stmt_If) {
+        collect_type_instances_from_expr_sub(s->if_cond, base, out, arena, sub);
+        for (i32 i = 0; i < s->if_then_body.length; i++) {
+            collect_type_instances_from_stmt_sub((Stmt *)s->if_then_body.data[i], base, out, arena, sub);
+        }
+        if (s->if_else_if) {
+            collect_type_instances_from_stmt_sub(s->if_else_if, base, out, arena, sub);
+        } else {
+            for (i32 i = 0; i < s->if_else_body.length; i++) {
+                collect_type_instances_from_stmt_sub((Stmt *)s->if_else_body.data[i], base, out, arena, sub);
+            }
+        }
+    } else if (s->kind == Stmt_While) {
+        collect_type_instances_from_expr_sub(s->while_cond, base, out, arena, sub);
+        for (i32 i = 0; i < s->while_body.length; i++) {
+            collect_type_instances_from_stmt_sub((Stmt *)s->while_body.data[i], base, out, arena, sub);
+        }
+    } else if (s->kind == Stmt_DoWhile) {
+        for (i32 i = 0; i < s->while_body.length; i++) {
+            collect_type_instances_from_stmt_sub((Stmt *)s->while_body.data[i], base, out, arena, sub);
+        }
+        collect_type_instances_from_expr_sub(s->while_cond, base, out, arena, sub);
+    } else if (s->kind == Stmt_Switch) {
+        collect_type_instances_from_expr_sub(s->switch_expr, base, out, arena, sub);
+        for (i32 i = 0; i < s->switch_cases.length; i++) {
+            SwitchCase *sc = (SwitchCase *)s->switch_cases.data[i];
+            collect_type_instances_from_expr_sub(sc->expr, base, out, arena, sub);
+            for (i32 j = 0; j < sc->body.length; j++) {
+                collect_type_instances_from_stmt_sub((Stmt *)sc->body.data[j], base, out, arena, sub);
+            }
+        }
+        for (i32 i = 0; i < s->switch_default_body.length; i++) {
+            collect_type_instances_from_stmt_sub((Stmt *)s->switch_default_body.data[i], base, out, arena, sub);
+        }
+    }
+}
+
+static void collect_type_instances_from_expr_sub(Expr *e, string8 base, Vec_string8 *out, memops_arena *arena, TypeSub sub) {
+    if (!e) return;
+    if (e->kind == Expr_Call) {
+        string8 owner = {0};
+        string8 member = {0};
+        if (split_qualified_name(e->name, &owner, &member) &&
+            string8_equals(&owner, &base) &&
+            e->type_args.length == 1) {
+            TypeExpr *arg = (TypeExpr *)e->type_args.data[0];
+            if (type_is_concrete_under_sub(arg, sub)) {
+                string8 mangle = type_mangle(arena, arg, sub);
+                if (!array_string8_contains(out, mangle)) {
+                    Vec_string8_append(arena, out, mangle);
+                }
+            }
+        }
+        for (i32 i = 0; i < e->type_args.length; i++) {
+            collect_type_instances_sub((TypeExpr *)e->type_args.data[i], base, out, arena, sub);
+        }
+        for (i32 i = 0; i < e->args.length; i++) {
+            collect_type_instances_from_expr_sub((Expr *)e->args.data[i], base, out, arena, sub);
+        }
+    } else if (e->kind == Expr_Field) {
+        collect_type_instances_from_expr_sub(e->base, base, out, arena, sub);
+    } else if (e->kind == Expr_SizeofType || e->kind == Expr_AlignofType) {
+        collect_type_instances_sub(e->cast_type, base, out, arena, sub);
+    } else if (e->kind == Expr_ZeroInit) {
+        collect_type_instances_sub(e->cast_type, base, out, arena, sub);
+    } else if (e->kind == Expr_InitList) {
+        collect_type_instances_sub(e->cast_type, base, out, arena, sub);
+        for (i32 i = 0; i < e->args.length; i++) {
+            if (e->designator_kinds.data[i] == InitDesignator_Index) {
+                collect_type_instances_from_expr_sub((Expr *)e->designators.data[i], base, out, arena, sub);
+            }
+            collect_type_instances_from_expr_sub((Expr *)e->args.data[i], base, out, arena, sub);
+        }
+    } else if (e->kind == Expr_CompoundInit) {
+        collect_type_instances_sub(e->cast_type, base, out, arena, sub);
+        collect_type_instances_from_expr_sub(e->inner, base, out, arena, sub);
+    } else if (e->kind == Expr_Addr) {
+        collect_type_instances_from_expr_sub(e->inner, base, out, arena, sub);
+    } else if (e->kind == Expr_Unary) {
+        collect_type_instances_from_expr_sub(e->inner, base, out, arena, sub);
+    } else if (e->kind == Expr_Binary) {
+        collect_type_instances_from_expr_sub(e->left, base, out, arena, sub);
+        collect_type_instances_from_expr_sub(e->right, base, out, arena, sub);
+    } else if (e->kind == Expr_Ternary) {
+        collect_type_instances_from_expr_sub(e->left, base, out, arena, sub);
+        collect_type_instances_from_expr_sub(e->right, base, out, arena, sub);
+        collect_type_instances_from_expr_sub(e->third, base, out, arena, sub);
+    } else if (e->kind == Expr_Index) {
+        collect_type_instances_from_expr_sub(e->base, base, out, arena, sub);
+        collect_type_instances_from_expr_sub(e->index_expr, base, out, arena, sub);
+    } else if (e->kind == Expr_Cast) {
+        collect_type_instances_sub(e->cast_type, base, out, arena, sub);
+        collect_type_instances_from_expr_sub(e->inner, base, out, arena, sub);
+    }
+}
+
+typedef struct GenericInstanceSite GenericInstanceSite;
+static void collect_generic_proc_instances_with_sites(
+    Program *prog,
+    ProcDecl *decl,
+    Vec_string8 *out,
+    Vec_voidptr *constraint_sites,
+    memops_arena *arena
+);
+
 static void collect_generic_struct_instances(Program *prog, StructDecl *decl, Vec_string8 *out, memops_arena *arena) {
     static bool collecting_nested_dependencies = false;
     for (i32 i = 0; i < prog->aliases.length; i++) {
@@ -4932,6 +5059,28 @@ static void collect_generic_struct_instances(Program *prog, StructDecl *decl, Ve
         for (i32 j = 0; j < p->body.length; j++) {
             Stmt *s = (Stmt *)p->body.data[j];
             collect_type_instances_from_stmt(s, decl->name, out, arena);
+        }
+        if (p->is_generic) {
+            Vec_string8 proc_instances = Vec_string8_reserve(arena, 4);
+            Vec_voidptr instance_sites = ptr_array_reserve(arena, 4);
+            collect_generic_proc_instances_with_sites(prog, p, &proc_instances, &instance_sites, arena);
+            for (i32 j = 0; j < proc_instances.length; j++) {
+                TypeExpr *arg = type_new(arena, Type_Name);
+                arg->name = proc_instances.data[j];
+                TypeSub sub = {0};
+                sub.has = true;
+                sub.param = p->type_param;
+                sub.arg = arg;
+                for (i32 k = 0; k < p->params.length; k++) {
+                    Param *param = (Param *)p->params.data[k];
+                    collect_type_instances_sub(param->type, decl->name, out, arena, sub);
+                }
+                collect_type_instances_sub(p->ret_type, decl->name, out, arena, sub);
+                for (i32 k = 0; k < p->body.length; k++) {
+                    Stmt *s = (Stmt *)p->body.data[k];
+                    collect_type_instances_from_stmt_sub(s, decl->name, out, arena, sub);
+                }
+            }
         }
     }
 }
