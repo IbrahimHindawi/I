@@ -115,6 +115,7 @@ Generated C only needs to be valid, stable enough, and debuggable when necessary
 The current LSP is good enough to use. Future work should keep Python as transport/cache glue and avoid adding new compiler-like semantics there.
 
 - [ ] Add a cheap `i-lsp doctor` or `--self-check` path that reports which `I.exe` is used, whether it exists, filetype install paths, debounce settings, and whether compiler diagnostics are enabled.
+- [ ] Package the LSP with the I toolchain instead of vendoring it per project: ship `scripts/i_lsp.py` / `i_lsp.bat` under `I_HOME`, have Neovim launch that centralized server through `I_HOME` or PATH, and remove the need for `njinn` / playground-local `scripts/i_lsp.py` copies.
 - [ ] Add a headless Neovim smoke test for `*.i` filetype detection, `i-lsp` attachment, and a real `publishDiagnostics` red-squiggle flow.
 - [ ] Move hover/definition/completion edge cases that still depend on Python inference into compiler `--lsp=json` metadata, especially generic instantiated fields, proc-pointer calls, enum members, aliases, and expected-type contexts.
 - [ ] Add compiler-provided completion contexts for proc args, struct literals, enum values, field access, and typed assignment so Python mostly formats completion items instead of deciding semantic matches.
