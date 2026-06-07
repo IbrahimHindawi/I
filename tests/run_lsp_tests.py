@@ -96,6 +96,8 @@ Payload:struct = {
 
 CallbackBase:alias = *proc(payload:*Payload, amount:i32)->i32;
 Callback:alias = CallbackBase;
+Vec3:alias = [3]f32;
+Mat3:alias = [3]Vec3;
 
 Handler:struct = {
     cb:Callback;
@@ -114,6 +116,23 @@ Array<T>reserve:proc<T>(length:u64)->Array<T> = {
     out.length = length;
     return out;
 }
+
+Vec:struct<T> = {
+    length:u64;
+    data:*T;
+}
+
+Vec<T>reserve:proc<T>(length:u64)->Vec<T> = {
+    out:Vec<T> = {};
+    out.length = length;
+    return out;
+}
+
+json_read:proc<i32>(out:*i32)->b32 = { external; }
+
+json_read:proc<Array<T>>(out:*Array<T>)->b32 = { external; }
+
+json_read:proc<Vec<T>>(out:*Vec<T>)->b32 = { external; }
 
 Other:struct = {
     value:i32;
@@ -253,6 +272,8 @@ main:proc()->i32 = {{
     call_struct_field:i32 = consume_payload({{ . }});
     payload_array:Array<Payload> = Array<Payload>r;
     payload_array_empty:Array<Payload> = Array<Payload>;
+    read_payloads:b32 = json_read<Array<Payload>>(
+    read_value:b32 = json_read<i32>(
     return 0;
 }}
 """.strip()
@@ -286,6 +307,12 @@ main:proc()->i32 = {{
     k:Kind = Kind_Ready;
     values:Array<i32> = Array<i32>reserve(4);
     payload_values:Array<Payload> = Array<Payload>reserve(2);
+    payload_vec:Vec<Payload> = Vec<Payload>reserve(2);
+    read_payloads:b32 = json_read<Array<Payload>>(payload_values.&);
+    read_payload_vec:b32 = json_read<Vec<Payload>>(payload_vec.&);
+    read_value:b32 = json_read<i32>(total.&);
+    basis:Mat3 = {{}};
+    basis_element:f32 = basis[0][0];
     payload_ptr:*Payload = p.&;
     total:i32 = 0;
     bad_decl:i32 = p;
@@ -2773,6 +2800,17 @@ main:proc()->i32 = {
         print("lsp: expected generic field completion item detail to use substituted concrete type")
         print(generic_data_completion_lsp)
         return 1
+    mat3_alias = workspace.find_symbol("Mat3")
+    if mat3_alias is None or mat3_alias.kind != "alias" or "Mat3:alias = [3]Vec3" not in mat3_alias.detail:
+        print("lsp: expected fixed-array alias symbol for Mat3")
+        print(mat3_alias)
+        return 1
+    basis_element_line = next(i for i, line in enumerate(app_lines) if "basis_element:f32" in line)
+    basis_element_type = lsp.infer_simple_expr_type(workspace, doc, "basis[0][0]", basis_element_line)
+    if basis_element_type != "f32":
+        print("lsp: expected nested fixed-array alias indexing to infer f32")
+        print(basis_element_type)
+        return 1
     local = workspace.find_variable(doc, "total")
     if local is None or local.type_name != "i32" or local.detail != "total: i32":
         print("lsp: expected local variable type info")
@@ -2971,6 +3009,82 @@ main:proc()->i32 = {
     if "Array<Payload>reserve:proc(length:u64)->Array<Payload>" not in generic_proc_hover:
         print("lsp: expected generic proc hover to show substituted concrete type")
         print(generic_proc_hover)
+        return 1
+    json_array_line = next(i for i, line in enumerate(app_lines) if "json_read<Array<Payload>>(payload_values" in line)
+    json_array_col = app_lines[json_array_line].index("json_read")
+    json_array_resolved = server.symbol_at_request(
+        {
+            "textDocument": {"uri": doc.uri},
+            "position": {"line": json_array_line, "character": json_array_col},
+        }
+    )
+    if (
+        not isinstance(json_array_resolved, lsp.Symbol)
+        or json_array_resolved.name != "json_read<Array<Payload>>"
+        or "json_read<Array<Payload>>:proc(out:*Array<Payload>)->b32" not in json_array_resolved.detail
+    ):
+        print("lsp: expected generic pattern proc lookup to resolve json_read<Array<Payload>>")
+        print(json_array_resolved)
+        return 1
+    json_vec_line = next(i for i, line in enumerate(app_lines) if "json_read<Vec<Payload>>(payload_vec" in line)
+    json_vec_col = app_lines[json_vec_line].index("json_read")
+    json_vec_signature = lsp.signature_help_at(
+        workspace,
+        doc,
+        json_vec_line,
+        app_lines[json_vec_line].rindex("payload_vec"),
+    )
+    if (
+        json_vec_signature is None
+        or json_vec_signature.get("activeParameter") != 0
+        or not json_vec_signature.get("signatures")
+        or json_vec_signature["signatures"][0].get("label") != "json_read<Vec<Payload>>:proc(out:*Vec<Payload>)->b32"
+        or json_vec_signature["signatures"][0].get("parameters") != [{"label": "out:*Vec<Payload>"}]
+    ):
+        print("lsp: expected generic pattern proc signature help for json_read<Vec<Payload>>")
+        print(json_vec_signature)
+        return 1
+    json_value_line = next(i for i, line in enumerate(app_lines) if "json_read<i32>(total" in line)
+    json_value_col = app_lines[json_value_line].index("json_read")
+    json_value_resolved = server.symbol_at_request(
+        {
+            "textDocument": {"uri": doc.uri},
+            "position": {"line": json_value_line, "character": json_value_col},
+        }
+    )
+    if (
+        not isinstance(json_value_resolved, lsp.Symbol)
+        or json_value_resolved.name != "json_read<i32>"
+        or "json_read<i32>:proc(out:*i32)->b32" not in json_value_resolved.detail
+    ):
+        print("lsp: expected concrete proc specialization lookup to resolve json_read<i32>")
+        print(json_value_resolved)
+        return 1
+    json_value_signature = lsp.signature_help_at(
+        workspace,
+        doc,
+        json_value_line,
+        app_lines[json_value_line].index("total"),
+    )
+    if (
+        json_value_signature is None
+        or json_value_signature["signatures"][0].get("label") != "json_read<i32>:proc(out:*i32)->b32"
+        or json_value_signature["signatures"][0].get("parameters") != [{"label": "out:*i32"}]
+    ):
+        print("lsp: expected concrete proc specialization signature help for json_read<i32>")
+        print(json_value_signature)
+        return 1
+    json_tokens = decoded_semantic_tokens(
+        lsp,
+        lsp.semantic_tokens_for_doc(workspace, doc),
+    )
+    if (
+        (json_array_line, json_array_col, len("json_read"), "function") not in json_tokens
+        or (json_array_line, app_lines[json_array_line].index("Array"), len("Array"), "type") not in json_tokens
+        or (json_array_line, app_lines[json_array_line].index("Payload"), len("Payload"), "type") not in json_tokens
+    ):
+        print("lsp: expected semantic tokens for nested generic proc call")
+        print(json_tokens)
         return 1
     field_decl_resolved = server.symbol_at_request(
         {

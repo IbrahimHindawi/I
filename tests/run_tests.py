@@ -986,6 +986,9 @@ main:proc()->i32 = {
 cinclude "stdio.h"
 cinclude "external_c_array_alias_generic_specialization_types.h"
 
+vec2:alias = [2]f32;
+vec3:alias = [3]f32;
+
 touch_vec2:proc(v:vec2)->void = { external; }
 touch_vec3:proc(v:vec3)->void = { external; }
 
@@ -1019,6 +1022,59 @@ main:proc()->i32 = {
         ),
         generated_contains=("json_read_vec2", "json_read_vec3", "vec2 a", "vec3 b", "a[1]", "b[2]"),
         header_contains=("i32 json_read_vec2(vec2 out);", "i32 json_read_vec3(vec3 out);"),
+    ),
+    Case(
+        name="generic_type_arg_pattern_overloads",
+        source=r'''
+cinclude "stdio.h"
+import "C:/devel/i/src/std/memops.i"
+import "C:/devel/i/src/std/Array.i"
+import "C:/devel/i/src/std/Vec.i"
+
+g_counter:i32 = 1;
+
+json_read:proc<i32>(out:*i32)->b32 = {
+    out[0] = g_counter;
+    g_counter += 1;
+    return 1;
+}
+
+json_read:proc<Array<T>>(arena:*memops_arena, out:*Array<T>, count:u64)->b32 = {
+    out[0] = Array<T>reserve(arena, count);
+    for (i:u64 = 0; i < count; i += 1) {
+        if (json_read<T>(out[0].data[i].&) == 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+json_read:proc<Vec<T>>(arena:*memops_arena, out:*Vec<T>, count:u64)->b32 = {
+    out[0] = Vec<T>reserve(arena, count);
+    for (i:u64 = 0; i < count; i += 1) {
+        value:T = {};
+        if (json_read<T>(value.&) == 0) {
+            return 0;
+        }
+        Vec<T>append(arena, out, value);
+    }
+    return 1;
+}
+
+main:proc()->i32 = {
+    arena:memops_arena = {};
+    arr:Array<i32> = {};
+    vec:Vec<i32> = {};
+    memops_arena_initialize(arena.&);
+    json_read<Array<i32>>(arena.&, arr.&, 3);
+    json_read<Vec<i32>>(arena.&, vec.&, 2);
+    printf("%llu %d %d %llu %llu %d %d\n", arr.length, arr.data[0], arr.data[2], vec.length, vec.border, vec.data[0], vec.data[1]);
+    return 0;
+}
+''',
+        expected_stdout="3 1 3 2 2 4 5\n",
+        generated_contains=("json_read_Array_i32", "json_read_Vec_i32", "Array_i32_reserve", "Vec_i32_append", "json_read_i32"),
+        header_contains=("b32 json_read_Array_i32(memops_arena * arena, Array_i32 * out, u64 count);", "b32 json_read_Vec_i32(memops_arena * arena, Vec_i32 * out, u64 count);"),
     ),
     Case(
         name="initializer_lists",
@@ -5622,6 +5678,7 @@ main:proc()->i32 = {
     type_float_pointer_alias_c = TEST_DIR / "type_float_pointer_alias_compat.c"
     type_float_pointer_alias_i.write_text(r'''
 MyF32:alias = f32;
+vec2:alias = [2]f32;
 
 take_f32s:proc(values:*MyF32)->void = { external; }
 
@@ -6323,6 +6380,7 @@ take_module:proc(m:HMODULE)->void = { external; }
 take_levels:proc(levels:*const D3D_FEATURE_LEVEL)->void = { external; }
 take_float:proc(v:FLOAT)->void = { external; }
 take_u8:proc(v:UINT8)->void = { external; }
+vec2:alias = [2]f32;
 take_vec:proc(v:vec2)->void = { external; }
 take_vec_ptr:proc(v:*vec2)->void = { external; }
 
@@ -6756,6 +6814,9 @@ typedef int (*IB_VarCallback)(int code, ...);
 typedef int (__stdcall *IB_StdCallback)(int value);
 typedef unsigned short IB_WChar;
 typedef const IB_WChar *IB_LPCWSTR;
+typedef float IB_Vec3[3];
+typedef IB_Vec3 IB_Mat3[3];
+typedef float IB_Mat4[4][4];
 typedef struct IB_Opaque IB_Opaque;
 typedef struct IB_Private *IB_Handle;
 typedef const struct IB_Private *IB_ConstHandle;
@@ -6825,6 +6886,7 @@ void *IB_copy(void *dst, const void *src, unsigned count);
 int IB_use_handle(IB_Handle handle, const IB_Opaque *opaque, IB_Defined *defined);
 int __stdcall IB_call(IB_StdCallback cb, int value);
 int IB_wide(IB_LPCWSTR title, IB_WChar *out_title);
+int IB_use_vec(IB_Vec3 v, IB_Mat3 m, IB_Mat4 mm);
 int IB_log(const char *fmt, ...);
 '''.strip() + "\n", encoding="utf-8", newline="\n")
 
@@ -6856,6 +6918,9 @@ int IB_log(const char *fmt, ...);
             "IB_StdCallback: alias = *proc[__stdcall](value:i32)->i32;",
             "IB_WChar: alias = u16;",
             "IB_LPCWSTR: alias = *const IB_WChar;",
+            "IB_Vec3: alias = [3]f32;",
+            "IB_Mat3: alias = [3]IB_Vec3;",
+            "IB_Mat4: alias = [4][4]f32;",
             "IB_Opaque: struct = { external; }",
             "IB_Private: struct = { external; }",
             "IB_FieldOpaque: struct = { external; }",
@@ -6908,6 +6973,7 @@ int IB_log(const char *fmt, ...);
             "IB_use_handle: proc(handle: IB_Handle, opaque: *const IB_Opaque, defined: *IB_Defined)->i32 = { external_emit; }",
             "IB_call: proc[__stdcall](cb: IB_StdCallback, value: i32)->i32 = { external_emit; }",
             "IB_wide: proc(title: IB_LPCWSTR, out_title: *IB_WChar)->i32 = { external_emit; }",
+            "IB_use_vec: proc(v: IB_Vec3, m: IB_Mat3, mm: IB_Mat4)->i32 = { external_emit; }",
             "IB_log: proc(fmt: *const char, ...)->i32 = { external_emit; }",
         ):
             if needle not in ibind_text:
@@ -6933,6 +6999,109 @@ int IB_log(const char *fmt, ...);
         if "IB_Defined: struct = { external; }" in ibind_text:
             print("ibind_bindgen: defined forward typedef should not emit opaque external record")
             print(ibind_text)
+            return 1
+
+        ibind_array_alias_header = TEST_DIR / "ibind_array_alias.h"
+        ibind_array_alias_out = TEST_DIR / "ibind_array_alias.i"
+        ibind_array_alias_header.write_text(r'''
+typedef float IB_ArrayVec3[3];
+typedef float IB_ArrayVec4[4];
+typedef IB_ArrayVec3 IB_ArrayMat3[3];
+typedef float IB_ArrayMat4[4][4];
+typedef union IB_ArrayVec3s {
+    IB_ArrayVec3 raw;
+} IB_ArrayVec3s;
+typedef union IB_ArrayVec4s {
+    IB_ArrayVec4 raw;
+} IB_ArrayVec4s;
+typedef union IB_ArrayMat4s {
+    IB_ArrayVec4 raw[4];
+    IB_ArrayVec4s col[4];
+} IB_ArrayMat4s;
+int IB_array_use(IB_ArrayVec3 v, IB_ArrayMat3 m, IB_ArrayMat4 mm, IB_ArrayVec3s vs, IB_ArrayMat4s ms);
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+        ibind_array_alias = run([str(ibind_exe), str(ibind_array_alias_header), str(ibind_array_alias_out), "--prefix", "IB_", "--", "-I", str(TEST_DIR)])
+        if ibind_array_alias.returncode != 0:
+            print(ibind_array_alias.stdout)
+            return ibind_array_alias.returncode
+        ibind_array_alias_text = ibind_array_alias_out.read_text(encoding="utf-8")
+        for needle in (
+            "IB_ArrayVec3: alias = [3]f32;",
+            "IB_ArrayVec4: alias = [4]f32;",
+            "IB_ArrayMat3: alias = [3]IB_ArrayVec3;",
+            "IB_ArrayMat4: alias = [4][4]f32;",
+            "IB_ArrayVec3s: union = {",
+            "    raw:IB_ArrayVec3;",
+            "IB_ArrayVec4s: union = {",
+            "    raw:IB_ArrayVec4;",
+            "IB_ArrayMat4s: union = {",
+            "    raw:[4]IB_ArrayVec4;",
+            "    col:[4]IB_ArrayVec4s;",
+            "IB_array_use: proc(v: IB_ArrayVec3, m: IB_ArrayMat3, mm: IB_ArrayMat4, vs: IB_ArrayVec3s, ms: IB_ArrayMat4s)->i32 = { external_emit; }",
+        ):
+            if needle not in ibind_array_alias_text:
+                print(f"ibind_array_alias: generated binding missing {needle!r}")
+                print(ibind_array_alias_text)
+                return 1
+
+        ibind_array_alias_use_i = TEST_DIR / "ibind_array_alias_use.i"
+        ibind_array_alias_use_c = TEST_DIR / "ibind_array_alias_use.c"
+        ibind_array_alias_use_exe = TEST_DIR / "ibind_array_alias_use.exe"
+        ibind_array_alias_source = r'''
+cinclude "stdio.h"
+cinclude "ibind_array_alias.h"
+import "{IBIND_OUT}"
+
+json_read:proc<IB_ArrayVec3>(out:IB_ArrayVec3)->i32 = {
+    out[0] = 1.0f;
+    out[1] = 2.0f;
+    out[2] = 3.0f;
+    return 3;
+}
+
+main:proc()->i32 = {
+    v:IB_ArrayVec3 = {};
+    m:IB_ArrayMat3 = {};
+    vs:IB_ArrayVec3s = {};
+    ms:IB_ArrayMat4s = {};
+    count:i32 = json_read<IB_ArrayVec3>(v);
+    m[0][0] = v[2];
+    vs.raw[1] = v[1];
+    ms.col[0].raw[3] = 4.0f;
+    printf("%d %.0f %.0f %.0f %.0f\n", count, v[1], m[0][0], vs.raw[1], ms.col[0].raw[3]);
+    return 0;
+}
+'''.replace("{IBIND_OUT}", ibind_array_alias_out.as_posix())
+        ibind_array_alias_use_i.write_text(ibind_array_alias_source.strip() + "\n", encoding="utf-8", newline="\n")
+        ibind_array_alias_translate = run([str(I_EXE), str(ibind_array_alias_use_i), str(ibind_array_alias_use_c)])
+        if ibind_array_alias_translate.returncode != 0:
+            print(ibind_array_alias_translate.stdout)
+            return ibind_array_alias_translate.returncode
+        ibind_array_alias_generated = ibind_array_alias_use_c.read_text(encoding="utf-8")
+        for needle in ("json_read_IB_ArrayVec3", "IB_ArrayVec3 v", "IB_ArrayMat3 m", "IB_ArrayVec3s vs", "IB_ArrayMat4s ms", "m[0][0] = v[2]", "ms.col[0].raw[3] = 4.0f"):
+            if needle not in ibind_array_alias_generated:
+                print(f"ibind_array_alias_use: generated C missing {needle!r}")
+                print(ibind_array_alias_generated)
+                return 1
+        ibind_array_alias_compile = run([
+            "clang.exe",
+            str(ibind_array_alias_use_c),
+            "-I",
+            "src",
+            "-I",
+            "src/std",
+            "-I",
+            str(TEST_DIR),
+            "-o",
+            str(ibind_array_alias_use_exe),
+        ])
+        if ibind_array_alias_compile.returncode != 0:
+            print(ibind_array_alias_compile.stdout)
+            return ibind_array_alias_compile.returncode
+        ibind_array_alias_program = run([str(ibind_array_alias_use_exe)])
+        if ibind_array_alias_program.returncode != 0 or ibind_array_alias_program.stdout != "3 2 3 2 4\n":
+            print("ibind_array_alias_use: stdout mismatch")
+            print(ibind_array_alias_program.stdout)
             return 1
 
         ibind_filter_noise = TEST_DIR / "not_ibind_selected_main.h"
