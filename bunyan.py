@@ -32,15 +32,20 @@ def build_haikal(ctx: BuildContext) -> None:
 def package_i(ctx: BuildContext) -> None:
     package_dir = ctx.root_dir.parent / "i-windows-x64"
     package_std_dir = package_dir / "std"
+    ibind_path = ctx.build_dir / "ibind.exe"
 
     package_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ctx.exe_path, package_dir / "I.exe")
+    if ibind_path.exists():
+        shutil.copy2(ibind_path, package_dir / "ibind.exe")
 
     if package_std_dir.exists():
         shutil.rmtree(package_std_dir)
     shutil.copytree(ctx.root_dir / "src" / "std", package_std_dir)
 
     print(f"package {ctx.exe_path} -> {package_dir / 'I.exe'}")
+    if ibind_path.exists():
+        print(f"package {ibind_path} -> {package_dir / 'ibind.exe'}")
     print(f"package {ctx.root_dir / 'src' / 'std'} -> {package_std_dir}")
 
 

@@ -5,6 +5,7 @@ project(I VERSION 1.0 LANGUAGES C)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # set(CMAKE_C_STANDARD 99)
 # set(CMAKE_C_STANDARD_REQUIRED True)
+set(I_PACKAGE_DIR "${CMAKE_SOURCE_DIR}/../i-windows-x64" CACHE PATH "I package output directory")
 
 include_directories(extern/haikal/src/meta_arena/gen)
 include_directories(extern/haikal/src/runtime)
@@ -22,6 +23,14 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_SOURCE_DIR}/src/std"
         "$<TARGET_FILE_DIR:${PROJECT_NAME}>/std"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${I_PACKAGE_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:${PROJECT_NAME}>"
+        "${I_PACKAGE_DIR}/I.exe"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/src/std"
+        "${I_PACKAGE_DIR}/std"
 )
 
 set(LLVM_ROOT "C:/Program Files/LLVM" CACHE PATH "LLVM install root")
@@ -43,6 +52,14 @@ if (LIBCLANG_INCLUDE_DIR AND LIBCLANG_LIBRARY)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${LLVM_ROOT}/bin/libclang.dll"
                 "$<TARGET_FILE_DIR:ibind>/libclang.dll"
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "${I_PACKAGE_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:ibind>"
+                "${I_PACKAGE_DIR}/ibind.exe"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${LLVM_ROOT}/bin/libclang.dll"
+                "${I_PACKAGE_DIR}/libclang.dll"
         )
     endif()
 else()

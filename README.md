@@ -10,18 +10,22 @@ I is C-shaped code with a smaller syntax surface and compile-time metaprogrammin
 
 ### Bunyan
 - run `python bunyan.py build debug` to build the `I.exe` compiler
-- put `build` on `PATH` if you want other projects to invoke `I.exe` directly
-- the build copies `src\std` to `build\std`; `I.exe` automatically resolves imports through the `std` folder beside it
+- the compiler build packages `I.exe`, `ibind.exe`, and `std\` into `..\i-windows-x64`
+- recommended user environment:
+  - `I_HOME=C:\devel\i-windows-x64`
+  - put `%I_HOME%` on `PATH`
+- Bunyan-based I projects resolve tools through `I_HOME` first, then `PATH`
+- `I.exe` automatically resolves imports through the `std` folder beside it
 - I projects should use Bunyan `mode="i"` and keep generated C under their build directory
 
 ### Compiler CLI
-- `build\I.exe compile [input.i] -o [output.c] --header [output.h] --importdir [dir]`
-- `build\I.exe check [input.i]`
-- `build\I.exe check [input.i] --diagnostics=json`
-- `build\I.exe symbols [input.i]`
-- `build\I.exe lsp [input.i]`
-- `build\I.exe --help`
-- `build\I.exe [input.i] [output.c] [output.h]` still works as the legacy compile form
+- `I.exe compile [input.i] -o [output.c] --header [output.h] --importdir [dir]`
+- `I.exe check [input.i]`
+- `I.exe check [input.i] --diagnostics=json`
+- `I.exe symbols [input.i]`
+- `I.exe lsp [input.i]`
+- `I.exe --help`
+- `I.exe [input.i] [output.c] [output.h]` still works as the legacy compile form
 - compile defaults: `src\main.i` -> `build\i_gen\main.c`
 - the compiler also writes a companion header beside the output C file, for example `build\i_gen\main.h`
 - `check` parses, imports, validates, and type-checks without writing generated C

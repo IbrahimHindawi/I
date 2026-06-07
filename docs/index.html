@@ -3,23 +3,24 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>I Language</title>
+  <title>I Compiler Docs</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#top" aria-label="I language home">
+    <a class="brand" href="#top" aria-label="I compiler docs home">
       <span class="brand-mark">I</span>
       <span class="brand-copy">
-        <strong>I Language</strong>
-        <span>C-shaped systems programming</span>
+        <strong>I Compiler</strong>
+        <span>C-shaped systems language</span>
       </span>
     </a>
     <nav class="nav" aria-label="Primary navigation">
-      <a href="#features">Features</a>
+      <a href="#quickstart">Quickstart</a>
       <a href="#syntax">Syntax</a>
-      <a href="#interop">Interop</a>
-      <a href="#build">Build</a>
+      <a href="#compiler">Compiler</a>
+      <a href="#std">Std</a>
+      <a href="#debug">Debug</a>
     </nav>
   </header>
 
@@ -27,14 +28,15 @@
     <section class="hero">
       <div class="hero-copy">
         <p class="eyebrow">Transpiles to C</p>
-        <h1>The I systems programming language</h1>
+        <h1>I compiler</h1>
         <p class="lede">
-          I keeps the target close to C while making declarations, generics, module output,
-          and metaprogramming feel smaller and more direct.
+          I is a focused C front-end: direct declarations, monomorphized generics,
+          automatic reflection, typed formatting, and generated C that the native
+          toolchain compiles normally.
         </p>
         <div class="actions">
-          <a class="button primary" href="#quickstart">Quickstart</a>
-          <a class="button" href="#syntax">Language reference</a>
+          <a class="button primary" href="#quickstart">Build it</a>
+          <a class="button" href="#syntax">See syntax</a>
         </div>
       </div>
       <div class="hero-visual" aria-label="Compiler pipeline visualization">
@@ -51,78 +53,81 @@
     <section id="quickstart" class="band">
       <div class="section-head">
         <p class="eyebrow">Quickstart</p>
-        <h2>Build, translate, compile</h2>
+        <h2>Compiler repo and package flow</h2>
       </div>
       <div class="command-grid">
         <article class="command">
           <div>
-            <h3>Initialize modules</h3>
-            <p>Pull Haikal, tree-sitter, and support scripts.</p>
-          </div>
-          <pre><code>git submodule update --init --recursive</code></pre>
-        </article>
-        <article class="command">
-          <div>
             <h3>Build compiler</h3>
-            <p>Uses Bunyan to run Haikal codegen before CMake.</p>
+            <p>Builds <code>I.exe</code>, <code>ibind.exe</code>, and the packaged standard library.</p>
           </div>
           <pre><code>python bunyan.py build debug</code></pre>
         </article>
         <article class="command">
           <div>
-            <h3>Run sample</h3>
-            <p>Generates C from <code>src/main.i</code>.</p>
+            <h3>Package output</h3>
+            <p>The build copies the compiler and <code>src\std</code> into a folder that can live on PATH.</p>
           </div>
-          <pre><code>python bunyan.py run debug</code></pre>
+          <pre><code>C:\devel\i-windows-x64\
+    I.exe
+    ibind.exe
+    std\</code></pre>
         </article>
         <article class="command">
           <div>
-            <h3>End-to-end smoke test</h3>
-            <p>Translate, compile the generated C, and run it.</p>
+            <h3>Compile an I file</h3>
+            <p>The compiler finds the sibling <code>std</code> folder automatically.</p>
           </div>
-          <pre><code>python tests\run_tests.py</code></pre>
+          <pre><code>I.exe compile src\main.i -o build\i_gen\main.c --header build\i_gen\main.h</code></pre>
+        </article>
+        <article class="command">
+          <div>
+            <h3>Check only</h3>
+            <p>Used by editor tooling and diagnostics without producing build artifacts.</p>
+          </div>
+          <pre><code>I.exe check src\main.i --diagnostics=json</code></pre>
         </article>
       </div>
     </section>
 
     <section id="features" class="split">
       <div class="section-head sticky-head">
-        <p class="eyebrow">Features</p>
-        <h2>Small syntax, real C output</h2>
-        <p>I is designed as a focused compiler front-end. The generated C remains visible and normal toolchains do the final build.</p>
+        <p class="eyebrow">Shape</p>
+        <h2>Small syntax, explicit output</h2>
+        <p>The language stays close to C. The compiler owns the type system, generics, reflection, diagnostics, and C emission.</p>
       </div>
       <div class="feature-list">
         <article>
           <h3>Declaration-first syntax</h3>
-          <p>Variables, types, procedures, and globals use <code>name:type</code>, keeping type information near the symbol being introduced.</p>
+          <p><code>name: type</code> is used for locals, globals, fields, structs, enums, aliases, and procedures.</p>
         </article>
         <article>
-          <h3>Generics with monomorphization</h3>
-          <p>Generic structs and procs use <code>&lt;T&gt;</code>. Concrete uses such as <code>array&lt;i32&gt;</code> emit concrete C names.</p>
+          <h3>Native monomorphization</h3>
+          <p><code>Array&lt;payload&gt;</code> and <code>sum&lt;payload&gt;</code> emit concrete C structs and procs.</p>
         </article>
         <article>
-          <h3>Constraint-style requirements</h3>
-          <p>Procedures can declare a requirement like <code>proc&lt;T:hash&gt;</code>, then call the matching typed implementation.</p>
+          <h3>Typed operations</h3>
+          <p>Generic algorithms can call typed implementations such as <code>add&lt;T&gt;</code> and resolve per concrete type.</p>
         </article>
         <article>
-          <h3>C-shaped control flow</h3>
-          <p><code>if</code>, <code>for</code>, <code>while</code>, <code>do while</code>, <code>switch</code>, <code>break</code>, and <code>continue</code> map directly to C.</p>
+          <h3>Automatic reflection</h3>
+          <p><code>Payload&lt;&gt;</code> lowers to immutable metadata for field names, offsets, sizes, enum values, and type facts.</p>
         </article>
         <article>
-          <h3>Interop by design</h3>
-          <p>Use <code>external</code> for declarations that already exist in C headers and <code>external_emit</code> when I should emit a prototype.</p>
+          <h3>Compiler-driven formatting</h3>
+          <p><code>printfmt("{}"</code> resolves argument types and lowers to concrete <code>print&lt;T&gt;</code> calls.</p>
         </article>
         <article>
-          <h3>Generated module headers</h3>
-          <p>The compiler writes a companion header next to the generated C so imports can type-check against I modules.</p>
+          <h3>C interop remains direct</h3>
+          <p><code>cinclude</code>, <code>external</code>, and <code>external_emit</code> keep C APIs visible without wrapping everything.</p>
         </article>
         <article>
-          <h3>Reflection metadata</h3>
-          <p>Struct and enum output includes reflection records for names, sizes, fields, offsets, and enum values.</p>
+          <h3>Line mapped generated C</h3>
+          <p>Generated C uses <code>#line</code> so native compiler errors and debugger stepping can point back to I source.</p>
         </article>
         <article>
-          <h3>Readable diagnostics</h3>
-          <p>Lexer, parser, and semantic errors include source path, line, and column.</p>
+          <h3>Editor path</h3>
+          <p>The LSP shell can call <code>I.exe check --diagnostics=json</code> and publish compiler-owned diagnostics.</p>
         </article>
       </div>
     </section>
@@ -130,7 +135,7 @@
     <section id="syntax" class="band">
       <div class="section-head">
         <p class="eyebrow">Syntax</p>
-        <h2>Language reference</h2>
+        <h2>Current language examples</h2>
       </div>
       <div class="tabs" role="tablist" aria-label="Syntax examples">
         <button class="tab active" data-example="basics" type="button">Basics</button>
@@ -147,84 +152,102 @@
       </div>
       <div class="reference-grid">
         <article>
-          <h3>Declarations</h3>
+          <h3>Unified forms</h3>
           <ul>
-            <li><code>name:type = expr;</code></li>
-            <li><code>Name:struct = { field:type; }</code></li>
-            <li><code>Name:union = { field:type; }</code></li>
-            <li><code>Name:enum = { Item, Other = 4 }</code></li>
-            <li><code>Name:alias = *const char;</code></li>
+            <li><code>value: T = expr;</code></li>
+            <li><code>Name: struct = { field: T; }</code></li>
+            <li><code>name: proc(args)-&gt;T = { ... }</code></li>
+            <li><code>Generic: struct&lt;T&gt; = { ... }</code></li>
           </ul>
         </article>
         <article>
-          <h3>Expressions</h3>
+          <h3>Metaprogramming</h3>
           <ul>
-            <li><code>sizeof(T)</code>, <code>alignof(T)</code></li>
-            <li><code>cast(value, *u8)</code></li>
-            <li><code>a ? b : c</code></li>
-            <li><code>and</code>, <code>or</code>, <code>shl</code>, <code>shr</code></li>
-            <li>Index, field, address, pointer, and call expressions</li>
+            <li><code>Payload&lt;&gt;.field_count</code></li>
+            <li><code>Array&lt;T&gt;</code> native generic types</li>
+            <li><code>print: proc&lt;Payload&gt;(...)</code> typed operation specialization</li>
+            <li><code>printfmt("{}\n", value)</code> compiler lowered formatting</li>
           </ul>
         </article>
         <article>
-          <h3>Procedures</h3>
+          <h3>Interop</h3>
           <ul>
-            <li><code>name:proc(args)->ret = { ... }</code></li>
-            <li><code>name:proc&lt;T&gt;(x:T)->T = { ... }</code></li>
-            <li><code>name:proc[CALLCONV](x:i32)->void</code></li>
-            <li>Variadic procedures are emitted as C varargs.</li>
+            <li><code>cinclude "stdio.h"</code></li>
+            <li><code>define("FLAG")</code></li>
+            <li><code>proc[WINCALL](...)</code></li>
+            <li><code>external</code> and <code>external_emit</code></li>
           </ul>
         </article>
       </div>
     </section>
 
-    <section id="interop" class="split reverse">
+    <section id="compiler" class="split reverse">
       <div class="section-head sticky-head">
-        <p class="eyebrow">C Interop</p>
-        <h2>Use C without hiding it</h2>
-        <p>I emits C includes, defines, declarations, and line directives. The generated C is an artifact you can inspect and debug.</p>
+        <p class="eyebrow">Compiler</p>
+        <h2>One merged generated unit</h2>
+        <p>I imports are resolved by the compiler, then emitted as C in a deterministic order.</p>
       </div>
       <div class="interop-grid">
         <article>
-          <h3>Imports</h3>
-          <pre><code>import "math.i"
-cinclude "stdio.h"
-define("SAHA_IMPLEMENTATION")</code></pre>
-          <p><code>import</code> is for I modules. C headers are included through emitted C includes.</p>
+          <h3>Default project compile</h3>
+          <pre><code>I.exe compile src\main.i -o build\i_gen\main.c</code></pre>
+          <p>If no header path is given, the compiler can derive the companion header path from the C output path.</p>
         </article>
         <article>
-          <h3>External declarations</h3>
-          <pre><code>puts:proc(text:*const char)->i32 = { external; }
-fx_step:proc(dt:f32)->void = { external_emit; }</code></pre>
-          <p><code>external</code> type-checks only. <code>external_emit</code> also writes a C prototype.</p>
+          <h3>Generated files</h3>
+          <pre><code>build\i_gen\
+    main.c
+    main.h
+    Array_payload.h
+    Array_payload.c</code></pre>
+          <p>Generated native monomorph headers stay build-local. Authored code remains <code>.i</code>.</p>
         </article>
         <article>
-          <h3>Compiler CLI</h3>
-          <pre><code>build\I.exe compile [input.i] -o [output.c]
-build\I.exe check [input.i] --diagnostics=json</code></pre>
-          <p>Use <code>compile</code>, <code>check</code>, <code>symbols</code>, or <code>lsp</code>. The old positional compile form still works.</p>
+          <h3>Diagnostics</h3>
+          <pre><code>I.exe check src\main.i --diagnostics=json --stdin-path src\main.i</code></pre>
+          <p>The compiler is the source of truth for errors; the LSP should stay a thin transport layer.</p>
         </article>
       </div>
     </section>
 
-    <section id="build" class="band">
+    <section id="std" class="band">
       <div class="section-head">
-        <p class="eyebrow">Build Flow</p>
-        <h2>What happens when you run it</h2>
+        <p class="eyebrow">Standard Library</p>
+        <h2>Small runtime, arena-shaped</h2>
+      </div>
+      <div class="reference-grid">
+        <article>
+          <h3>Containers</h3>
+          <p><code>Array.i</code>, <code>Vec.i</code>, <code>Node.i</code>, <code>List.i</code>, <code>Map.i</code>, <code>Option.i</code>, and <code>Result.i</code> are I-native runtime modules.</p>
+        </article>
+        <article>
+          <h3>Strings and paths</h3>
+          <p><code>string8</code> owns arena memory, <code>string8slice</code> borrows, and path helpers normalize slash handling at the I level.</p>
+        </article>
+        <article>
+          <h3>Printing</h3>
+          <p><code>Print.i</code> provides concrete printers; <code>printfmt</code> uses compiler type information to pick the right printer.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="debug" class="band">
+      <div class="section-head">
+        <p class="eyebrow">Debug</p>
+        <h2>Use the native toolchain</h2>
       </div>
       <ol class="flow">
-        <li><span>1</span><p>Bunyan configures the repo with CMake and clang-cl.</p></li>
-        <li><span>2</span><p>Haikal scans <code>src/main.c</code> for <code>template(Vec(...))</code> declarations and generates container headers.</p></li>
-        <li><span>3</span><p>CMake builds <code>I.exe</code>.</p></li>
-        <li><span>4</span><p><code>I.exe</code> translates <code>.i</code> source into C and a companion header.</p></li>
-        <li><span>5</span><p>The C compiler turns the generated C into the native executable.</p></li>
+        <li><span>1</span><p>I source is translated to C with <code>#line</code> directives.</p></li>
+        <li><span>2</span><p>clang-cl compiles the C into normal debug info.</p></li>
+        <li><span>3</span><p>Visual Studio can step the I source while native disassembly stays available.</p></li>
+        <li><span>4</span><p>If the generated C matters, it is still visible under <code>build\i_gen</code>.</p></li>
       </ol>
     </section>
   </main>
 
   <footer class="footer">
-    <span>I Language</span>
-    <span>MIT licensed. Transpiles to C.</span>
+    <span>I compiler docs.</span>
+    <a href="#top">Back to top</a>
   </footer>
 
   <script src="script.js"></script>

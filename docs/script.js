@@ -1,52 +1,53 @@
 const examples = {
   basics: {
     title: 'Basics',
-    code: `import "stdio.h"
-define("SAHA_IMPLEMENTATION")
+    code: `import "std/Print.i"
 
-num:i32 = 7;
-
-vec2:struct = {
-    x:f32;
-    y:f32;
+add: proc<i32>(x: i32, y: i32)->i32 = {
+    return x + y;
 }
 
-make:proc(x:i32)->i32 = {
-    return x;
-}
-
-main:proc()->i32 = {
-    printf("num = {}\\n", num);
+main: proc(argc: i32, argv: **char)->i32 = {
+    total: i32 = add<i32>(5, 6);
+    printfmt("total = {}\\n", total);
     return 0;
 }`
   },
   generics: {
     title: 'Generics',
-    code: `array:struct<T> = {
-    length:u64;
-    border:u64;
-    data:*T;
+    code: `import "std/memops.i"
+import "std/Array.i"
+
+Payload: struct = {
+    x: f32;
+    y: f32;
 }
 
-array<T>reserve:proc<T>(arena:*memops_arena, length:u64)->array<T> = {
-    arr:array<T> = {};
-    arr.data = memops_arena_push_array_i<T>(arena, length);
-    arr.border = length;
-    return arr;
+add: proc<Payload>(a: Payload, b: Payload)->Payload = {
+    return { .x = a.x + b.x, .y = a.y + b.y };
 }
 
-makeg:proc<T>(x:T)->T = {
-    return x;
+sum: proc<T>(items: *T, count: u64)->T = {
+    result: T = {};
+    for (i: u64 = 0; i < count; i += 1) {
+        result = add<T>(result, items[i]);
+    }
+    return result;
 }`
   },
   control: {
     title: 'Control flow',
-    code: `step:proc(value:i32)->i32 = {
+    code: `Mode: enum = {
+    Idle,
+    Run,
+    Attack,
+}
+
+step: proc(mode: Mode, value: i32)->i32 = {
     while (value > 0) {
         value -= 1;
-        value %= 8;
 
-        if (value == 2) {
+        if (mode == Mode.Attack and value == 2) {
             continue;
         }
 
@@ -63,25 +64,20 @@ makeg:proc<T>(x:T)->T = {
 }`
   },
   types: {
-    title: 'Types and interop',
-    code: `Color:enum = {
-    Red,
-    Green = 4,
-    Blue,
+    title: 'Types and reflection',
+    code: `Payload: struct = {
+    id: u32;
+    name: *const char;
+    samples: [4]f32;
 }
 
-Packet:struct = {
-    values:[4]i32;
-    flags:u32;
-}
+main: proc()->i32 = {
+    printfmt("type {} has {} fields\\n", Payload<>.name, Payload<>.field_count);
 
-CStr:alias = *const char;
-
-puts:proc(text:CStr)->i32 = { external; }
-fx_step:proc(dt:f32)->void = { external_emit; }
-
-WinProc:proc[WINCALL](value:i32)->i32 = {
-    return cast(value, i32);
+    for (i: u64 = 0; i < Payload<>.field_count; i += 1) {
+        printfmt("field[{}] = {}\\n", i, Payload<>.fields[i].name);
+    }
+    return 0;
 }`
   }
 };

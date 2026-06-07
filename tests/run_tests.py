@@ -579,11 +579,17 @@ main:proc()->i32 = {
         name="runtime_string8",
         source=r'''
 cinclude "stdio.h"
+import "C:/devel/i/src/std/Print.i"
 import "C:/devel/i/src/std/string8.i"
 
 main:proc()->i32 = {
     arena:memops_arena = {};
     memops_arena_initialize(&arena);
+
+    empty:string8 = string8_from_cstr(&arena, "");
+    null_s:string8 = string8_from_cstr(&arena, null);
+    zero:string8 = {};
+    string8_append_cstr(&arena, &zero, "zero");
 
     text:string8 = string8_from_cstr(&arena, "hello");
     string8_append_byte(&arena, &text, cast(44, u8));
@@ -592,6 +598,15 @@ main:proc()->i32 = {
     parts:Vec<string8slice> = string8slice_split_from_string8(&arena, text, cast(44, u8));
     owned:Vec<string8> = string8_split_char(&arena, text, cast(44, u8));
     copy:string8 = string8_copy_from_slice(&arena, parts.data[1].data, parts.data[1].length);
+    trim_src:string8 = string8_from_cstr(&arena, "  Hello/World.TXT  ");
+    trimmed:string8slice = string8_trim(trim_src);
+    lower:string8 = string8slice_lower_copy(&arena, trimmed);
+    norm:string8 = path_normalize_slashes(&arena, string8slice_from_cstr("root\\dir\\file.txt"));
+    joined:string8 = path_join(&arena, string8slice_from_cstr("root/"), string8slice_from_cstr("/child\\file.i"));
+    dir:string8slice = path_dirname(string8slice_from_string8(norm));
+    base:string8slice = path_basename(string8slice_from_string8(norm));
+    ext:string8slice = path_extension(string8slice_from_string8(norm));
+    stripped:string8slice = path_strip_extension(string8slice_from_string8(norm));
 
     printf("%llu %d %d %d ",
         text.length,
@@ -601,12 +616,27 @@ main:proc()->i32 = {
     string8_print(&text);
     printf(" ");
     string8slice_print(parts.data[0]);
-    printf(" %s %llu %llu\n", string8_to_cstr_temp(&arena, copy), parts.length, owned.length);
+    printf(" %s %llu %llu ", string8_to_cstr_temp(&arena, copy), parts.length, owned.length);
+    printf("%llu %llu %llu %d %d %d ",
+        empty.length,
+        zero.length,
+        null_s.length,
+        string8_equals_cstr(&empty, ""),
+        string8_equals_cstr(&zero, "zero"),
+        string8_equals_cstr(&null_s, ""));
+    printf("%d %d %lld %d %d %d ",
+        string8slice_starts_with(trimmed, string8slice_from_cstr("Hello")),
+        string8slice_ends_with(trimmed, string8slice_from_cstr(".TXT")),
+        string8slice_find(trimmed, string8slice_from_cstr("World")),
+        string8slice_contains(trimmed, string8slice_from_cstr("World")),
+        string8slice_eq_ignore_case(trimmed, string8slice_from_cstr("hello/world.txt")),
+        string8_hash(lower) == string8slice_hash(string8slice_from_cstr("hello/world.txt")));
+    printfmt("{} {} {} {} {} {} {} {}\n", trimmed, lower, norm, joined, dir, base, ext, stripped);
     return 0;
 }
 ''',
-        expected_stdout="11 1 1 1 hello,world hello world 2 2\n",
-        generated_contains=("string8_reflect", "string8slice_reflect", "Vec_string8_reflect", "Vec_string8slice_reflect"),
+        expected_stdout="11 1 1 1 hello,world hello world 2 2 0 4 0 1 1 1 1 1 6 1 1 1 Hello/World.TXT hello/world.txt root/dir/file.txt root/child/file.i root/dir file.txt .txt root/dir/file\n",
+        generated_contains=("string8_reflect", "string8slice_reflect", "Vec_string8_reflect", "Vec_string8slice_reflect", "print_string8", "print_string8slice"),
     ),
     Case(
         name="enum_reflect_preprocessor",
