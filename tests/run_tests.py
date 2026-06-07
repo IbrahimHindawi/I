@@ -19,6 +19,7 @@ class Case:
     name: str
     source: str
     expected_stdout: str
+    extra_files: tuple[tuple[str, str], ...] = ()
     generated_contains: tuple[str, ...] = ()
     header_contains: tuple[str, ...] = ()
 
@@ -117,6 +118,32 @@ main:proc()->i32 = {
 }
 ''',
         expected_stdout="1 3\n",
+    ),
+    Case(
+        name="enum_dot_members",
+        source=r'''
+cinclude "stdio.h"
+
+Kind:enum = {
+    None,
+    Ready,
+}
+
+main:proc()->i32 = {
+    kind:Kind = Kind.Ready;
+    switch (kind) {
+        case Kind.None:
+            printf("none\n");
+            return 0;
+        case Kind.Ready:
+            printf("%d\n", kind);
+            return 0;
+    }
+    return 1;
+}
+''',
+        expected_stdout="1\n",
+        generated_contains=("Kind kind = Kind_Ready;", "case Kind_None:", "case Kind_Ready:"),
     ),
     Case(
         name="printfmt",
@@ -345,6 +372,62 @@ main:proc()->i32 = {
 ''',
         expected_stdout="11 3 3.75\n",
         generated_contains=("add_i32", "add_f32", "min_value_i32"),
+    ),
+    Case(
+        name="type_operations_playground",
+        source=r'''
+import "C:/devel/i/src/std/memops.i"
+import "C:/devel/i/src/std/Array.i"
+import "C:/devel/i/src/std/Node.i"
+import "C:/devel/i/src/std/List.i"
+import "C:/devel/i/src/std/Print.i"
+
+payload: struct = {
+    x: f32;
+    y: *u8;
+}
+
+add: proc<payload>(x: payload, y: payload) -> payload = {
+    return { .x = x.x + y.x };
+}
+
+add: proc<i32>(x: i32, y: i32) -> i32 = {
+    return x + y;
+}
+
+sum: proc<T>(items: *T, count: u64) -> T = {
+    result: T = {};
+    for (i: u64 = 0; i < count; i += 1) {
+        result = add<T>(result, items[i]);
+    }
+    return result;
+}
+
+main: proc(argc: i32, argv: **char)-> i32 = {
+    arena: memops_arena = {};
+    memops_arena_initialize(arena.&);
+    # todo: this line is intentionally an I comment, not C preprocessor output.
+    printfmt("{}\n", add<i32>(1, 1));
+    x: i32 = add<i32>(1, 1);
+    printfmt("{}\n", x);
+    y: payload = add<payload>({.x = 2}, {.x = 2});
+    printfmt("{}\n", y.x);
+    payloads: Array<payload> = Array<payload>reserve(arena.&, 128);
+    for (i: i32 = 0; i < payloads.length; i += 1) {
+        payloads.data[i] = {.x = i};
+    }
+    result: payload = sum<payload>(payloads.data, payloads.length);
+    printfmt("{}\n", result.x);
+    return 0;
+}
+''',
+        expected_stdout="2\n2\n4.000000\n8128.000000\n",
+        generated_contains=(
+            "#include <reflect.h>",
+            "print_i32(add_i32(1, 1));",
+            "payload y = add_payload(((payload){.x = 2}), ((payload){.x = 2}));",
+            "payload result = sum_payload(payloads.data, payloads.length);",
+        ),
     ),
     Case(
         name="nested_generic_reflection",
@@ -855,6 +938,11 @@ Value:union = {
     f:f32;
 }
 
+Mode:enum = {
+    None,
+    Ready,
+}
+
 add:proc[WINCALL](a:i32, b:i32)->i32 = {
     return a + b;
 }
@@ -870,6 +958,7 @@ main:proc()->i32 = {
     cb:Binary = add;
     total:i32 = 0;
     i:i32 = 0;
+    total += choose(0, Mode.Ready);
     do {
         total += i == 1 ? cb(v.i, 2) : choose(1, 2, 3);
         i += 1;
@@ -887,8 +976,49 @@ main:proc()->i32 = {
             " ? ",
             "choose(i32 a, ...)",
             'const char * label = "hello";',
+            "Mode_Ready",
         ),
         header_contains=("typedef i32 I32;", "typedef i32 (WINCALL *Binary)(i32 a, i32 b);", "uniondef(Value)"),
+    ),
+    Case(
+        name="external_c_array_alias_generic_specialization",
+        source=r'''
+cinclude "stdio.h"
+cinclude "external_c_array_alias_generic_specialization_types.h"
+
+touch_vec2:proc(v:vec2)->void = { external; }
+touch_vec3:proc(v:vec3)->void = { external; }
+
+json_read:proc<vec2>(out:vec2)->i32 = {
+    out[0] = 2.0f;
+    out[1] = 3.0f;
+    return 2;
+}
+
+json_read:proc<vec3>(out:vec3)->i32 = {
+    out[0] = 5.0f;
+    out[1] = 7.0f;
+    out[2] = 11.0f;
+    return 3;
+}
+
+main:proc()->i32 = {
+    a:vec2 = {};
+    b:vec3 = {};
+    count:i32 = json_read<vec2>(a) + json_read<vec3>(b);
+    printf("%d %.0f %.0f\n", count, a[1], b[2]);
+    return 0;
+}
+''',
+        expected_stdout="5 3 11\n",
+        extra_files=(
+            (
+                "external_c_array_alias_generic_specialization_types.h",
+                "typedef float vec2[2];\ntypedef float vec3[3];\n",
+            ),
+        ),
+        generated_contains=("json_read_vec2", "json_read_vec3", "vec2 a", "vec3 b", "a[1]", "b[2]"),
+        header_contains=("i32 json_read_vec2(vec2 out);", "i32 json_read_vec3(vec3 out);"),
     ),
     Case(
         name="initializer_lists",
@@ -1129,6 +1259,10 @@ def main() -> int:
         c_path = TEST_DIR / f"{case.name}.c"
         h_path = TEST_DIR / f"{case.name}.h"
         exe = TEST_DIR / f"{case.name}.exe"
+        for rel_path, contents in case.extra_files:
+            extra_path = TEST_DIR / rel_path
+            extra_path.parent.mkdir(parents=True, exist_ok=True)
+            extra_path.write_text(contents, encoding="utf-8", newline="\n")
         src.write_text(case.source.strip() + "\n", encoding="utf-8", newline="\n")
 
         translate = run([str(I_EXE), str(src), str(c_path)])
@@ -2796,9 +2930,12 @@ main:proc()->i32 = {
         print("generated_line_map: expected statement #line directive")
         print(f"missing: {expected_line}")
         return 1
-    generated_reflect_marker = '#line 1 "<generated>"\n#ifndef I_REFLECT_TYPES_DEFINED'
-    if generated_reflect_marker not in line_map_generated:
-        print("generated_line_map: expected reflection runtime to be marked as generated code")
+    generated_reflect_include = "#include <reflect.h>"
+    if generated_reflect_include not in line_map_generated:
+        print("generated_line_map: expected generated source to include reflect runtime header")
+        return 1
+    if "I_REFLECT_TYPES_DEFINED" in line_map_generated:
+        print("generated_line_map: reflection runtime helpers should live in std/reflect.h, not generated source")
         return 1
     generated_struct_reflect_marker = '#line 1 "<generated>"\nstatic const i_reflect_field i_reflect_fields_Box_i32'
     if generated_struct_reflect_marker not in line_map_generated:
@@ -2816,8 +2953,11 @@ main:proc()->i32 = {
         print("generated_line_map: expected header banner with originating .i path")
         print(f"missing: {expected_header_banner.strip()}")
         return 1
-    if generated_reflect_marker not in line_map_header:
-        print("generated_line_map: expected header reflection runtime to be marked as generated code")
+    if generated_reflect_include not in line_map_header:
+        print("generated_line_map: expected generated header to include reflect runtime header")
+        return 1
+    if "I_REFLECT_TYPES_DEFINED" in line_map_header:
+        print("generated_line_map: reflection runtime helpers should live in std/reflect.h, not generated header")
         return 1
     generated_reflect_extern_marker = '#line 1 "<generated>"\nextern const i_reflect_type Box_i32_reflect;'
     if generated_reflect_extern_marker not in line_map_header:
@@ -4060,6 +4200,39 @@ main:proc()->i32 = {
         return 1
     print("ok generic_delayed_invalid_instance")
 
+    missing_type_operation_i = TEST_DIR / "missing_type_operation.i"
+    missing_type_operation_c = TEST_DIR / "missing_type_operation.c"
+    missing_type_operation_i.write_text(r'''
+Payload:struct = {
+    value:i32;
+}
+
+sum:proc<T>(items:*T, count:u64)->T = {
+    result:T = {};
+    for (i:u64 = 0; i < count; i += 1) {
+        result = add<T>(result, items[i]);
+    }
+    return result;
+}
+
+main:proc()->i32 = {
+    items:[1]Payload = {{.value = 1}};
+    result:Payload = sum<Payload>(items, 1);
+    return result.value;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    missing_type_operation = run([str(I_EXE), str(missing_type_operation_i), str(missing_type_operation_c)])
+    if (
+        missing_type_operation.returncode == 0
+        or str(missing_type_operation_i) not in missing_type_operation.stdout
+        or "type error: missing type operation proc 'add_Payload' for call 'add<Payload>'" not in missing_type_operation.stdout
+        or "result = add<T>(result, items[i]);" not in missing_type_operation.stdout
+    ):
+        print("missing_type_operation: expected missing type-operation diagnostic")
+        print(missing_type_operation.stdout)
+        return 1
+    print("ok missing_type_operation")
+
     type_pointer_i = TEST_DIR / "type_pointer_value.i"
     type_pointer_c = TEST_DIR / "type_pointer_value.c"
     type_pointer_i.write_text(r'''
@@ -4253,6 +4426,26 @@ main:proc()->i32 = {
         print(type_enum_int.stdout)
         return 1
     print("ok type_enum_int_cast")
+
+    type_enum_dot_bad_i = TEST_DIR / "type_enum_dot_bad_member.i"
+    type_enum_dot_bad_c = TEST_DIR / "type_enum_dot_bad_member.c"
+    type_enum_dot_bad_i.write_text(r'''
+Kind:enum = {
+    None,
+    Ready,
+}
+
+main:proc()->i32 = {
+    kind:Kind = Kind.Bad;
+    return kind;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_enum_dot_bad = run([str(I_EXE), str(type_enum_dot_bad_i), str(type_enum_dot_bad_c)])
+    if type_enum_dot_bad.returncode == 0 or "type error: enum 'Kind' has no member 'Bad'" not in type_enum_dot_bad.stdout:
+        print("type_enum_dot_bad_member: expected enum dot member diagnostic")
+        print(type_enum_dot_bad.stdout)
+        return 1
+    print("ok type_enum_dot_bad_member")
 
     type_enum_float_assign_i = TEST_DIR / "type_enum_float_assignment.i"
     type_enum_float_assign_c = TEST_DIR / "type_enum_float_assignment.c"

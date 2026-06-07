@@ -680,6 +680,7 @@ typedef struct Scope {
     Vec_voidptr local_sites; // LocalDeclSite*
     Vec_string8 globals;
     Vec_string8 procs;
+    Vec_string8 enum_types;
     i32 loop_depth;
     i32 switch_depth;
 } Scope;
@@ -1540,20 +1541,27 @@ static bool split_qualified_name(string8 name, string8 *owner, string8 *member) 
     return false;
 }
 
-static void emit_mono_proc_name(memops_arena *arena, string8 *out, string8 base_name, string8 type_mangled) {
+static string8 mono_proc_name_from_mangle(memops_arena *arena, string8 base_name, string8 type_mangled) {
+    string8 out = string8_reserve(arena, base_name.length + type_mangled.length + 2);
     string8 owner = {0};
     string8 member = {0};
     if (split_qualified_name(base_name, &owner, &member)) {
-        emit_string8(arena, out, owner);
-        emit_cstr(arena, out, "_");
-        emit_string8(arena, out, type_mangled);
-        emit_cstr(arena, out, "_");
-        emit_string8(arena, out, member);
+        string8_append_bytes(arena, &out, owner.data, owner.length);
+        string8_append_cstr(arena, &out, "_");
+        string8_append_bytes(arena, &out, type_mangled.data, type_mangled.length);
+        string8_append_cstr(arena, &out, "_");
+        string8_append_bytes(arena, &out, member.data, member.length);
     } else {
-        emit_string8(arena, out, base_name);
-        emit_cstr(arena, out, "_");
-        emit_string8(arena, out, type_mangled);
+        string8_append_bytes(arena, &out, base_name.data, base_name.length);
+        string8_append_cstr(arena, &out, "_");
+        string8_append_bytes(arena, &out, type_mangled.data, type_mangled.length);
     }
+    return out;
+}
+
+static void emit_mono_proc_name(memops_arena *arena, string8 *out, string8 base_name, string8 type_mangled) {
+    string8 name = mono_proc_name_from_mangle(arena, base_name, type_mangled);
+    emit_string8(arena, out, name);
 }
 
 static string8 parse_decl_name(Parser *p) {
@@ -3158,6 +3166,9 @@ static void semantic_add_program_symbols(Program *prog, Scope *base, Vec_string8
         if (!scope_has(structs, decl->name)) {
             Vec_string8_append(arena, structs, decl->name);
         }
+        if (!scope_has(&base->enum_types, decl->name)) {
+            Vec_string8_append(arena, &base->enum_types, decl->name);
+        }
         if (!decl->is_external) {
             Vec_string8_append(arena, &base->globals, concat_name2(arena, decl->name, "_", string8_from_cstr(arena, "reflect")));
             for (i32 j = 0; j < decl->items.length; j++) {
@@ -3221,6 +3232,9 @@ static void semantic_check_expr(Expr *e, Scope *scope) {
         return;
     }
     if (e->kind == Expr_Field) {
+        if (e->base && e->base->kind == Expr_Name && scope_has(&scope->enum_types, e->base->name)) {
+            return;
+        }
         semantic_check_expr(e->base, scope);
         return;
     }
@@ -3877,8 +3891,38 @@ static void semantic_collect_external_type_names(TypeExpr *type, Vec_string8 *kn
     }
 }
 
+static void semantic_collect_program_external_type_names(Program *prog, Vec_string8 *known_types, memops_arena *arena) {
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (!decl->is_external) continue;
+        for (i32 j = 0; j < decl->fields.length; j++) {
+            Field *field = (Field *)decl->fields.data[j];
+            semantic_collect_external_type_names(field->type, known_types, arena);
+        }
+    }
+
+    for (i32 i = 0; i < prog->procs.length; i++) {
+        ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
+        if (!decl->is_external) continue;
+        semantic_collect_external_type_names(decl->ret_type, known_types, arena);
+        for (i32 j = 0; j < decl->params.length; j++) {
+            Param *param = (Param *)decl->params.data[j];
+            semantic_collect_external_type_names(param->type, known_types, arena);
+        }
+    }
+
+    for (i32 i = 0; i < prog->globals.length; i++) {
+        Stmt *decl = (Stmt *)prog->globals.data[i];
+        if (decl->is_external) {
+            semantic_collect_external_type_names(decl->type, known_types, arena);
+        }
+    }
+}
+
+static bool type_is_c_float_array_name(string8 name);
+
 static bool semantic_known_type_name(Vec_string8 *known_types, string8 name) {
-    return semantic_intrinsic_type_name(name) || scope_has(known_types, name);
+    return semantic_intrinsic_type_name(name) || type_is_c_float_array_name(name) || scope_has(known_types, name);
 }
 
 static void semantic_resolve_proc_angle_types(Program *prog, Vec_string8 *known_types, memops_arena *arena) {
@@ -3929,6 +3973,7 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
     Scope base = {0};
     base.globals = Vec_string8_reserve(arena, 64);
     base.procs = Vec_string8_reserve(arena, 64);
+    base.enum_types = Vec_string8_reserve(arena, 64);
     Vec_string8 structs = Vec_string8_reserve(arena, 64);
     Vec_voidptr type_sites = ptr_array_reserve(arena, 64);
     Vec_voidptr proc_sites = ptr_array_reserve(arena, 64);
@@ -4025,6 +4070,9 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
             semantic_error_name_dup_path("duplicate enum declaration", decl->name, decl->source_path, decl->import_chain, decl->line, decl->col, prev->path, prev->import_chain, prev->line, prev->col);
         }
         Vec_string8_append(arena, &structs, decl->name);
+        if (!scope_has(&base.enum_types, decl->name)) {
+            Vec_string8_append(arena, &base.enum_types, decl->name);
+        }
         semantic_decl_site_add(arena, &type_sites, decl->name, decl->source_path, decl->import_chain, decl->line, decl->col);
         string8 reflect_name = concat_name2(arena, decl->name, "_", string8_from_cstr(arena, "reflect"));
         Vec_string8_append(arena, &base.globals, reflect_name);
@@ -4065,6 +4113,7 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
         }
     }
 
+    semantic_collect_program_external_type_names(prog, &structs, arena);
     semantic_resolve_proc_angle_types(prog, &structs, arena);
 
     for (i32 i = 0; i < prog->procs.length; i++) {
@@ -4088,31 +4137,7 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
         semantic_decl_site_add(arena, &global_sites, decl->name, decl->source_path, decl->import_chain, decl->line, decl->col);
     }
 
-    for (i32 i = 0; i < prog->structs.length; i++) {
-        StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        if (!decl->is_external) continue;
-        for (i32 j = 0; j < decl->fields.length; j++) {
-            Field *field = (Field *)decl->fields.data[j];
-            semantic_collect_external_type_names(field->type, &structs, arena);
-        }
-    }
-
-    for (i32 i = 0; i < prog->procs.length; i++) {
-        ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
-        if (!decl->is_external) continue;
-        semantic_collect_external_type_names(decl->ret_type, &structs, arena);
-        for (i32 j = 0; j < decl->params.length; j++) {
-            Param *param = (Param *)decl->params.data[j];
-            semantic_collect_external_type_names(param->type, &structs, arena);
-        }
-    }
-
-    for (i32 i = 0; i < prog->globals.length; i++) {
-        Stmt *decl = (Stmt *)prog->globals.data[i];
-        if (decl->is_external) {
-            semantic_collect_external_type_names(decl->type, &structs, arena);
-        }
-    }
+    semantic_collect_program_external_type_names(prog, &structs, arena);
 
     for (i32 i = 0; i < prog->aliases.length; i++) {
         AliasDecl *decl = (AliasDecl *)prog->aliases.data[i];
@@ -6030,12 +6055,46 @@ static ProcDecl *lookup_proc_decl(Program *prog, string8 name) {
     return null;
 }
 
+static EnumDecl *lookup_enum_decl(Program *prog, string8 name) {
+    for (i32 i = 0; i < prog->enums.length; i++) {
+        EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
+        if (string8_equals(&decl->name, &name)) return decl;
+    }
+    return null;
+}
+
+static EnumItem *lookup_enum_item(EnumDecl *decl, string8 name) {
+    if (!decl) return null;
+    for (i32 i = 0; i < decl->items.length; i++) {
+        EnumItem *item = (EnumItem *)decl->items.data[i];
+        if (string8_equals(&item->name, &name)) return item;
+    }
+    return null;
+}
+
+static string8 enum_item_c_name(memops_arena *arena, EnumDecl *decl, EnumItem *item) {
+    if (!decl || !item) return (string8){0};
+    return concat_name2(arena, decl->name, "_", item->name);
+}
+
+static bool resolve_enum_member_expr(Program *prog, Expr *e, EnumDecl **out_decl, EnumItem **out_item) {
+    if (out_decl) *out_decl = null;
+    if (out_item) *out_item = null;
+    if (!e || e->kind != Expr_Field || !e->base || e->base->kind != Expr_Name) return false;
+
+    EnumDecl *decl = lookup_enum_decl(prog, e->base->name);
+    if (!decl) return false;
+    if (out_decl) *out_decl = decl;
+    if (out_item) *out_item = lookup_enum_item(decl, e->name);
+    return true;
+}
+
 static EnumDecl *lookup_enum_constant_decl(memops_arena *arena, Program *prog, string8 name) {
     for (i32 i = 0; i < prog->enums.length; i++) {
         EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
         for (i32 j = 0; j < decl->items.length; j++) {
             EnumItem *item = (EnumItem *)decl->items.data[j];
-            string8 c_name = concat_name2(arena, decl->name, "_", item->name);
+            string8 c_name = enum_item_c_name(arena, decl, item);
             if (string8_equals(&c_name, &name)) return decl;
         }
     }
@@ -6045,6 +6104,35 @@ static EnumDecl *lookup_enum_constant_decl(memops_arena *arena, Program *prog, s
 static TypeExpr *generic_call_type_arg(Expr *call) {
     if (!call || call->type_args.length != 1) return null;
     return (TypeExpr *)call->type_args.data[0];
+}
+
+static ProcDecl *lookup_call_proc_decl(
+    Program *prog,
+    Expr *call,
+    TypeScope *scope,
+    memops_arena *arena,
+    TypeExpr **out_type_arg,
+    bool *out_concrete_specialization
+) {
+    if (out_type_arg) *out_type_arg = null;
+    if (out_concrete_specialization) *out_concrete_specialization = false;
+    if (!call) return null;
+
+    TypeExpr *type_arg = generic_call_type_arg(call);
+    if (type_arg) {
+        TypeExpr *resolved_arg = type_scope_apply_sub(scope, arena, type_arg);
+        if (out_type_arg) *out_type_arg = resolved_arg;
+
+        string8 mangle = type_mangle(arena, resolved_arg, (TypeSub){0});
+        string8 concrete_name = mono_proc_name_from_mangle(arena, call->name, mangle);
+        ProcDecl *concrete = lookup_proc_decl(prog, concrete_name);
+        if (concrete) {
+            if (out_concrete_specialization) *out_concrete_specialization = true;
+            return concrete;
+        }
+    }
+
+    return lookup_proc_decl(prog, call->name);
 }
 
 static bool type_compatible(Program *prog, TypeExpr *dst, TypeExpr *src);
@@ -6146,6 +6234,11 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, Program *prog, memop
         return null;
     }
     if (e->kind == Expr_Field) {
+        EnumDecl *enum_decl = null;
+        EnumItem *enum_item = null;
+        if (resolve_enum_member_expr(prog, e, &enum_decl, &enum_item)) {
+            return enum_item ? type_name_expr_from_string(arena, enum_decl->name) : null;
+        }
         TypeExpr *base = infer_expr_type(e->base, scope, prog, arena);
         return lookup_field_type(prog, base, e->name, arena);
     }
@@ -6160,11 +6253,10 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, Program *prog, memop
         if (string8_equals_cstr(&e->name, "sizeof") || string8_equals_cstr(&e->name, "alignof")) {
             return type_name_expr(arena, "usize");
         }
-        ProcDecl *decl = lookup_proc_decl(prog, e->name);
+        TypeExpr *type_arg = null;
+        ProcDecl *decl = lookup_call_proc_decl(prog, e, scope, arena, &type_arg, null);
         if (decl) {
-            TypeExpr *type_arg = generic_call_type_arg(e);
             if (decl->is_generic && type_arg) {
-                type_arg = type_scope_apply_sub(scope, arena, type_arg);
                 return substitute_type_param(arena, decl->ret_type, decl->type_param, type_arg);
             }
             return type_scope_apply_sub(scope, arena, decl->ret_type);
@@ -7958,6 +8050,35 @@ static void type_error_ternary_arms(TypeExpr *right, TypeExpr *third, i32 line, 
     diag_finish_at(line, col);
 }
 
+static void type_error_enum_member(EnumDecl *decl, string8 member_name, i32 line, i32 col) {
+    if (!decl) return;
+    if (g_diag_json) {
+        char message[1024];
+        snprintf(
+            message,
+            sizeof(message),
+            "enum '%.*s' has no member '%.*s'",
+            (int)decl->name.length,
+            decl->name.data,
+            (int)member_name.length,
+            member_name.data
+        );
+        diag_json_error_range(diag_current_path(), line, col, line, col + (i32)member_name.length + 1, "type", message);
+        exit(1);
+    }
+    printf(
+        "%s:%d:%d: type error: enum '%.*s' has no member '%.*s'\n",
+        diag_current_path(),
+        line,
+        col,
+        (int)decl->name.length,
+        decl->name.data,
+        (int)member_name.length,
+        member_name.data
+    );
+    diag_finish_range(line, col, (i32)member_name.length + 1);
+}
+
 static void type_error_field_access(
     Program *prog,
     Expr *base_expr,
@@ -8464,14 +8585,55 @@ static void type_check_initializer_against(
     }
 }
 
-static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_arena *arena) {
-    ProcDecl *decl = lookup_proc_decl(prog, call->name);
-    for (i32 i = 0; i < call->args.length; i++) {
-        type_check_expr((Expr *)call->args.data[i], scope, prog, arena);
+static void type_error_missing_type_operation(Expr *call, TypeExpr *type_arg, memops_arena *arena) {
+    string8 mangle = type_arg ? type_mangle(arena, type_arg, (TypeSub){0}) : string8_from_cstr(arena, "unknown");
+    string8 missing = mono_proc_name_from_mangle(arena, call->name, mangle);
+    if (g_diag_json) {
+        char message[1024];
+        snprintf(
+            message,
+            sizeof(message),
+            "missing type operation proc '%.*s' for call '%.*s<%.*s>'",
+            (int)missing.length,
+            missing.data,
+            (int)call->name.length,
+            call->name.data,
+            (int)mangle.length,
+            mangle.data
+        );
+        diag_json_error(diag_current_path(), call->line, call->col, "type", message);
+        exit(1);
     }
+    printf(
+        "%s:%d:%d: type error: missing type operation proc '%.*s' for call '%.*s<%.*s>'\n",
+        g_diag_source_path ? g_diag_source_path : g_source_path,
+        call->line,
+        call->col,
+        (int)missing.length,
+        missing.data,
+        (int)call->name.length,
+        call->name.data,
+        (int)mangle.length,
+        mangle.data
+    );
+    diag_print_file_context(g_diag_source_path ? g_diag_source_path : g_source_path, call->line, call->col);
+    diag_note_import_chain();
+    exit(1);
+}
+
+static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_arena *arena) {
+    TypeExpr *type_arg = null;
+    bool concrete_specialization = false;
+    ProcDecl *decl = lookup_call_proc_decl(prog, call, scope, arena, &type_arg, &concrete_specialization);
     if (!decl) {
+        if (call->type_args.length > 0) {
+            type_error_missing_type_operation(call, type_arg, arena);
+        }
         TypeExpr *callee_type = type_scope_lookup(scope, call->name);
         if (!callee_type) {
+            for (i32 i = 0; i < call->args.length; i++) {
+                type_check_expr((Expr *)call->args.data[i], scope, prog, arena);
+            }
             return;
         }
 
@@ -8493,9 +8655,15 @@ static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_
             TypeExpr *expected = (TypeExpr *)proc_type->args.data[i];
             Expr *arg = (Expr *)call->args.data[i];
             type_check_initializer_against(arg, expected, scope, prog, arena);
+            type_check_expr(arg, scope, prog, arena);
             TypeExpr *actual = infer_expr_type(arg, scope, prog, arena);
             if (expected && actual && !type_compatible(prog, expected, actual)) {
                 type_error_proc_pointer_argument(prog, call->name, proc_type, i, expected, actual, arg ? arg->line : call->line, arg ? arg->col : call->col, arena);
+            }
+        }
+        if (proc_type->is_variadic) {
+            for (i32 i = proc_type->args.length; i < call->args.length; i++) {
+                type_check_expr((Expr *)call->args.data[i], scope, prog, arena);
             }
         }
         return;
@@ -8504,7 +8672,7 @@ static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_
         if (call->type_args.length != 1) {
             type_error_proc_type_arg_count(decl, call->type_args.length, call->line, call->col);
         }
-    } else if (call->type_args.length > 0) {
+    } else if (call->type_args.length > 0 && !concrete_specialization) {
         type_error_proc_type_arg_count(decl, call->type_args.length, call->line, call->col);
     }
     if (decl->is_variadic) {
@@ -8515,10 +8683,6 @@ static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_
         type_error_proc_arg_count(decl, call->args.length, call->line, call->col, arena);
     }
 
-    TypeExpr *type_arg = generic_call_type_arg(call);
-    if (type_arg) {
-        type_arg = type_scope_apply_sub(scope, arena, type_arg);
-    }
     for (i32 i = 0; i < call->args.length && i < decl->params.length; i++) {
         Param *param = (Param *)decl->params.data[i];
         TypeExpr *expected = param->type;
@@ -8527,9 +8691,15 @@ static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_
         }
         Expr *arg = (Expr *)call->args.data[i];
         type_check_initializer_against(arg, expected, scope, prog, arena);
+        type_check_expr(arg, scope, prog, arena);
         TypeExpr *actual = infer_expr_type(arg, scope, prog, arena);
         if (expected && actual && !type_compatible(prog, expected, actual)) {
             type_error_proc_argument(prog, decl, param, i, type_arg, expected, actual, arg ? arg->line : call->line, arg ? arg->col : call->col, arena);
+        }
+    }
+    if (decl->is_variadic) {
+        for (i32 i = decl->params.length; i < call->args.length; i++) {
+            type_check_expr((Expr *)call->args.data[i], scope, prog, arena);
         }
     }
 }
@@ -8595,6 +8765,17 @@ static void type_check_expr(Expr *e, TypeScope *scope, Program *prog, memops_are
         return;
     }
     if (e->kind == Expr_Field) {
+        EnumDecl *enum_decl = null;
+        EnumItem *enum_item = null;
+        if (resolve_enum_member_expr(prog, e, &enum_decl, &enum_item)) {
+            if (!enum_item) {
+                type_error_enum_member(enum_decl, e->name, e->line, e->col);
+            }
+            e->kind = Expr_Name;
+            e->name = enum_item_c_name(arena, enum_decl, enum_item);
+            e->base = null;
+            return;
+        }
         type_check_expr(e->base, scope, prog, arena);
         TypeExpr *base = infer_expr_type(e->base, scope, prog, arena);
         TypeExpr *field = lookup_field_type(prog, base, e->name, arena);
@@ -10038,252 +10219,6 @@ static void emit_proc_proto_mono(memops_arena *arena, string8 *out, ProcDecl *de
     emit_cstr(arena, out, ");\n");
 }
 
-static void emit_reflection_runtime_types(memops_arena *arena, string8 *out) {
-    emit_cstr(arena, out,
-        "#ifndef I_REFLECT_TYPES_DEFINED\n"
-        "#define I_REFLECT_TYPES_DEFINED\n"
-        "typedef enum i_reflect_type_kind {\n"
-        "    I_Reflect_Type_Name,\n"
-        "    I_Reflect_Type_Ptr,\n"
-        "    I_Reflect_Type_Generic,\n"
-        "    I_Reflect_Type_Array,\n"
-        "    I_Reflect_Type_Proc,\n"
-        "} i_reflect_type_kind;\n\n"
-        "typedef struct i_reflect_field {\n"
-        "    const char *name;\n"
-        "    const char *type;\n"
-        "    const char *attrs;\n"
-        "    u64 offset;\n"
-        "    u64 size;\n"
-        "    u64 align;\n"
-        "    i_reflect_type_kind kind;\n"
-        "    u64 array_count;\n"
-        "    u64 pointer_depth;\n"
-        "    const char *base_type;\n"
-        "    const char *elem_type;\n"
-        "    const char *generic_arg_type;\n"
-        "    u64 is_const;\n"
-        "} i_reflect_field;\n\n"
-        "typedef struct i_reflect_type {\n"
-        "    const char *name;\n"
-        "    u64 size;\n"
-        "    u64 align;\n"
-        "    u64 field_count;\n"
-        "    const i_reflect_field *fields;\n"
-        "} i_reflect_type;\n\n"
-        "typedef struct i_reflect_enum_value {\n"
-        "    const char *name;\n"
-        "    i32 value;\n"
-        "} i_reflect_enum_value;\n\n"
-        "typedef struct i_reflect_enum {\n"
-        "    const char *name;\n"
-        "    u64 size;\n"
-        "    u64 align;\n"
-        "    u64 value_count;\n"
-        "    const i_reflect_enum_value *values;\n"
-        "} i_reflect_enum;\n\n"
-        "#if defined(__clang__) || defined(__GNUC__)\n"
-        "#define I_REFLECT_INLINE static inline __attribute__((unused))\n"
-        "#else\n"
-        "#define I_REFLECT_INLINE static inline\n"
-        "#endif\n\n"
-        "I_REFLECT_INLINE const char *i_reflect_type_kind_name(i_reflect_type_kind kind) {\n"
-        "    switch (kind) {\n"
-        "        case I_Reflect_Type_Name: return \"name\";\n"
-        "        case I_Reflect_Type_Ptr: return \"ptr\";\n"
-        "        case I_Reflect_Type_Generic: return \"generic\";\n"
-        "        case I_Reflect_Type_Array: return \"array\";\n"
-        "        case I_Reflect_Type_Proc: return \"proc\";\n"
-        "    }\n"
-        "    return \"unknown\";\n"
-        "}\n\n"
-        "I_REFLECT_INLINE int i_reflect_field_is_pointer(const i_reflect_field *field) {\n"
-        "    return field && field->pointer_depth > 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE int i_reflect_field_is_array(const i_reflect_field *field) {\n"
-        "    return field && (field->kind == I_Reflect_Type_Array || field->array_count > 0);\n"
-        "}\n\n"
-        "I_REFLECT_INLINE int i_reflect_field_is_generic(const i_reflect_field *field) {\n"
-        "    return field && (field->kind == I_Reflect_Type_Generic || (field->generic_arg_type && field->generic_arg_type[0]));\n"
-        "}\n\n"
-        "I_REFLECT_INLINE u64 i_reflect_count_fields_with_kind(const i_reflect_type *type, i_reflect_type_kind kind) {\n"
-        "    if (!type) return 0;\n"
-        "    u64 count = 0;\n"
-        "    for (u64 i = 0; i < type->field_count; i++) {\n"
-        "        if (type->fields[i].kind == kind) count++;\n"
-        "    }\n"
-        "    return count;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const i_reflect_field *i_reflect_find_field_with_kind(const i_reflect_type *type, i_reflect_type_kind kind) {\n"
-        "    if (!type) return 0;\n"
-        "    for (u64 i = 0; i < type->field_count; i++) {\n"
-        "        if (type->fields[i].kind == kind) return &type->fields[i];\n"
-        "    }\n"
-        "    return 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const i_reflect_field *i_reflect_next_field_with_kind(const i_reflect_type *type, i_reflect_type_kind kind, const i_reflect_field *after) {\n"
-        "    if (!type) return 0;\n"
-        "    u64 start = 0;\n"
-        "    if (after) {\n"
-        "        for (u64 i = 0; i < type->field_count; i++) {\n"
-        "            if (&type->fields[i] == after) { start = i + 1; break; }\n"
-        "        }\n"
-        "    }\n"
-        "    for (u64 i = start; i < type->field_count; i++) {\n"
-        "        if (type->fields[i].kind == kind) return &type->fields[i];\n"
-        "    }\n"
-        "    return 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE int i_reflect_cstr_equal(const char *a, const char *b) {\n"
-        "    if (!a || !b) return 0;\n"
-        "    while (*a && *b && *a == *b) { a++; b++; }\n"
-        "    return *a == 0 && *b == 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const i_reflect_field *i_reflect_find_field(const i_reflect_type *type, const char *name) {\n"
-        "    if (!type || !name) return 0;\n"
-        "    for (u64 i = 0; i < type->field_count; i++) {\n"
-        "        if (i_reflect_cstr_equal(type->fields[i].name, name)) return &type->fields[i];\n"
-        "    }\n"
-        "    return 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE u64 i_reflect_field_index(const i_reflect_type *type, const i_reflect_field *field, u64 fallback) {\n"
-        "    if (!type || !field) return fallback;\n"
-        "    for (u64 i = 0; i < type->field_count; i++) {\n"
-        "        if (&type->fields[i] == field) return i;\n"
-        "    }\n"
-        "    return fallback;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE u64 i_reflect_find_field_index(const i_reflect_type *type, const char *name, u64 fallback) {\n"
-        "    const i_reflect_field *field = i_reflect_find_field(type, name);\n"
-        "    return i_reflect_field_index(type, field, fallback);\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const i_reflect_field *i_reflect_field_at(const i_reflect_type *type, u64 index) {\n"
-        "    if (!type || index >= type->field_count) return 0;\n"
-        "    return &type->fields[index];\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const i_reflect_field *i_reflect_find_field_by_offset(const i_reflect_type *type, u64 offset) {\n"
-        "    if (!type) return 0;\n"
-        "    for (u64 i = 0; i < type->field_count; i++) {\n"
-        "        if (type->fields[i].offset == offset) return &type->fields[i];\n"
-        "    }\n"
-        "    return 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE u64 i_reflect_field_end_offset(const i_reflect_field *field) {\n"
-        "    if (!field) return 0;\n"
-        "    return field->offset + field->size;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const i_reflect_field *i_reflect_find_field_containing_offset(const i_reflect_type *type, u64 offset) {\n"
-        "    if (!type) return 0;\n"
-        "    for (u64 i = 0; i < type->field_count; i++) {\n"
-        "        u64 start = type->fields[i].offset;\n"
-        "        u64 end = i_reflect_field_end_offset(&type->fields[i]);\n"
-        "        if (start <= offset && offset < end) return &type->fields[i];\n"
-        "    }\n"
-        "    return 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE void *i_reflect_field_ptr(void *base, const i_reflect_field *field) {\n"
-        "    if (!base || !field) return 0;\n"
-        "    return (void *)((unsigned char *)base + field->offset);\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const void *i_reflect_field_const_ptr(const void *base, const i_reflect_field *field) {\n"
-        "    if (!base || !field) return 0;\n"
-        "    return (const void *)((const unsigned char *)base + field->offset);\n"
-        "}\n\n"
-        "I_REFLECT_INLINE int i_reflect_field_copy(void *dst_base, const void *src_base, const i_reflect_field *field) {\n"
-        "    void *dst = i_reflect_field_ptr(dst_base, field);\n"
-        "    const void *src = i_reflect_field_const_ptr(src_base, field);\n"
-        "    if (!dst || !src) return 0;\n"
-        "    memmove(dst, src, (size_t)field->size);\n"
-        "    return 1;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE int i_reflect_field_zero(void *base, const i_reflect_field *field) {\n"
-        "    void *dst = i_reflect_field_ptr(base, field);\n"
-        "    if (!dst) return 0;\n"
-        "    memset(dst, 0, (size_t)field->size);\n"
-        "    return 1;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE int i_reflect_field_copy_by_name(void *dst_base, const void *src_base, const i_reflect_type *type, const char *name) {\n"
-        "    return i_reflect_field_copy(dst_base, src_base, i_reflect_find_field(type, name));\n"
-        "}\n\n"
-        "I_REFLECT_INLINE int i_reflect_field_zero_by_name(void *base, const i_reflect_type *type, const char *name) {\n"
-        "    return i_reflect_field_zero(base, i_reflect_find_field(type, name));\n"
-        "}\n\n"
-        "I_REFLECT_INLINE int i_reflect_attr_is_sep(char c) {\n"
-        "    return c == 0 || c == ',' || c == ' ' || c == '\\t' || c == '\\r' || c == '\\n';\n"
-        "}\n\n"
-        "I_REFLECT_INLINE int i_reflect_field_has_attr(const i_reflect_field *field, const char *attr) {\n"
-        "    if (!field || !field->attrs || !attr || !attr[0]) return 0;\n"
-        "    const char *scan = field->attrs;\n"
-        "    while (*scan) {\n"
-        "        while (*scan == ',' || *scan == ' ' || *scan == '\\t' || *scan == '\\r' || *scan == '\\n') scan++;\n"
-        "        const char *token = scan;\n"
-        "        while (*scan && !i_reflect_attr_is_sep(*scan)) scan++;\n"
-        "        const char *a = token;\n"
-        "        const char *b = attr;\n"
-        "        while (a < scan && *b && *a == *b) { a++; b++; }\n"
-        "        if (a == scan && *b == 0) return 1;\n"
-        "    }\n"
-        "    return 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE u64 i_reflect_count_fields_with_attr(const i_reflect_type *type, const char *attr) {\n"
-        "    if (!type || !attr || !attr[0]) return 0;\n"
-        "    u64 count = 0;\n"
-        "    for (u64 i = 0; i < type->field_count; i++) {\n"
-        "        if (i_reflect_field_has_attr(&type->fields[i], attr)) count++;\n"
-        "    }\n"
-        "    return count;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const i_reflect_field *i_reflect_find_field_with_attr(const i_reflect_type *type, const char *attr) {\n"
-        "    if (!type || !attr || !attr[0]) return 0;\n"
-        "    for (u64 i = 0; i < type->field_count; i++) {\n"
-        "        if (i_reflect_field_has_attr(&type->fields[i], attr)) return &type->fields[i];\n"
-        "    }\n"
-        "    return 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const i_reflect_field *i_reflect_next_field_with_attr(const i_reflect_type *type, const char *attr, const i_reflect_field *after) {\n"
-        "    if (!type || !attr || !attr[0]) return 0;\n"
-        "    u64 start = 0;\n"
-        "    if (after) {\n"
-        "        for (u64 i = 0; i < type->field_count; i++) {\n"
-        "            if (&type->fields[i] == after) { start = i + 1; break; }\n"
-        "        }\n"
-        "    }\n"
-        "    for (u64 i = start; i < type->field_count; i++) {\n"
-        "        if (i_reflect_field_has_attr(&type->fields[i], attr)) return &type->fields[i];\n"
-        "    }\n"
-        "    return 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const i_reflect_enum_value *i_reflect_find_enum_value_by_name(const i_reflect_enum *type, const char *name) {\n"
-        "    if (!type || !name) return 0;\n"
-        "    for (u64 i = 0; i < type->value_count; i++) {\n"
-        "        if (i_reflect_cstr_equal(type->values[i].name, name)) return &type->values[i];\n"
-        "    }\n"
-        "    return 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const i_reflect_enum_value *i_reflect_find_enum_value_by_value(const i_reflect_enum *type, i32 value) {\n"
-        "    if (!type) return 0;\n"
-        "    for (u64 i = 0; i < type->value_count; i++) {\n"
-        "        if (type->values[i].value == value) return &type->values[i];\n"
-        "    }\n"
-        "    return 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const i_reflect_enum_value *i_reflect_enum_value_at(const i_reflect_enum *type, u64 index) {\n"
-        "    if (!type || index >= type->value_count) return 0;\n"
-        "    return &type->values[index];\n"
-        "}\n\n"
-        "I_REFLECT_INLINE const char *i_reflect_enum_name_from_value(const i_reflect_enum *type, i32 value) {\n"
-        "    const i_reflect_enum_value *found = i_reflect_find_enum_value_by_value(type, value);\n"
-        "    return found ? found->name : 0;\n"
-        "}\n\n"
-        "I_REFLECT_INLINE i32 i_reflect_enum_value_from_name(const i_reflect_enum *type, const char *name, i32 fallback) {\n"
-        "    const i_reflect_enum_value *found = i_reflect_find_enum_value_by_name(type, name);\n"
-        "    return found ? found->value : fallback;\n"
-        "}\n\n"
-        "#undef I_REFLECT_INLINE\n\n"
-        "#endif\n\n"
-    );
-}
-
 static const char *reflect_type_kind_name(TypeExpr *type) {
     if (!type) return "I_Reflect_Type_Name";
     switch (type->kind) {
@@ -10602,7 +10537,7 @@ static void emit_generated_file_banner(memops_arena *arena, string8 *out, const 
 
 static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
     emit_generated_file_banner(arena, out, "source");
-    emit_cstr(arena, out, "#include <core.h>\n#include <stddef.h>\n\n");
+    emit_cstr(arena, out, "#include <core.h>\n#include <reflect.h>\n#include <stddef.h>\n\n");
     for (i32 i = 0; i < prog->preprocessor_lines.length; i++) {
         emit_string8(arena, out, prog->preprocessor_lines.data[i]);
         emit_cstr(arena, out, "\n");
@@ -10631,9 +10566,6 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
     if (prog->c_imports.length > 0) {
         emit_cstr(arena, out, "\n");
     }
-    emit_generated_line_directive(arena, out);
-    emit_reflection_runtime_types(arena, out);
-
     // Forward declarations for all structs (non-generic + monomorphized)
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
@@ -10770,7 +10702,7 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
 
 static void emit_header_program(memops_arena *arena, Program *prog, string8 *out) {
     emit_generated_file_banner(arena, out, "header");
-    emit_cstr(arena, out, "#pragma once\n#include <core.h>\n#include <stddef.h>\n\n");
+    emit_cstr(arena, out, "#pragma once\n#include <core.h>\n#include <reflect.h>\n#include <stddef.h>\n\n");
     for (i32 i = 0; i < prog->preprocessor_lines.length; i++) {
         emit_string8(arena, out, prog->preprocessor_lines.data[i]);
         emit_cstr(arena, out, "\n");
@@ -10793,9 +10725,6 @@ static void emit_header_program(memops_arena *arena, Program *prog, string8 *out
         emit_cstr(arena, out, "\n");
     }
     if (prog->c_imports.length > 0) emit_cstr(arena, out, "\n");
-    emit_generated_line_directive(arena, out);
-    emit_reflection_runtime_types(arena, out);
-
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
         if (!decl->is_generic && !decl->is_external) emit_struct_fwd_decl(arena, out, decl->name, decl->is_union);
@@ -11910,6 +11839,7 @@ i32 main(i32 argc, char *argv[]) {
     profile_mark("expand imports", &profile_last, profile_start);
     profile_import_summary();
     Vec_string8 symbol_known_types = semantic_collect_known_type_names(&prog, &arena);
+    semantic_collect_program_external_type_names(&prog, &symbol_known_types, &arena);
     semantic_resolve_proc_angle_types(&prog, &symbol_known_types, &arena);
     profile_mark("resolve symbols", &profile_last, profile_start);
     if (symbols_json) {

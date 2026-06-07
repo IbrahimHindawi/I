@@ -243,6 +243,7 @@ import "{module.as_posix()}"
 main:proc()->i32 = {{
     payload:Payload = {{ .value = 1, . }};
     k:Kind = K;
+    dot_kind:Kind = Kind.;
     value:i32 = 1;
     score:i32 = v;
     payload_ptr:*Payload = p;
@@ -591,6 +592,7 @@ main:proc()->i32 = {{
         "\n"
         "main:proc()->i32 = {\n"
         "    Mode_Ready;\n"
+        "    Mode.Ready;\n"
         "    return 0;\n"
         "}\n"
     )
@@ -626,6 +628,8 @@ main:proc()->i32 = {{
     enum_usage_member = enum_usage_workspace.find_enum_member_usage("Mode_Ready")
     enum_usage_line = next(i for i, line in enumerate(enum_usage_lines) if "Mode_Ready" in line)
     enum_usage_col = enum_usage_lines[enum_usage_line].index("Mode_Ready")
+    enum_dot_usage_line = next(i for i, line in enumerate(enum_usage_lines) if "Mode.Ready" in line)
+    enum_dot_usage_col = enum_usage_lines[enum_dot_usage_line].index("Ready")
     enum_usage_tokens = decoded_semantic_tokens(lsp, lsp.semantic_tokens_for_doc(enum_usage_workspace, enum_usage_doc))
     enum_usage_server = lsp.LspServer()
     enum_usage_server.workspace = enum_usage_workspace
@@ -647,6 +651,7 @@ main:proc()->i32 = {{
         or enum_usage_member.name != "Wrong_Ready"
         or enum_usage_resolved != enum_usage_member
         or (enum_usage_line, enum_usage_col, len("Mode_Ready"), "enumMember") not in enum_usage_tokens
+        or (enum_dot_usage_line, enum_dot_usage_col, len("Ready"), "enumMember") not in enum_usage_tokens
         or len(enum_usage_refs) != 2
         or not any(ref.get("range", {}).get("start", {}).get("line") == 1 for ref in enum_usage_refs)
         or not any(ref.get("range", {}).get("start", {}).get("line") == enum_usage_line for ref in enum_usage_refs)
@@ -1871,6 +1876,40 @@ main:proc()->i32 = {
     ):
         print("lsp: expected textDocument/completion in enum assignment to return enum items")
         print(enum_completion_response)
+        return 1
+
+    enum_dot_line = next(i for i, line in enumerate(completion_context_lines) if "dot_kind:Kind" in line)
+    enum_dot_col = completion_context_lines[enum_dot_line].index("Kind.") + len("Kind.")
+    enum_dot_items = lsp.enum_dot_completions_at(workspace, completion_context_doc, enum_dot_line, enum_dot_col)
+    if (
+        not any(item.get("label") == "Ready" and item.get("insertText") == "Ready" for item in enum_dot_items)
+        or any(item.get("label") == "Kind_Ready" for item in enum_dot_items)
+    ):
+        print("lsp: expected enum dot completion to insert bare enum member names")
+        print(enum_dot_items)
+        return 1
+    enum_dot_completion_server = CaptureServer()
+    enum_dot_completion_server.workspace = workspace
+    enum_dot_completion_server.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 27,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": completion_context_doc.uri},
+                "position": {"line": enum_dot_line, "character": enum_dot_col},
+            },
+        }
+    )
+    enum_dot_completion_response = enum_dot_completion_server.sent[-1] if enum_dot_completion_server.sent else {}
+    enum_dot_completion_items = enum_dot_completion_response.get("result", {}).get("items", [])
+    if (
+        enum_dot_completion_response.get("id") != 27
+        or not any(item.get("label") == "Ready" and item.get("insertText") == "Ready" for item in enum_dot_completion_items)
+        or any(item.get("label") == "Kind_Ready" for item in enum_dot_completion_items)
+    ):
+        print("lsp: expected textDocument/completion after Enum. to return bare enum members")
+        print(enum_dot_completion_response)
         return 1
 
     expected_value_line = next(i for i, line in enumerate(completion_context_lines) if "score:i32" in line)

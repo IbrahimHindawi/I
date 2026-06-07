@@ -136,6 +136,34 @@ The current Visual Studio debugger path is good enough:
 - [ ] Add focused Natvis only where the default debugger view is not enough. Useful candidates are `string8`, arenas, generated arrays/vectors, math types, handles, and reflection metadata.
 - [ ] Keep generated C/PDB names stable and I-like where practical, but do not spend time making generated C pretty unless it directly improves debugging.
 
+## Generated C Hygiene And Type Operations
+
+The current type-operation model works and should stay simple:
+
+- [x] Delayed generic body checking allows generic algorithms to call `add<T>`, `eq<T>`, `print<T>`, and similar operations, then type-check those calls at concrete instantiation time.
+- [x] Concrete proc specializations like `add: proc<i32>` and `add: proc<payload>` lower to stable C names like `add_i32` and `add_payload`.
+- [x] Keep type operations concept-free for now. If `add<T>`, `eq<T>`, `hash<T>`, or `print<T>` is missing, report the missing proc directly.
+- [N] Add standard primitive type-operation families: `add<T>`, `sub<T>`, `mul<T>`, `div<T>`, `eq<T>`, `less<T>`, `hash<T>`, `print<T>`, and later `clone<T>` / `destroy<T>` if runtime ownership needs them.
+- [x] Add regression tests for generic algorithms that call type operations, missing type-operation diagnostics, and transitive type-operation dependency closure.
+- [ ] Teach the LSP to understand type-operation calls and concrete specializations for hover, goto definition, completion, and diagnostics.
+- [N] Revisit concepts only if missing-operation diagnostics become too noisy. Concepts should group and document required type operations, not become a second dispatch system.
+- [x] Fix direct formatted printing of generic call results: `printfmt("{}\n", add<i32>(1, 1));` should infer the placeholder argument type from the resolved `add<i32>` return type without requiring a temporary local.
+- [x] Fix expected-type propagation for designated literals in call arguments: `add<payload>({.x = 2}, {.x = 2})` should infer each literal as `payload` from the concrete proc parameter type and lower to valid C compound literals.
+- [x] Add the full playground type-operation sample as a regression test: std imports, `payload`, `add<i32>`, `add<payload>`, `sum<T>`, direct `printfmt(add<i32>(...))`, direct designated-literal call args, `Array<payload>reserve`, and accumulation.
+
+Generated C from the playground proves the model works, but the output needs cleanup:
+
+- [x] Move the large reflection runtime helper block out of every generated `.c` / `.h` and into a stable runtime header such as `std/reflect.h` or `core.h`.
+- [x] Make that reflection runtime header own its required C includes (`stddef.h`, `string.h`, etc.) instead of spraying helper dependencies into generated files.
+- [x] Avoid emitting reflection helper code when the generated unit only needs reflection metadata, or keep it as a single include.
+- [ ] Decide whether every imported std/internal struct should be reflected by default. The current output reflects `memops_arena`, `memops_arena_temp`, and monomorphs like `Array_payload`; that is useful, but it can add noise.
+- [ ] Keep the generated ordering stable and readable: includes, macros, forward declarations, struct definitions, reflection metadata, prototypes, normal definitions, monomorph definitions.
+- [ ] Reduce `#line` spam. Keep enough `#line` directives for source debugging and useful compiler errors, but avoid emitting one before nearly every field and statement if it is not needed.
+- [ ] Keep generated C valid and debuggable before making it pretty. Pretty generated C is lower priority than stable source mapping and correct compilation.
+- [ ] Decide whether generated C should keep using `structdecl` / `structdef` macros or expand to plain C typedef/struct declarations.
+- [ ] Add a clear diagnostic or documented rule for `#` in I source. If `#` means C preprocessor passthrough, then `# todo...` is not a comment and should fail clearly or be replaced by a real comment form.
+- [x] Add generated-C snapshot tests for reflection metadata, monomorph ordering, type-operation calls, and `#line` placement.
+
 ## 1. Compiler Diagnostics First
 
 Make every compiler error more clang-like:
