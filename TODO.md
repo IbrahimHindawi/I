@@ -1,5 +1,50 @@
 # I TODO
 
+## Recently Landed: Recoverable Diagnostics And The Missing C Surface
+
+- [x] Diagnostics are collected instead of fatal. `diag_record_error()` replaced the
+      `exit(1)` at every source-level error site, so one bad line no longer hides the
+      rest of the file. Reporting stops at 25 errors.
+- [x] Parser error recovery: statements resync to the next `;`/`}` and declarations
+      resync to the next column-1 declaration, so a single parse error stops
+      inventing follow-on errors in code that is fine.
+- [x] Every `{ ... }` body loop terminates at end of file, so an unclosed brace
+      reports once instead of spinning.
+- [x] JSON diagnostics are a single well-formed array across any number of
+      diagnostics, closed on every exit path via `atexit`.
+- [x] `//` and `/* */` are the comment forms. `#` is C preprocessor passthrough, and a
+      `#` line that is not a recognized directive is a lexer error instead of silently
+      becoming a directive in the generated C.
+- [x] Char literals with escapes (`'a'`, `'\n'`, `'\x41'`, octal), with diagnostics for
+      empty, unterminated, multi-character, and unknown-escape forms.
+- [x] `~`, and `shl=` / `shr=` compound assignment.
+- [x] Enum values accept constant expressions, including negative values and sibling
+      references (`B = A` emits `Color_A`, which was previously emitted unmangled).
+- [x] `static` internal linkage for procs, globals, and locals. Static symbols are
+      kept out of the generated header.
+- [x] `goto` with `name: label;` declarations, validated proc-wide so a goto can jump
+      forward, with duplicate-label and undeclared-label diagnostics.
+- [x] Struct bitfields (`flags: u32 : 4;`). Reflection reports zero offset/size/align
+      for them rather than emitting invalid `offsetof`.
+- [x] Anonymous struct/union members. Field access, duplicate detection, and
+      reflection all flatten them the way C does.
+- [x] `#line` is emitted only where the implied position would drift, cutting
+      generated C by about a quarter. `--emit-all-line-directives` restores full
+      output, and a test asserts both map every line to the same source position.
+- [x] New `tests/i-torture/execute` differential suite links and runs each fixture and
+      compares stdout, so codegen that compiles but computes the wrong answer fails.
+- [x] Error-recovery regression tests cover multi-error reporting, parse resync, and
+      unclosed braces in both terminal and JSON modes.
+
+Follow-ups worth doing next:
+
+- [ ] Recover inside expressions with a poison type, so a bad sub-expression reports
+      once rather than suppressing the rest of the enclosing statement.
+- [ ] Validate that passthrough `#if`/`#endif` directives balance, so an unterminated
+      conditional is an I diagnostic instead of a generated-C error.
+- [ ] Teach the LSP that a check can now return many diagnostics per file, and drop
+      any single-diagnostic assumptions left in the Python layer.
+
 ## Current Target: Clangd-Style Ergonomics
 
 The language is now viable enough to compile and run Gini. The next phase should focus on making I sharp to write, diagnose, and edit, not on expanding the language surface or making generated C pretty.

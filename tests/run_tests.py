@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,28 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build"
 TEST_DIR = BUILD / "i_tests"
 I_EXE = BUILD / "I.exe"
+
+_LINE_DIRECTIVE = re.compile(r'^\s*#line\s+(\d+)\s+"((?:[^"\\]|\\.)*)"\s*$')
+
+
+def c_line_mapping(c_text: str) -> list[tuple[str, str, int]]:
+    """(content, source file, source line) for each generated line, per C #line rules.
+
+    #line renumbers everything after it, so an elided directive is only correct
+    when the implied position already matches. This reconstructs what the C
+    compiler and debugger will actually believe about every emitted line.
+    """
+    cur_file, cur_line = "<none>", 0
+    mapped: list[tuple[str, str, int]] = []
+    for raw in c_text.split("\n"):
+        m = _LINE_DIRECTIVE.match(raw)
+        if m:
+            cur_line, cur_file = int(m.group(1)), m.group(2).replace("\\\\", "\\")
+            continue
+        if raw.strip():
+            mapped.append((raw.strip(), cur_file, cur_line))
+        cur_line += 1
+    return mapped
 
 
 @dataclass(frozen=True)
@@ -406,7 +429,7 @@ sum: proc<T>(items: *T, count: u64) -> T = {
 main: proc(argc: i32, argv: **char)-> i32 = {
     arena: memops_arena = {};
     memops_arena_initialize(arena.&);
-    # todo: this line is intentionally an I comment, not C preprocessor output.
+    // todo: this line is intentionally an I comment, not C preprocessor output.
     printfmt("{}\n", add<i32>(1, 1));
     x: i32 = add<i32>(1, 1);
     printfmt("{}\n", x);
@@ -3011,10 +3034,14 @@ main:proc()->i32 = {
         print("generated_line_map: expected source banner with originating .i path")
         print(f"missing: {expected_source_banner.strip()}")
         return 1
-    expected_line = f'#line {return_line} "{line_map_path}"'
-    if expected_line not in line_map_generated:
-        print("generated_line_map: expected statement #line directive")
-        print(f"missing: {expected_line}")
+    # #line directives are only emitted where the implied position would drift, so
+    # assert the statement maps back to the right .i line instead of assuming a
+    # directive sits immediately above it.
+    mapped = c_line_mapping(line_map_generated)
+    return_sites = [(f, l) for text, f, l in mapped if text == "return value;"]
+    if (str(line_map_i), return_line) not in return_sites:
+        print("generated_line_map: 'return value;' does not map back to its .i line")
+        print(f"expected: ({line_map_i}, {return_line}), got: {return_sites}")
         return 1
     generated_reflect_include = "#include <reflect.h>"
     if generated_reflect_include not in line_map_generated:
@@ -3059,10 +3086,10 @@ main:proc()->i32 = {
         print(f"missing: {expected_proc_line}")
         return 1
     mono_return_line = line_map_source.splitlines().index("    return box.value;") + 1
-    expected_mono_return_line = f'#line {mono_return_line} "{line_map_path}"'
-    if expected_mono_return_line not in line_map_generated:
-        print("generated_line_map: expected monomorphized proc body #line directive")
-        print(f"missing: {expected_mono_return_line}")
+    mono_sites = [(f, l) for text, f, l in mapped if text == "return box.value;"]
+    if (str(line_map_i), mono_return_line) not in mono_sites:
+        print("generated_line_map: monomorphized body does not map back to its .i line")
+        print(f"expected: ({line_map_i}, {mono_return_line}), got: {mono_sites}")
         return 1
     if (
         "I monomorph: proc Box<T>get -> Box_i32_get;" not in line_map_generated
@@ -7167,6 +7194,108 @@ typedef struct IB_FilterPayload {
         print("ok ibind_bindgen_filter")
         print("ok ibind_bindgen")
 
+    # Error recovery: one bad construct must not hide the rest of the file, and must
+    # not invent follow-on errors in code that is actually fine.
+    recovery_cases = (
+        (
+            "recovery_multi_semantic",
+            r'''
+a:proc()->i32 = { return undefined_one; }
+b:proc()->i32 = { return undefined_two; }
+c:proc()->i32 = { return undefined_three; }
+''',
+            ("undefined_one", "undefined_two", "undefined_three"),
+            (),
+        ),
+        (
+            "recovery_parse_resync",
+            r'''
+a:proc()->i32 = { x:i32 = ; return 0; }
+b:proc()->i32 = { return 1 }
+c:proc()->i32 = { return 2; }
+''',
+            ("expected expression", "expected ';' after return"),
+            # 'c' is valid, so nothing may be reported against it
+            ("perr.i:3", "line 3"),
+        ),
+        (
+            "recovery_unclosed_brace",
+            "a:proc()->i32 = {\n    return 0;\n",
+            ("unclosed '{'",),
+            (),
+        ),
+    )
+    for name, source, expected, forbidden in recovery_cases:
+        rec_i = TEST_DIR / f"{name}.i"
+        rec_i.write_text(source.strip() + "\n", encoding="utf-8", newline="\n")
+        rec = run([str(I_EXE), "check", str(rec_i)])
+        if rec.returncode == 0:
+            print(f"{name}: expected a non-zero exit")
+            print(rec.stdout)
+            return 1
+        for needle in expected:
+            if needle not in rec.stdout:
+                print(f"{name}: missing diagnostic {needle!r}")
+                print(rec.stdout)
+                return 1
+        for needle in forbidden:
+            if needle in rec.stdout:
+                print(f"{name}: unexpected cascade {needle!r}")
+                print(rec.stdout)
+                return 1
+        # the JSON form must stay a single well-formed array no matter how many
+        # diagnostics it carries
+        rec_json = run([str(I_EXE), "check", str(rec_i), "--diagnostics=json"])
+        try:
+            payload = json.loads(rec_json.stdout)
+        except json.JSONDecodeError as exc:
+            print(f"{name}: malformed JSON diagnostics: {exc}")
+            print(rec_json.stdout)
+            return 1
+        if not isinstance(payload, list) or not payload:
+            print(f"{name}: expected a non-empty JSON diagnostic array")
+            print(rec_json.stdout)
+            return 1
+        print(f"ok {name}")
+
+    # 'c' is valid code in the resync case, so it must produce no diagnostics at all
+    resync = run([str(I_EXE), "check", str(TEST_DIR / "recovery_parse_resync.i"), "--diagnostics=json"])
+    resync_lines = {d["line"] for d in json.loads(resync.stdout)}
+    if 3 in resync_lines:
+        print(f"recovery_parse_resync: valid line 3 produced a diagnostic: {sorted(resync_lines)}")
+        print(resync.stdout)
+        return 1
+    if resync_lines != {1, 2}:
+        print(f"recovery_parse_resync: expected exactly one diagnostic per bad line, got {sorted(resync_lines)}")
+        print(resync.stdout)
+        return 1
+    print("ok recovery_parse_resync_exact")
+
+    # Reduced #line output must map every generated line to the same source position
+    # that fully-directive output would.
+    map_sources = [ROOT / "src" / "main.i"] + sorted((ROOT / "tests" / "i-torture" / "execute").glob("*.i"))
+    for src_path in map_sources:
+        full_c = TEST_DIR / f"map_full_{src_path.stem}.c"
+        red_c = TEST_DIR / f"map_red_{src_path.stem}.c"
+        full = run([str(I_EXE), "compile", str(src_path), "-o", str(full_c), "--no-header",
+                    "--emit-all-line-directives"])
+        red = run([str(I_EXE), "compile", str(src_path), "-o", str(red_c), "--no-header"])
+        if full.returncode != 0 or red.returncode != 0:
+            print(f"line_map_equivalence: failed to compile {src_path.name}")
+            print(full.stdout, red.stdout)
+            return 1
+        full_map = c_line_mapping(full_c.read_text(encoding="utf-8"))
+        red_map = c_line_mapping(red_c.read_text(encoding="utf-8"))
+        if full_map != red_map:
+            print(f"line_map_equivalence: {src_path.name} maps differently without every #line")
+            for a, b in zip(full_map, red_map):
+                if a != b:
+                    print(f"  full   ={a}")
+                    print(f"  reduced={b}")
+                    break
+            return 1
+    print(f"ok line_map_equivalence ({len(map_sources)} sources)")
+
     lsp = run([sys.executable, "tests/run_lsp_tests.py"])
     if lsp.returncode != 0:
         print(lsp.stdout)
@@ -7178,6 +7307,12 @@ typedef struct IB_FilterPayload {
         print(i_torture.stdout)
         return i_torture.returncode
     print(i_torture.stdout.rstrip())
+
+    i_execute = run([sys.executable, "tests/run_i_execute.py"])
+    if i_execute.returncode != 0:
+        print(i_execute.stdout)
+        return i_execute.returncode
+    print(i_execute.stdout.rstrip())
 
     torture = run([sys.executable, "tests/run_c_torture.py"])
     if torture.returncode != 0:

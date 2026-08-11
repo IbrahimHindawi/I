@@ -15,7 +15,7 @@ main: proc(argc: i32, argv: **char)-> i32 = {
     num: i32 = 0;
     printfmt("num = {}\n", num);
 
-    # array: *[]i32 = {};
+    // array: *[]i32 = {};
 
     arena: memops_arena = {};
     memops_arena_initialize(&arena);

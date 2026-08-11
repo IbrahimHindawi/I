@@ -72,6 +72,35 @@ static const char *g_stdin_override_path = null;
 static string8 g_stdin_override_source = {0};
 static bool g_diag_json = false;
 static bool g_profile = false;
+
+/* Diagnostics are collected rather than fatal, so one bad line does not hide the
+   rest of the file. Reporting stops once the list stops being useful, because
+   past that point the errors are usually cascades from the first few. */
+#define I_MAX_REPORTED_ERRORS 25
+static i32 g_error_count = 0;
+static bool g_json_array_open = false;
+
+static void diag_json_finish(void) {
+    if (g_json_array_open) {
+        printf("]\n");
+        g_json_array_open = false;
+    }
+}
+
+static void diag_exit_with_errors(void) {
+    diag_json_finish();
+    exit(1);
+}
+
+static void diag_record_error(void) {
+    g_error_count++;
+    if (g_error_count >= I_MAX_REPORTED_ERRORS) {
+        if (!g_diag_json) {
+            printf("i: too many errors; stopping after %d\n", g_error_count);
+        }
+        diag_exit_with_errors();
+    }
+}
 static const char *g_import_dirs[64] = {0};
 static i32 g_import_dir_count = 0;
 
@@ -191,7 +220,8 @@ static void diag_json_open_range(
     if (end_col <= 0) {
         end_col = col > 0 ? col + 1 : col;
     }
-    printf("[{\"severity\":\"error\",\"file\":");
+    printf(g_json_array_open ? ",{\"severity\":\"error\",\"file\":" : "[{\"severity\":\"error\",\"file\":");
+    g_json_array_open = true;
     diag_json_print_cstr(path ? path : g_source_path);
     printf(",\"line\":%d,\"column\":%d,\"end_line\":%d,\"end_column\":%d,\"category\":", line, col, end_line, end_col);
     diag_json_print_cstr(category ? category : "error");
@@ -241,7 +271,7 @@ static void diag_json_note_import_chain(bool *has_note) {
 }
 
 static void diag_json_close(void) {
-    printf("]}]\n");
+    printf("]}"); // closes the notes array and the diagnostic object
 }
 
 static void diag_json_error(const char *path, i32 line, i32 col, const char *category, const char *message) {
@@ -316,6 +346,7 @@ typedef enum TokenKind {
     Token_Identifier,
     Token_Number,
     Token_String,
+    Token_Char,
     Token_Colon,
     Token_Semicolon,
     Token_Equal,
@@ -329,6 +360,8 @@ typedef enum TokenKind {
     Token_CaretEqual,
     Token_PipeEqual,
     Token_PercentEqual,
+    Token_ShlEqual,
+    Token_ShrEqual,
     Token_LessEqual,
     Token_GreaterEqual,
     Token_LBrace,
@@ -349,6 +382,7 @@ typedef enum TokenKind {
     Token_At,
     Token_Question,
     Token_Bang,
+    Token_Tilde,
     Token_Plus,
     Token_Minus,
     Token_Star,
@@ -376,6 +410,8 @@ typedef enum TokenKind {
     Token_Keyword_Or,
     Token_Keyword_Shl,
     Token_Keyword_Shr,
+    Token_Keyword_Goto,
+    Token_Keyword_Static,
 } TokenKind;
 
 typedef struct Token Token;
@@ -392,6 +428,7 @@ static const char *token_kind_name(TokenKind kind) {
         case Token_Identifier: return "identifier";
         case Token_Number: return "number";
         case Token_String: return "string";
+        case Token_Char: return "character literal";
         case Token_Colon: return "':'";
         case Token_Semicolon: return "';'";
         case Token_Equal: return "'='";
@@ -405,6 +442,8 @@ static const char *token_kind_name(TokenKind kind) {
         case Token_CaretEqual: return "'^='";
         case Token_PipeEqual: return "'|='";
         case Token_PercentEqual: return "'%='";
+        case Token_ShlEqual: return "'shl='";
+        case Token_ShrEqual: return "'shr='";
         case Token_LessEqual: return "'<='";
         case Token_GreaterEqual: return "'>='";
         case Token_LBrace: return "'{'";
@@ -425,6 +464,7 @@ static const char *token_kind_name(TokenKind kind) {
         case Token_At: return "'@'";
         case Token_Question: return "'?'";
         case Token_Bang: return "'!'";
+        case Token_Tilde: return "'~'";
         case Token_Plus: return "'+'";
         case Token_Minus: return "'-'";
         case Token_Star: return "'*'";
@@ -452,6 +492,8 @@ static const char *token_kind_name(TokenKind kind) {
         case Token_Keyword_Or: return "'or'";
         case Token_Keyword_Shl: return "'shl'";
         case Token_Keyword_Shr: return "'shr'";
+        case Token_Keyword_Goto: return "'goto'";
+        case Token_Keyword_Static: return "'static'";
     }
     return "unknown";
 }
@@ -497,6 +539,7 @@ typedef enum ExprKind {
     Expr_Name = 0,
     Expr_Number,
     Expr_String,
+    Expr_Char,
     Expr_Call,
     Expr_Addr,
     Expr_Binary,
@@ -551,6 +594,8 @@ typedef enum StmtKind {
     Stmt_Break,
     Stmt_Continue,
     Stmt_Switch,
+    Stmt_Goto,
+    Stmt_Label,
 } StmtKind;
 
 struct Stmt {
@@ -560,6 +605,7 @@ struct Stmt {
     const char *source_path;
     const char *import_chain;
     bool is_external;
+    bool is_static;
     Expr *lhs;
     Expr *expr;
     TokenKind assign_op;
@@ -591,6 +637,8 @@ struct Field {
     string8 name;
     TypeExpr *type;
     string8 attrs;
+    string8 bit_width;  // set for bitfields: 'flags: u32 : 4;'
+    StructDecl *anon;   // set for anonymous struct/union members; name is empty
     i32 line;
     i32 col;
 };
@@ -618,6 +666,7 @@ struct StructDecl {
 struct EnumItem {
     string8 name;
     string8 value;
+    Expr *value_expr; // set when the value is a constant expression, not a bare token
     i32 line;
     i32 col;
 };
@@ -640,6 +689,7 @@ struct ProcDecl {
     bool is_external;
     bool emit_external_proto;
     bool is_variadic;
+    bool is_static;
     string8 type_param;
     string8 constraint;
     string8 callconv;
@@ -698,6 +748,7 @@ typedef struct Parser {
     Vec_Token tokens;
     i32 index;
     bool pending_equal;
+    bool reported_eof; // so an unclosed '{' reports once, not once per nesting level
 } Parser;
 
 static bool is_alpha(u8 c) {
@@ -710,6 +761,26 @@ static bool is_digit(u8 c) {
 
 static bool is_alnum(u8 c) {
     return is_alpha(c) || is_digit(c);
+}
+
+static bool is_hex_digit(u8 c) {
+    return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static bool char_escape_is_simple(u8 c) {
+    return c == 'n' || c == 't' || c == 'r' || c == '\\' || c == '\'' || c == '"' ||
+           c == 'a' || c == 'b' || c == 'f' || c == 'v' || c == '?';
+}
+
+static bool preprocessor_line_is_c_directive(u8 *line, u64 length);
+
+static void lex_error(i32 line, i32 col, const char *message) {
+    if (g_diag_json) {
+        diag_json_error(g_source_path, line, col, "lexer", message);
+    } else {
+        printf("%s:%d:%d: lexer error: %s\n", g_source_path, line, col, message);
+    }
+    diag_record_error();
 }
 
 static Token token_make(TokenKind kind, string8slice text, i32 line, i32 col) {
@@ -743,10 +814,17 @@ static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) 
             continue;
         }
         if (c == '#') {
+            u8 *line_start = p;
             while (p < end && *p != '\n') {
                 p++;
             }
-            continue;
+            u8 *line_end = p;
+            if (line_end > line_start && line_end[-1] == '\r') line_end--;
+            if (!preprocessor_line_is_c_directive(line_start, (u64)(line_end - line_start))) {
+                lex_error(line, col,
+                          "unknown preprocessor directive; '#' starts a C preprocessor line, use '//' for comments");
+            }
+            continue; // the whole line is consumed either way
         }
         if (c == '/' && (p + 1) < end && p[1] == '/') {
             while (p < end && *p != '\n') {
@@ -778,14 +856,9 @@ static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) 
                 }
             }
             if (!closed) {
-                if (g_diag_json) {
-                    diag_json_error(g_source_path, start_line, start_col, "lexer", "unterminated block comment");
-                    exit(1);
-                }
-                printf("%s:%d:%d: lexer error: unterminated block comment\n", g_source_path, start_line, start_col);
-                exit(1);
+                lex_error(start_line, start_col, "unterminated block comment");
             }
-            continue;
+            continue; // input is exhausted when unterminated, so the loop ends next
         }
 
         if (is_alpha(c)) {
@@ -819,6 +892,16 @@ static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) 
             else if (string8slice_equals_cstr(text, "or")) kind = Token_Keyword_Or;
             else if (string8slice_equals_cstr(text, "shl")) kind = Token_Keyword_Shl;
             else if (string8slice_equals_cstr(text, "shr")) kind = Token_Keyword_Shr;
+            else if (string8slice_equals_cstr(text, "goto")) kind = Token_Keyword_Goto;
+            else if (string8slice_equals_cstr(text, "static")) kind = Token_Keyword_Static;
+            /* 'shl='/'shr=' are compound assignment; the '=' must touch the keyword. */
+            if ((kind == Token_Keyword_Shl || kind == Token_Keyword_Shr) &&
+                p < end && *p == '=' && !((p + 1) < end && p[1] == '=')) {
+                p++;
+                col++;
+                text = string8slice_from_parts(start, (u64)(p - start));
+                kind = (kind == Token_Keyword_Shl) ? Token_ShlEqual : Token_ShrEqual;
+            }
             Vec_Token_append(arena, out_tokens, token_make(kind, text, line, start_col));
             continue;
         }
@@ -861,27 +944,76 @@ static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) 
                     col++;
                     break;
                 }
-                if (*p == '\n') {
-                    if (g_diag_json) {
-                        diag_json_error(g_source_path, line, start_col, "lexer", "unterminated string");
-                        exit(1);
-                    }
-                    printf("%s:%d:%d: lexer error: unterminated string\n", g_source_path, line, start_col);
-                    exit(1);
-                }
+                if (*p == '\n') break; // reported below; the newline ends the token
                 p++;
                 col++;
             }
             if (p > end || start == p || p[-1] != '"') {
-                if (g_diag_json) {
-                    diag_json_error(g_source_path, line, start_col, "lexer", "unterminated string");
-                    exit(1);
-                }
-                printf("%s:%d:%d: lexer error: unterminated string\n", g_source_path, line, start_col);
-                exit(1);
+                lex_error(line, start_col, "unterminated string");
+                continue; // resume at the newline or end of input
             }
             string8slice text = string8slice_from_parts(start, (u64)(p - start));
             Vec_Token_append(arena, out_tokens, token_make(Token_String, text, line, start_col));
+            continue;
+        }
+        if (c == '\'') {
+            u8 *start = p;
+            i32 start_col = col;
+            p++;
+            col++;
+            bool closed = false;
+            i32 char_count = 0;
+            const char *error_message = null;
+            while (p < end && *p != '\n') {
+                if (*p == '\'') {
+                    p++;
+                    col++;
+                    closed = true;
+                    break;
+                }
+                if (*p == '\\') {
+                    if ((p + 1) >= end) break;
+                    u8 esc = p[1];
+                    p += 2;
+                    col += 2;
+                    if (esc == 'x') {
+                        i32 digits = 0;
+                        while (p < end && is_hex_digit(*p)) {
+                            p++;
+                            col++;
+                            digits++;
+                        }
+                        if (digits == 0 && !error_message) {
+                            error_message = "\\x escape needs at least one hex digit";
+                        }
+                    } else if (esc >= '0' && esc <= '7') {
+                        i32 digits = 1;
+                        while (p < end && digits < 3 && *p >= '0' && *p <= '7') {
+                            p++;
+                            col++;
+                            digits++;
+                        }
+                    } else if (!char_escape_is_simple(esc) && !error_message) {
+                        error_message = "unknown escape sequence in character literal";
+                    }
+                    char_count++;
+                    continue;
+                }
+                p++;
+                col++;
+                char_count++;
+            }
+            if (!error_message) {
+                if (!closed) error_message = "unterminated character literal";
+                else if (char_count == 0) error_message = "empty character literal";
+                else if (char_count > 1) error_message = "multi-character literal; character literals hold one character";
+            }
+            if (error_message) {
+                lex_error(line, start_col, error_message);
+                continue; // p is past the literal already
+            }
+            string8slice text = string8slice_from_parts(start, (u64)(p - start));
+            Vec_Token_append(arena, out_tokens, token_make(Token_Char, text, line, start_col));
             continue;
         }
 
@@ -993,6 +1125,7 @@ static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) 
             case '@': kind = Token_At; break;
             case '?': kind = Token_Question; break;
             case '!': kind = Token_Bang; break;
+            case '~': kind = Token_Tilde; break;
             case '+': kind = Token_Plus; break;
             case '-': kind = Token_Minus; break;
             case '*': kind = Token_Star; break;
@@ -1008,14 +1141,11 @@ static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) 
             continue;
         }
 
-        if (g_diag_json) {
-            char message[128];
-            snprintf(message, sizeof(message), "unexpected char '%c'", c);
-            diag_json_error(g_source_path, line, col, "lexer", message);
-            exit(1);
-        }
-        printf("%s:%d:%d: lexer error: unexpected char '%c'\n", g_source_path, line, col, c);
-        exit(1);
+        char message[128];
+        snprintf(message, sizeof(message), "unexpected char '%c'", c);
+        lex_error(line, col, message);
+        p++; // must advance or the loop never terminates
+        col++;
     }
 
     Vec_Token_append(arena, out_tokens, token_make(Token_EOF, string8slice_from_parts(end, 0), line, col));
@@ -1265,7 +1395,8 @@ static void parser_print_error(Parser *p, Token *t, const char *msg, TokenKind e
         }
         i32 range_len = t->text.length > 0 && t->text.length < 1024 ? (i32)t->text.length : 1;
         diag_json_error_range(g_source_path, t->line, t->col, t->line, t->col + range_len, "parse", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     if (t->text.length > 0) {
         if (has_expected) {
@@ -1315,11 +1446,24 @@ static void parser_print_error(Parser *p, Token *t, const char *msg, TokenKind e
     i32 range_len = t->text.length > 0 && t->text.length < 1024 ? (i32)t->text.length : 1;
     parser_print_context_range(p, t, range_len);
     diag_note_import_chain();
-    exit(1);
+    diag_record_error();
 }
 
 static void parser_error_token(Parser *p, Token *t, const char *msg) {
     parser_print_error(p, t, msg, Token_EOF, false);
+}
+
+/* Ends a '{ ... }' body at '}' or at end of file. Without the end-of-file case an
+   unclosed brace would spin forever, because parse errors no longer exit and
+   parser_next() stops advancing once the token stream is exhausted. */
+static bool parser_at_block_end(Parser *p) {
+    if (parser_match(p, Token_RBrace)) return true;
+    if (parser_peek(p)->kind != Token_EOF) return false;
+    if (!p->reported_eof) {
+        p->reported_eof = true;
+        parser_error_token(p, parser_peek(p), "unexpected end of file: unclosed '{'");
+    }
+    return true;
 }
 
 static Token *parser_expect(Parser *p, TokenKind kind, const char *msg) {
@@ -1682,6 +1826,15 @@ static Expr *parse_primary(Parser *p) {
         return parse_postfix(p, e);
     }
 
+    if (parser_match(p, Token_Char)) {
+        Token *t = parser_prev(p);
+        Expr *e = expr_new(p->arena, Expr_Char);
+        e->string_lit = token_to_string8(p->arena, t);
+        e->line = t->line;
+        e->col = t->col;
+        return parse_postfix(p, e);
+    }
+
     if (parser_match(p, Token_String)) {
         Token *t = parser_prev(p);
         Expr *e = expr_new(p->arena, Expr_String);
@@ -1928,6 +2081,15 @@ static Expr *parse_unary(Parser *p) {
         e->col = op_tok->col;
         return e;
     }
+    if (parser_match(p, Token_Tilde)) {
+        Token *op_tok = parser_prev(p);
+        Expr *e = expr_new(p->arena, Expr_Unary);
+        e->op = Token_Tilde;
+        e->inner = parse_unary(p);
+        e->line = op_tok->line;
+        e->col = op_tok->col;
+        return e;
+    }
     return parse_primary(p);
 }
 
@@ -2151,6 +2313,8 @@ static bool is_assign_op_kind(TokenKind kind) {
            kind == Token_StarEqual ||
            kind == Token_SlashEqual ||
            kind == Token_PercentEqual ||
+           kind == Token_ShlEqual ||
+           kind == Token_ShrEqual ||
            kind == Token_AmpersandEqual ||
            kind == Token_CaretEqual ||
            kind == Token_PipeEqual;
@@ -2163,10 +2327,39 @@ static TokenKind parser_match_assign_op(Parser *p) {
     if (parser_match(p, Token_StarEqual)) return Token_StarEqual;
     if (parser_match(p, Token_SlashEqual)) return Token_SlashEqual;
     if (parser_match(p, Token_PercentEqual)) return Token_PercentEqual;
+    if (parser_match(p, Token_ShlEqual)) return Token_ShlEqual;
+    if (parser_match(p, Token_ShrEqual)) return Token_ShrEqual;
     if (parser_match(p, Token_AmpersandEqual)) return Token_AmpersandEqual;
     if (parser_match(p, Token_CaretEqual)) return Token_CaretEqual;
     if (parser_match(p, Token_PipeEqual)) return Token_PipeEqual;
     return Token_EOF;
+}
+
+static Stmt *parse_stmt(Parser *p);
+
+/* Skips the remains of a statement that failed to parse. Stopping before '}' lets
+   the enclosing body loop close the block normally. */
+static void parser_sync_to_stmt_end(Parser *p) {
+    while (parser_peek(p)->kind != Token_EOF) {
+        TokenKind kind = parser_peek(p)->kind;
+        if (kind == Token_Semicolon) {
+            parser_next(p);
+            return;
+        }
+        if (kind == Token_RBrace) return;
+        parser_next(p);
+    }
+}
+
+/* Every statement either consumes tokens or is resynchronized here, so a body loop
+   can never spin on a statement the parser cannot make sense of. */
+static Stmt *parse_stmt_recovering(Parser *p) {
+    i32 errors_before = g_error_count;
+    i32 index_before = p->index;
+    Stmt *s = parse_stmt(p);
+    if (p->index == index_before) parser_next(p);
+    if (g_error_count > errors_before) parser_sync_to_stmt_end(p);
+    return s;
 }
 
 static Stmt *parse_for_clause_stmt(Parser *p, bool allow_var_decl) {
@@ -2219,8 +2412,8 @@ static Stmt *parse_stmt(Parser *p) {
         s->col = do_tok->col;
         s->while_body = ptr_array_reserve(p->arena, 8);
         parser_expect(p, Token_LBrace, "expected '{' after do");
-        while (!parser_match(p, Token_RBrace)) {
-            ptr_array_append(p->arena, &s->while_body, parse_stmt(p));
+        while (!parser_at_block_end(p)) {
+            ptr_array_append(p->arena, &s->while_body, parse_stmt_recovering(p));
         }
         parser_expect(p, Token_Keyword_While, "expected 'while' after do body");
         parser_expect(p, Token_LParen, "expected '(' after while");
@@ -2241,8 +2434,8 @@ static Stmt *parse_stmt(Parser *p) {
         s->while_cond = parse_expr(p);
         parser_expect(p, Token_RParen, "expected ')' after while condition");
         parser_expect(p, Token_LBrace, "expected '{' in while body");
-        while (!parser_match(p, Token_RBrace)) {
-            ptr_array_append(p->arena, &s->while_body, parse_stmt(p));
+        while (!parser_at_block_end(p)) {
+            ptr_array_append(p->arena, &s->while_body, parse_stmt_recovering(p));
         }
         return s;
     }
@@ -2253,6 +2446,17 @@ static Stmt *parse_stmt(Parser *p) {
         s->line = break_tok->line;
         s->col = break_tok->col;
         parser_expect(p, Token_Semicolon, "expected ';' after break");
+        return s;
+    }
+
+    if (parser_match(p, Token_Keyword_Goto)) {
+        Token *goto_tok = parser_prev(p);
+        Token *target_tok = parser_expect(p, Token_Identifier, "expected label name after goto");
+        Stmt *s = stmt_new(p->arena, Stmt_Goto);
+        s->name = token_to_string8(p->arena, target_tok);
+        s->line = goto_tok->line;
+        s->col = goto_tok->col;
+        parser_expect(p, Token_Semicolon, "expected ';' after goto");
         return s;
     }
 
@@ -2277,7 +2481,7 @@ static Stmt *parse_stmt(Parser *p) {
         s->switch_expr = parse_expr(p);
         parser_expect(p, Token_RParen, "expected ')' after switch expression");
         parser_expect(p, Token_LBrace, "expected '{' in switch body");
-        while (!parser_match(p, Token_RBrace)) {
+        while (!parser_at_block_end(p)) {
             if (parser_match(p, Token_Keyword_Case)) {
                 Token *case_tok = parser_prev(p);
                 SwitchCase *sc = memops_arena_push_struct(p->arena, SwitchCase);
@@ -2289,8 +2493,9 @@ static Stmt *parse_stmt(Parser *p) {
                 parser_expect(p, Token_Colon, "expected ':' after case");
                 while (parser_peek(p)->kind != Token_Keyword_Case &&
                        parser_peek(p)->kind != Token_Keyword_Default &&
+                       parser_peek(p)->kind != Token_EOF &&
                        parser_peek(p)->kind != Token_RBrace) {
-                    ptr_array_append(p->arena, &sc->body, parse_stmt(p));
+                    ptr_array_append(p->arena, &sc->body, parse_stmt_recovering(p));
                 }
                 ptr_array_append(p->arena, &s->switch_cases, sc);
                 continue;
@@ -2298,8 +2503,9 @@ static Stmt *parse_stmt(Parser *p) {
             if (parser_match(p, Token_Keyword_Default)) {
                 parser_expect(p, Token_Colon, "expected ':' after default");
                 while (parser_peek(p)->kind != Token_Keyword_Case &&
+                       parser_peek(p)->kind != Token_EOF &&
                        parser_peek(p)->kind != Token_RBrace) {
-                    ptr_array_append(p->arena, &s->switch_default_body, parse_stmt(p));
+                    ptr_array_append(p->arena, &s->switch_default_body, parse_stmt_recovering(p));
                 }
                 continue;
             }
@@ -2321,8 +2527,8 @@ static Stmt *parse_stmt(Parser *p) {
         s->if_cond = parse_expr(p);
         parser_expect(p, Token_RParen, "expected ')' after if condition");
         parser_expect(p, Token_LBrace, "expected '{' in if body");
-        while (!parser_match(p, Token_RBrace)) {
-            Stmt *body_stmt = parse_stmt(p);
+        while (!parser_at_block_end(p)) {
+            Stmt *body_stmt = parse_stmt_recovering(p);
             ptr_array_append(p->arena, &s->if_then_body, body_stmt);
         }
 
@@ -2331,8 +2537,8 @@ static Stmt *parse_stmt(Parser *p) {
                 s->if_else_if = parse_stmt(p);
             } else {
                 parser_expect(p, Token_LBrace, "expected '{' in else body");
-                while (!parser_match(p, Token_RBrace)) {
-                    Stmt *else_stmt = parse_stmt(p);
+                while (!parser_at_block_end(p)) {
+                    Stmt *else_stmt = parse_stmt_recovering(p);
                     ptr_array_append(p->arena, &s->if_else_body, else_stmt);
                 }
             }
@@ -2363,8 +2569,8 @@ static Stmt *parse_stmt(Parser *p) {
         }
         parser_expect(p, Token_RParen, "expected ')' after for clauses");
         parser_expect(p, Token_LBrace, "expected '{' in for body");
-        while (!parser_match(p, Token_RBrace)) {
-            Stmt *body_stmt = parse_stmt(p);
+        while (!parser_at_block_end(p)) {
+            Stmt *body_stmt = parse_stmt_recovering(p);
             ptr_array_append(p->arena, &s->for_body, body_stmt);
         }
         return s;
@@ -2385,7 +2591,21 @@ static Stmt *parse_stmt(Parser *p) {
     if (parser_match(p, Token_Identifier)) {
         Token *name_tok = parser_prev(p);
         if (parser_match(p, Token_Colon)) {
+            /* 'done: label;' declares a jump target, matching the 'name : kind'
+               shape used by every other declaration. */
+            if (parser_peek(p)->kind == Token_Identifier &&
+                string8slice_equals_cstr(parser_peek(p)->text, "label") &&
+                parser_peek_n(p, 1)->kind == Token_Semicolon) {
+                parser_next(p); // 'label'
+                parser_next(p); // ';'
+                Stmt *s = stmt_new(p->arena, Stmt_Label);
+                s->name = token_to_string8(p->arena, name_tok);
+                s->line = name_tok->line;
+                s->col = name_tok->col;
+                return s;
+            }
             Stmt *s = stmt_new(p->arena, Stmt_Var);
+            s->is_static = parser_match(p, Token_Keyword_Static);
             s->name = token_to_string8(p->arena, name_tok);
             s->type = parse_type(p);
             s->line = name_tok->line;
@@ -2427,6 +2647,68 @@ static Stmt *parse_stmt(Parser *p) {
     return null;
 }
 
+/* Reads fields up to the closing '}'. Shared by named structs and the anonymous
+   struct/union members that C headers use, so both accept the same field forms. */
+static void parse_struct_fields(Parser *p, StructDecl *decl) {
+    while (!parser_at_block_end(p)) {
+        if (parser_peek(p)->kind == Token_Identifier &&
+            string8slice_equals_cstr(parser_peek(p)->text, "external") &&
+            parser_peek_n(p, 1)->kind == Token_Semicolon) {
+            parser_next(p);
+            parser_next(p);
+            decl->is_external = true;
+            continue;
+        }
+
+        /* 'union = { ... }' / 'struct = { ... }' with no name is an anonymous member. */
+        TokenKind head = parser_peek(p)->kind;
+        if ((head == Token_Keyword_Union || head == Token_Keyword_Struct) &&
+            parser_peek_n(p, 1)->kind == Token_Equal) {
+            Token *kind_tok = parser_next(p);
+            parser_next(p); // '='
+            parser_expect(p, Token_LBrace, "expected '{' in anonymous member");
+            StructDecl *anon = memops_arena_push_struct(p->arena, StructDecl);
+            memset(anon, 0, sizeof(StructDecl));
+            anon->source_path = g_source_path;
+            anon->is_union = (head == Token_Keyword_Union);
+            anon->line = kind_tok->line;
+            anon->col = kind_tok->col;
+            anon->fields = ptr_array_reserve(p->arena, 8);
+            parse_struct_fields(p, anon);
+            parser_match(p, Token_Semicolon); // optional
+
+            Field *f = memops_arena_push_struct(p->arena, Field);
+            memset(f, 0, sizeof(Field));
+            f->anon = anon;
+            f->line = kind_tok->line;
+            f->col = kind_tok->col;
+            ptr_array_append(p->arena, &decl->fields, f);
+            continue;
+        }
+
+        Token *field_tok = parser_expect(p, Token_Identifier, "expected field name");
+        parser_expect(p, Token_Colon, "expected ':' after field name");
+        Field *f = memops_arena_push_struct(p->arena, Field);
+        memset(f, 0, sizeof(Field));
+        f->name = token_to_string8(p->arena, field_tok);
+        f->type = parse_type(p);
+        /* 'flags: u32 : 4;' gives the field an explicit bit width. */
+        if (parser_match(p, Token_Colon)) {
+            Token *width_tok = parser_expect(p, Token_Number, "expected bitfield width after ':'");
+            f->bit_width = token_to_string8(p->arena, width_tok);
+        }
+        if (parser_match(p, Token_At)) {
+            Token *attr_tok = parser_expect(p, Token_String, "expected string literal after field attribute '@'");
+            string8 attr_lit = token_to_string8(p->arena, attr_tok);
+            f->attrs = string_lit_inner(p->arena, attr_lit);
+        }
+        f->line = field_tok->line;
+        f->col = field_tok->col;
+        ptr_array_append(p->arena, &decl->fields, f);
+        parser_expect(p, Token_Semicolon, "expected ';' after field");
+    }
+}
+
 static StructDecl *parse_struct_decl(Parser *p, Token *name_tok, bool is_union) {
     StructDecl *decl = memops_arena_push_struct(p->arena, StructDecl);
     memset(decl, 0, sizeof(StructDecl));
@@ -2457,30 +2739,7 @@ static StructDecl *parse_struct_decl(Parser *p, Token *name_tok, bool is_union) 
         parser_match(p, Token_Semicolon);
         return decl;
     }
-    while (!parser_match(p, Token_RBrace)) {
-        if (parser_peek(p)->kind == Token_Identifier &&
-            string8slice_equals_cstr(parser_peek(p)->text, "external") &&
-            parser_peek_n(p, 1)->kind == Token_Semicolon) {
-            parser_next(p);
-            parser_next(p);
-            decl->is_external = true;
-            continue;
-        }
-        Token *field_tok = parser_expect(p, Token_Identifier, "expected field name");
-        parser_expect(p, Token_Colon, "expected ':' after field name");
-        Field *f = memops_arena_push_struct(p->arena, Field);
-        f->name = token_to_string8(p->arena, field_tok);
-        f->type = parse_type(p);
-        if (parser_match(p, Token_At)) {
-            Token *attr_tok = parser_expect(p, Token_String, "expected string literal after field attribute '@'");
-            string8 attr_lit = token_to_string8(p->arena, attr_tok);
-            f->attrs = string_lit_inner(p->arena, attr_lit);
-        }
-        f->line = field_tok->line;
-        f->col = field_tok->col;
-        ptr_array_append(p->arena, &decl->fields, f);
-        parser_expect(p, Token_Semicolon, "expected ';' after field");
-    }
+    parse_struct_fields(p, decl);
     // optional ';' after struct decl
     parser_match(p, Token_Semicolon);
     return decl;
@@ -2499,6 +2758,92 @@ static AliasDecl *parse_alias_decl(Parser *p, Token *name_tok) {
     return decl;
 }
 
+/* Enum values may name sibling items ('B = A'). Those must be emitted with the
+   generated C name ('Color_A'), so rewrite sibling references once every item
+   is known, which also covers forward references. */
+static void enum_qualify_sibling_refs(memops_arena *arena, EnumDecl *decl, Expr *e) {
+    if (!e) return;
+    if (e->kind == Expr_Name) {
+        for (i32 i = 0; i < decl->items.length; i++) {
+            EnumItem *sibling = (EnumItem *)decl->items.data[i];
+            if (string8_equals(&e->name, &sibling->name)) {
+                e->name = concat_name2(arena, decl->name, "_", sibling->name);
+                return;
+            }
+        }
+        return;
+    }
+    enum_qualify_sibling_refs(arena, decl, e->inner);
+    enum_qualify_sibling_refs(arena, decl, e->left);
+    enum_qualify_sibling_refs(arena, decl, e->right);
+    enum_qualify_sibling_refs(arena, decl, e->third);
+    enum_qualify_sibling_refs(arena, decl, e->base);
+    enum_qualify_sibling_refs(arena, decl, e->index_expr);
+    for (i32 i = 0; i < e->args.length; i++) {
+        enum_qualify_sibling_refs(arena, decl, (Expr *)e->args.data[i]);
+    }
+}
+
+static void enum_qualify_item_values(memops_arena *arena, EnumDecl *decl) {
+    for (i32 i = 0; i < decl->items.length; i++) {
+        EnumItem *item = (EnumItem *)decl->items.data[i];
+        if (item->value_expr) {
+            enum_qualify_sibling_refs(arena, decl, item->value_expr);
+            continue;
+        }
+        if (!item->value.data) continue;
+        for (i32 j = 0; j < decl->items.length; j++) {
+            EnumItem *sibling = (EnumItem *)decl->items.data[j];
+            if (string8_equals(&item->value, &sibling->name)) {
+                item->value = concat_name2(arena, decl->name, "_", sibling->name);
+                break;
+            }
+        }
+    }
+}
+
+/* Tokens that can open an enum value, so a missing value reports 'expected enum
+   value' at the enum instead of a generic 'expected expression' from the parser. */
+static bool can_begin_enum_value(TokenKind kind) {
+    switch (kind) {
+        case Token_Number:
+        case Token_Identifier:
+        case Token_Char:
+        case Token_Minus:
+        case Token_Tilde:
+        case Token_Bang:
+        case Token_LParen:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/* Tokens that mean an enum value keeps going past its first token, so
+   'A = 1 shl 3' parses as one constant expression instead of a bare '1'. */
+static bool is_enum_value_continuation(TokenKind kind) {
+    switch (kind) {
+        case Token_Plus:
+        case Token_Minus:
+        case Token_Star:
+        case Token_Slash:
+        case Token_Percent:
+        case Token_Ampersand:
+        case Token_Caret:
+        case Token_Pipe:
+        case Token_Question:
+        case Token_Dot:
+        case Token_LBracket:
+        case Token_LAngle:
+        case Token_RAngle:
+        case Token_Keyword_Shl:
+        case Token_Keyword_Shr:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static EnumDecl *parse_enum_decl(Parser *p, Token *name_tok) {
     EnumDecl *decl = memops_arena_push_struct(p->arena, EnumDecl);
     memset(decl, 0, sizeof(EnumDecl));
@@ -2510,7 +2855,7 @@ static EnumDecl *parse_enum_decl(Parser *p, Token *name_tok) {
 
     parser_expect(p, Token_Equal, "expected '=' after enum");
     parser_expect(p, Token_LBrace, "expected '{' in enum");
-    while (!parser_match(p, Token_RBrace)) {
+    while (!parser_at_block_end(p)) {
         if (parser_peek(p)->kind == Token_Identifier &&
             string8slice_equals_cstr(parser_peek(p)->text, "external") &&
             parser_peek_n(p, 1)->kind == Token_Semicolon) {
@@ -2527,12 +2872,21 @@ static EnumDecl *parse_enum_decl(Parser *p, Token *name_tok) {
         item->col = item_tok->col;
 
         if (parser_match(p, Token_Equal)) {
+            /* Enum values are constant expressions passed through to C, so a bare
+               token stays a bare token and anything else is rendered at emit time. */
             Token *value_tok = parser_peek(p);
-            if (value_tok->kind != Token_Number && value_tok->kind != Token_Identifier) {
+            if (!can_begin_enum_value(value_tok->kind)) {
                 parser_error_token(p, value_tok, "expected enum value");
             }
-            parser_next(p);
-            item->value = token_to_string8(p->arena, value_tok);
+            bool bare_token = (value_tok->kind == Token_Number || value_tok->kind == Token_Identifier) &&
+                              parser_peek_n(p, 1)->kind != Token_LParen &&
+                              !is_enum_value_continuation(parser_peek_n(p, 1)->kind);
+            if (bare_token) {
+                parser_next(p);
+                item->value = token_to_string8(p->arena, value_tok);
+            } else {
+                item->value_expr = parse_ternary(p);
+            }
         }
 
         ptr_array_append(p->arena, &decl->items, item);
@@ -2543,6 +2897,7 @@ static EnumDecl *parse_enum_decl(Parser *p, Token *name_tok) {
         break;
     }
     parser_match(p, Token_Semicolon);
+    enum_qualify_item_values(p->arena, decl);
     return decl;
 }
 
@@ -2620,13 +2975,34 @@ static ProcDecl *parse_proc_decl(Parser *p, Token *name_tok) {
         parser_match(p, Token_Semicolon); // optional ';' after proc decl
         return decl;
     }
-    while (!parser_match(p, Token_RBrace)) {
-        Stmt *s = parse_stmt(p);
+    while (!parser_at_block_end(p)) {
+        Stmt *s = parse_stmt_recovering(p);
         ptr_array_append(p->arena, &decl->body, s);
     }
     // optional ';' after proc decl
     parser_match(p, Token_Semicolon);
     return decl;
+}
+
+/* After a failed declaration the token stream is out of step with the grammar, so
+   scanning to the next thing that starts a declaration stops one bad line from
+   turning every later line into a cascade of invented errors. Top-level
+   declarations start in column 1, which distinguishes them from indented locals
+   and struct fields. */
+static void parser_sync_to_next_decl(Parser *p) {
+    while (parser_peek(p)->kind != Token_EOF) {
+        Token *t = parser_peek(p);
+        if (t->col == 1) {
+            if (t->kind == Token_Keyword_Import) return;
+            if (t->kind == Token_Identifier && parser_peek_n(p, 1)->kind == Token_Colon) return;
+            if (t->kind == Token_Identifier &&
+                (string8slice_equals_cstr(t->text, "cinclude") ||
+                 string8slice_equals_cstr(t->text, "define"))) {
+                return;
+            }
+        }
+        parser_next(p);
+    }
 }
 
 static Program parse_program(Parser *p) {
@@ -2644,7 +3020,18 @@ static Program parse_program(Parser *p) {
     prog.procs = ptr_array_reserve(p->arena, 8);
     prog.globals = ptr_array_reserve(p->arena, 8);
 
+    i32 errors_at_decl_start = g_error_count;
+    i32 index_at_decl_start = -1;
+
     while (parser_peek(p)->kind != Token_EOF) {
+        if (p->index == index_at_decl_start) parser_next(p); // always make progress
+        if (g_error_count > errors_at_decl_start) {
+            parser_sync_to_next_decl(p);
+            if (parser_peek(p)->kind == Token_EOF) break;
+        }
+        errors_at_decl_start = g_error_count;
+        index_at_decl_start = p->index;
+
         if (parser_peek(p)->kind == Token_Identifier &&
             string8slice_equals_cstr(parser_peek(p)->text, "define")) {
             parser_next(p); // define
@@ -2684,6 +3071,17 @@ static Program parse_program(Parser *p) {
         string8 base_name = token_to_string8(p->arena, head_tok);
         string8 parsed_name = parse_decl_name(p);
         parser_expect(p, Token_Colon, "expected ':' after identifier");
+
+        /* 'static' gives a proc or global internal linkage; types have no linkage. */
+        Token *static_tok = parser_peek(p);
+        bool is_static = parser_match(p, Token_Keyword_Static);
+        if (is_static) {
+            TokenKind next = parser_peek(p)->kind;
+            if (next == Token_Keyword_Struct || next == Token_Keyword_Union ||
+                next == Token_Keyword_Enum || next == Token_Keyword_Alias) {
+                parser_error_token(p, static_tok, "'static' applies to procs and globals, not type declarations");
+            }
+        }
 
         if (parser_match(p, Token_Keyword_Struct)) {
             StructDecl *decl = parse_struct_decl(p, head_tok, false);
@@ -2726,11 +3124,13 @@ static Program parse_program(Parser *p) {
             if (!string8_equals(&parsed_name, &base_name)) {
                 decl->name = parsed_name;
             }
+            decl->is_static = is_static;
             ptr_array_append(p->arena, &prog.procs, decl);
             continue;
         }
 
         Stmt *s = stmt_new(p->arena, Stmt_Var);
+        s->is_static = is_static;
         s->name = parsed_name;
         s->type = parse_type(p);
         s->line = head_tok->line;
@@ -2838,7 +3238,7 @@ static void diag_print_file_context(const char *path, i32 line, i32 col) {
 static void diag_finish_range(i32 line, i32 col, i32 range_len) {
     diag_print_file_context_range(diag_current_path(), line, col, range_len);
     diag_note_import_chain();
-    exit(1);
+    diag_record_error();
 }
 
 static void diag_finish_at(i32 line, i32 col) {
@@ -2848,7 +3248,8 @@ static void diag_finish_at(i32 line, i32 col) {
 static void semantic_error(const char *msg, i32 line, i32 col) {
     if (g_diag_json) {
         diag_json_error(diag_current_path(), line, col, "semantic", msg);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf("%s:%d:%d: semantic error: %s\n",
            diag_current_path(),
@@ -2878,7 +3279,8 @@ static void semantic_error_name(const char *msg, string8 name, i32 line, i32 col
             name.data
         );
         diag_json_error_range(diag_current_path(), line, col, line, col + (i32)name.length, "semantic", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf("%s:%d:%d: semantic error: %s '%.*s'\n",
            diag_current_path(),
@@ -2912,7 +3314,8 @@ static void semantic_error_name_dup(
         diag_json_note_import_chain(&has_note);
         diag_json_note_cstr(&has_note, diag_current_path(), prev_line, prev_col, "previous declaration here");
         diag_json_close();
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: semantic error: %s '%.*s' (previous at %d:%d)\n",
@@ -2967,7 +3370,8 @@ static void semantic_error_name_dup_path(
             diag_json_note_cstr(&has_note, prev_path ? prev_path : g_source_path, 0, 0, note);
         }
         diag_json_close();
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: semantic error: %s '%.*s' (previous at %s:%d:%d)\n",
@@ -2988,7 +3392,8 @@ static void semantic_error_name_dup_path(
     if (prev_import_chain && prev_import_chain[0]) {
         printf("%s:0:0: note: previous declaration imported through: %s\n", prev_path ? prev_path : g_source_path, prev_import_chain);
     }
-    exit(1);
+    diag_record_error();
+    return;
 }
 
 static string8 preprocessor_define_name(memops_arena *arena, string8 line) {
@@ -3124,7 +3529,7 @@ static void semantic_add_import_symbols(Program *prog, Scope *base, Vec_string8 
         if (!input.data) {
             printf("%s:0:0: semantic error: failed to read import %s\n", g_source_path, path);
             diag_note_import_chain();
-            exit(1);
+            diag_exit_with_errors();
         }
 
         Vec_Token tokens = {0};
@@ -3199,7 +3604,7 @@ static void semantic_check_expr(Expr *e, Scope *scope);
 static void semantic_check_expr(Expr *e, Scope *scope) {
     if (!e) return;
     if (e->kind == Expr_Number) return;
-    if (e->kind == Expr_String) return;
+    if (e->kind == Expr_String || e->kind == Expr_Char) return;
     if (e->kind == Expr_SizeofType) return;
     if (e->kind == Expr_AlignofType) return;
     if (e->kind == Expr_ZeroInit) return;
@@ -3398,7 +3803,70 @@ static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_str
         }
         return;
     }
+    if (stmt->kind == Stmt_Goto || stmt->kind == Stmt_Label) {
+        return; // resolved against the proc-wide label set in semantic_check_proc
+    }
     semantic_error("unknown statement kind", stmt->line, stmt->col);
+}
+
+/* Labels are proc-wide in C, so they are collected across nested blocks before
+   any goto is resolved, which also lets a goto jump forward to a later label. */
+static void semantic_collect_labels(Stmt *stmt, Vec_string8 *labels, memops_arena *arena);
+
+static void semantic_collect_labels_list(Vec_voidptr *stmts, Vec_string8 *labels, memops_arena *arena) {
+    for (i32 i = 0; i < stmts->length; i++) {
+        semantic_collect_labels((Stmt *)stmts->data[i], labels, arena);
+    }
+}
+
+static void semantic_collect_labels(Stmt *stmt, Vec_string8 *labels, memops_arena *arena) {
+    if (!stmt) return;
+    if (stmt->kind == Stmt_Label) {
+        i32 prev = string8_vec_find(labels, stmt->name);
+        if (prev >= 0) {
+            semantic_error_name("duplicate label", stmt->name, stmt->line, stmt->col);
+        }
+        Vec_string8_append(arena, labels, stmt->name);
+        return;
+    }
+    semantic_collect_labels_list(&stmt->for_body, labels, arena);
+    semantic_collect_labels_list(&stmt->while_body, labels, arena);
+    semantic_collect_labels_list(&stmt->if_then_body, labels, arena);
+    semantic_collect_labels_list(&stmt->if_else_body, labels, arena);
+    semantic_collect_labels(stmt->if_else_if, labels, arena);
+    semantic_collect_labels_list(&stmt->switch_default_body, labels, arena);
+    for (i32 i = 0; i < stmt->switch_cases.length; i++) {
+        SwitchCase *sc = (SwitchCase *)stmt->switch_cases.data[i];
+        semantic_collect_labels_list(&sc->body, labels, arena);
+    }
+}
+
+static void semantic_check_gotos(Stmt *stmt, Vec_string8 *labels);
+
+static void semantic_check_gotos_list(Vec_voidptr *stmts, Vec_string8 *labels) {
+    for (i32 i = 0; i < stmts->length; i++) {
+        semantic_check_gotos((Stmt *)stmts->data[i], labels);
+    }
+}
+
+static void semantic_check_gotos(Stmt *stmt, Vec_string8 *labels) {
+    if (!stmt) return;
+    if (stmt->kind == Stmt_Goto) {
+        if (string8_vec_find(labels, stmt->name) < 0) {
+            semantic_error_name("use of undeclared label", stmt->name, stmt->line, stmt->col);
+        }
+        return;
+    }
+    semantic_check_gotos_list(&stmt->for_body, labels);
+    semantic_check_gotos_list(&stmt->while_body, labels);
+    semantic_check_gotos_list(&stmt->if_then_body, labels);
+    semantic_check_gotos_list(&stmt->if_else_body, labels);
+    semantic_check_gotos(stmt->if_else_if, labels);
+    semantic_check_gotos_list(&stmt->switch_default_body, labels);
+    for (i32 i = 0; i < stmt->switch_cases.length; i++) {
+        SwitchCase *sc = (SwitchCase *)stmt->switch_cases.data[i];
+        semantic_check_gotos_list(&sc->body, labels);
+    }
 }
 
 static void semantic_check_proc(Program *prog, ProcDecl *proc, Scope *base_scope, Vec_string8 *known_types, memops_arena *arena) {
@@ -3443,6 +3911,10 @@ static void semantic_check_proc(Program *prog, ProcDecl *proc, Scope *base_scope
         Stmt *stmt = (Stmt *)proc->body.data[i];
         semantic_check_stmt(prog, stmt, &scope, known_types, proc->type_param, arena);
     }
+
+    Vec_string8 labels = Vec_string8_reserve(arena, 4);
+    semantic_collect_labels_list(&proc->body, &labels, arena);
+    semantic_check_gotos_list(&proc->body, &labels);
 
     g_diag_source_path = prev_diag_source_path;
     g_diag_import_chain = prev_diag_import_chain;
@@ -3635,7 +4107,8 @@ static void semantic_error_name_path(const char *msg, string8 name, const char *
             name.data
         );
         diag_json_error_range(path ? path : g_source_path, line, col, line, col + (i32)name.length, "semantic", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf("%s:%d:%d: semantic error: %s '%.*s'\n",
            path ? path : g_source_path,
@@ -3646,7 +4119,8 @@ static void semantic_error_name_path(const char *msg, string8 name, const char *
            name.data);
     diag_print_file_context_range(path ? path : g_source_path, line, col, (i32)name.length);
     diag_note_import_chain();
-    exit(1);
+    diag_record_error();
+    return;
 }
 
 static void semantic_error_control_flow(const char *keyword, const char *context, i32 line, i32 col) {
@@ -3654,7 +4128,8 @@ static void semantic_error_control_flow(const char *keyword, const char *context
         char message[256];
         snprintf(message, sizeof(message), "%s outside %s", keyword, context);
         diag_json_error(diag_current_path(), line, col, "semantic", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: semantic error: %s outside %s\n",
@@ -3754,7 +4229,8 @@ static void semantic_error_generic_type_arity(TypeExpr *type, SemanticTypeInfo i
             diag_json_note_cstr(&has_note, info.path ? info.path : g_source_path, info.line, info.col, note);
         }
         diag_json_close();
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: semantic error: generic type '%.*s' expects 1 type arg, got %d\n",
@@ -3767,7 +4243,8 @@ static void semantic_error_generic_type_arity(TypeExpr *type, SemanticTypeInfo i
     );
     diag_note_import_chain();
     semantic_note_type_decl(info);
-    exit(1);
+    diag_record_error();
+    return;
 }
 
 static void semantic_error_nongeneric_type_args(TypeExpr *type, SemanticTypeInfo info, const char *source_path) {
@@ -3798,7 +4275,8 @@ static void semantic_error_nongeneric_type_args(TypeExpr *type, SemanticTypeInfo
             diag_json_note_cstr(&has_note, info.path ? info.path : g_source_path, info.line, info.col, note);
         }
         diag_json_close();
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: semantic error: type '%.*s' is not generic; got %d type arg%s\n",
@@ -3812,7 +4290,8 @@ static void semantic_error_nongeneric_type_args(TypeExpr *type, SemanticTypeInfo
     );
     diag_note_import_chain();
     semantic_note_type_decl(info);
-    exit(1);
+    diag_record_error();
+    return;
 }
 
 static void semantic_check_type(Program *prog, TypeExpr *type, Vec_string8 *known_types, string8 generic_param, const char *source_path) {
@@ -4024,6 +4503,19 @@ static Vec_string8 semantic_collect_known_type_names(Program *prog, memops_arena
 
 static void collect_generic_struct_instances(Program *prog, StructDecl *decl, Vec_string8 *out, memops_arena *arena);
 
+/* Flattens a struct's fields the way field access sees them: members of anonymous
+   struct/union members belong to the enclosing type's name space. */
+static void semantic_collect_named_fields(memops_arena *arena, StructDecl *decl, Vec_voidptr *out) {
+    for (i32 i = 0; i < decl->fields.length; i++) {
+        Field *field = (Field *)decl->fields.data[i];
+        if (field->anon) {
+            semantic_collect_named_fields(arena, field->anon, out);
+            continue;
+        }
+        ptr_array_append(arena, out, field);
+    }
+}
+
 static void semantic_check_program(Program *prog, memops_arena *arena) {
     Scope base = {0};
     base.globals = Vec_string8_reserve(arena, 64);
@@ -4070,20 +4562,15 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
         Vec_string8_append(arena, &structs, decl->name);
         semantic_decl_site_add(arena, &type_sites, decl->name, decl->source_path, decl->import_chain, decl->line, decl->col);
 
-        Vec_string8 field_names = Vec_string8_reserve(arena, decl->fields.length);
-        for (i32 j = 0; j < decl->fields.length; j++) {
-            Field *field = (Field *)decl->fields.data[j];
-            if (scope_has(&field_names, field->name)) {
-                i32 prev_line = field->line;
-                i32 prev_col = field->col;
-                for (i32 k = 0; k < j; k++) {
-                    Field *prev = (Field *)decl->fields.data[k];
-                    if (string8_equals(&prev->name, &field->name)) {
-                        prev_line = prev->line;
-                        prev_col = prev->col;
-                        break;
-                    }
-                }
+        /* Anonymous members put their fields in the owner's name space, so the
+           flattened list is what has to be free of duplicates. */
+        Vec_voidptr named_fields = ptr_array_reserve(arena, decl->fields.length);
+        semantic_collect_named_fields(arena, decl, &named_fields);
+        for (i32 j = 0; j < named_fields.length; j++) {
+            Field *field = (Field *)named_fields.data[j];
+            for (i32 k = 0; k < j; k++) {
+                Field *prev = (Field *)named_fields.data[k];
+                if (!string8_equals(&prev->name, &field->name)) continue;
                 semantic_error_name_dup_path(
                     "duplicate field",
                     field->name,
@@ -4093,11 +4580,11 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
                     field->col,
                     decl->source_path,
                     decl->import_chain,
-                    prev_line,
-                    prev_col
+                    prev->line,
+                    prev->col
                 );
+                break;
             }
-            Vec_string8_append(arena, &field_names, field->name);
         }
 
         string8 reflect_name = concat_name2(arena, decl->name, "_", string8_from_cstr(arena, "reflect"));
@@ -4257,6 +4744,22 @@ static void emit_cstr(memops_arena *arena, string8 *out, const char *cstr) {
 
 static void emit_string8(memops_arena *arena, string8 *out, string8 s) {
     string8_append_bytes(arena, out, s.data, s.length);
+}
+
+static void emit_assign_op(memops_arena *arena, string8 *out, TokenKind op) {
+    switch (op) {
+        case Token_PlusEqual: emit_cstr(arena, out, " += "); return;
+        case Token_MinusEqual: emit_cstr(arena, out, " -= "); return;
+        case Token_StarEqual: emit_cstr(arena, out, " *= "); return;
+        case Token_SlashEqual: emit_cstr(arena, out, " /= "); return;
+        case Token_PercentEqual: emit_cstr(arena, out, " %= "); return;
+        case Token_ShlEqual: emit_cstr(arena, out, " <<= "); return;
+        case Token_ShrEqual: emit_cstr(arena, out, " >>= "); return;
+        case Token_AmpersandEqual: emit_cstr(arena, out, " &= "); return;
+        case Token_CaretEqual: emit_cstr(arena, out, " ^= "); return;
+        case Token_PipeEqual: emit_cstr(arena, out, " |= "); return;
+        default: emit_cstr(arena, out, " = "); return;
+    }
 }
 
 static void emit_type(memops_arena *arena, string8 *out, TypeExpr *type, TypeSub sub) {
@@ -5845,8 +6348,8 @@ static void validate_generic_constraints(Program *prog, memops_arena *arena) {
                     );
                     diag_json_note_cstr(&has_note, decl_path, decl->line, decl->col, declared_note);
                     diag_json_close();
-                    exit(1);
-                }
+                    diag_record_error();
+                } else {
                 if (check.has_bad_signature) {
                     printf(
                         "%s:%d:%d: requirement error: proc '%.*s' requires '%.*s' for type '%.*s' (function '%.*s' has incompatible signature)\n",
@@ -5902,7 +6405,8 @@ static void validate_generic_constraints(Program *prog, memops_arena *arena) {
                        (int)decl->constraint.length,
                        decl->constraint.data);
                 diag_print_file_context(decl_path, decl->line, decl->col);
-                exit(1);
+                diag_record_error();
+                }
             }
         }
     }
@@ -6118,6 +6622,21 @@ static TypeExpr *reflect_builtin_field_type(TypeExpr *base_type, string8 field_n
     return null;
 }
 
+/* Members of an anonymous struct/union are named directly on the owner, so the
+   search descends into them as if their fields were declared inline. */
+static Field *struct_find_field(StructDecl *decl, string8 field_name) {
+    for (i32 f = 0; f < decl->fields.length; f++) {
+        Field *field = (Field *)decl->fields.data[f];
+        if (field->anon) {
+            Field *nested = struct_find_field(field->anon, field_name);
+            if (nested) return nested;
+            continue;
+        }
+        if (string8_equals(&field->name, &field_name)) return field;
+    }
+    return null;
+}
+
 static TypeExpr *lookup_field_type(Program *prog, TypeExpr *base_type, string8 field_name, memops_arena *arena) {
     if (!base_type) return null;
     base_type = resolve_alias_type(prog, base_type);
@@ -6127,23 +6646,15 @@ static TypeExpr *lookup_field_type(Program *prog, TypeExpr *base_type, string8 f
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
         if (base_type->kind == Type_Name && !decl->is_generic) {
             if (!string8_equals(&decl->name, &base_type->name)) continue;
-            for (i32 f = 0; f < decl->fields.length; f++) {
-                Field *field = (Field *)decl->fields.data[f];
-                if (string8_equals(&field->name, &field_name)) {
-                    return clone_type_expr(arena, field->type);
-                }
-            }
+            Field *field = struct_find_field(decl, field_name);
+            if (field) return clone_type_expr(arena, field->type);
         }
         if (base_type->kind == Type_Generic && decl->is_generic) {
             if (!string8_equals(&decl->name, &base_type->name)) continue;
             if (base_type->args.length != 1) return null;
             TypeExpr *arg = (TypeExpr *)base_type->args.data[0];
-            for (i32 f = 0; f < decl->fields.length; f++) {
-                Field *field = (Field *)decl->fields.data[f];
-                if (string8_equals(&field->name, &field_name)) {
-                    return substitute_type_param(arena, field->type, decl->type_param, arg);
-                }
-            }
+            Field *field = struct_find_field(decl, field_name);
+            if (field) return substitute_type_param(arena, field->type, decl->type_param, arg);
         }
     }
     return null;
@@ -6356,6 +6867,9 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, Program *prog, memop
         ptr_t->elem = char_t;
         return ptr_t;
     }
+    if (e->kind == Expr_Char) {
+        return type_name_expr(arena, "char");
+    }
     if (e->kind == Expr_SizeofType || e->kind == Expr_AlignofType) {
         return type_name_expr(arena, "usize");
     }
@@ -6409,6 +6923,12 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, Program *prog, memop
         if (decl) {
             if (decl->is_generic && type_arg) {
                 return substitute_type_param(arena, decl->ret_type, decl->type_param, type_arg);
+            }
+            if (decl->is_generic) {
+                /* The type argument is missing or wrong, which is reported at the
+                   call. Returning unknown keeps the unsubstituted type param from
+                   leaking into surrounding checks as a second, confusing error. */
+                return null;
             }
             return type_scope_apply_sub(scope, arena, decl->ret_type);
         }
@@ -6545,7 +7065,8 @@ static void type_error_index_base(TypeExpr *base, i32 line, i32 col, memops_aren
             base_name.data
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: cannot index non-array/non-pointer type '%.*s'\n",
@@ -6570,7 +7091,8 @@ static void type_error_index_value(TypeExpr *index_type, i32 line, i32 col, memo
             index_name.data
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: index expression must be numeric, got '%.*s'\n",
@@ -6795,6 +7317,8 @@ static bool type_allows_compound_assign(Program *prog, TokenKind op, TypeExpr *d
         return true;
     }
     if (op == Token_PercentEqual ||
+        op == Token_ShlEqual ||
+        op == Token_ShrEqual ||
         op == Token_AmpersandEqual ||
         op == Token_CaretEqual ||
         op == Token_PipeEqual) {
@@ -7004,7 +7528,8 @@ static void type_error_incompatible(
         diag_json_note_import_chain(&has_note);
         type_json_note_mismatch_details(&has_note, prog, dst, src, arena);
         diag_json_close();
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: %s expected '%.*s', got '%.*s'\n",
@@ -7051,7 +7576,8 @@ static void type_error_compound_assignment(
         diag_json_note_import_chain(&has_note);
         type_json_note_mismatch_details(&has_note, prog, dst, src, arena);
         diag_json_close();
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: operator %s cannot be applied to '%.*s' and '%.*s'\n",
@@ -7096,7 +7622,8 @@ static void type_error_cast(
         diag_json_note_import_chain(&has_note);
         type_json_note_proc_signature_mismatch(&has_note, prog, dst, src, arena);
         diag_json_close();
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: cannot cast '%.*s' to '%.*s'\n",
@@ -7218,6 +7745,7 @@ static const char *expr_kind_name(ExprKind kind) {
     if (kind == Expr_Name) return "name";
     if (kind == Expr_Number) return "number";
     if (kind == Expr_String) return "string";
+    if (kind == Expr_Char) return "character literal";
     if (kind == Expr_Call) return "call";
     if (kind == Expr_Addr) return "address expression";
     if (kind == Expr_Binary) return "binary expression";
@@ -7253,7 +7781,8 @@ static void type_error_assignment_target(Expr *lhs) {
             lhs ? expr_kind_name(lhs->kind) : "expression"
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: assignment target must be a name, field, or indexed element; got %s\n",
@@ -7320,7 +7849,8 @@ static void type_error_const_assignment(Program *prog, Expr *lhs, TypeExpr *targ
         } else {
             diag_json_error(diag_current_path(), line, col, "type", message);
         }
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: cannot assign to const target of type '%.*s'\n",
@@ -7352,7 +7882,8 @@ static void type_error_address_target(Expr *inner, i32 line, i32 col) {
             inner ? expr_kind_name(inner->kind) : "expression"
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: address target must be a name, field, or indexed element; got %s\n",
@@ -7362,7 +7893,8 @@ static void type_error_address_target(Expr *inner, i32 line, i32 col) {
         inner ? expr_kind_name(inner->kind) : "expression"
     );
     diag_note_import_chain();
-    exit(1);
+    diag_record_error();
+    return;
 }
 
 static void type_note_proc_decl(ProcDecl *decl);
@@ -7389,7 +7921,8 @@ static void type_error_return_value_presence(
                 proc ? proc->col : 0,
                 "proc declared here"
             );
-            exit(1);
+            diag_record_error();
+            return;
         }
         printf(
             "%s:%d:%d: type error: void proc should not return a value\n",
@@ -7419,7 +7952,8 @@ static void type_error_return_value_presence(
                 proc ? proc->col : 0,
                 "proc declared here"
             );
-            exit(1);
+            diag_record_error();
+            return;
         }
         printf(
             "%s:%d:%d: type error: non-void proc must return a value of type '%.*s'\n",
@@ -7433,7 +7967,8 @@ static void type_error_return_value_presence(
     diag_print_file_context(diag_current_path(), line, col);
     diag_note_import_chain();
     type_note_proc_decl(proc);
-    exit(1);
+    diag_record_error();
+    return;
 }
 
 static void type_note_proc_decl(ProcDecl *decl) {
@@ -7536,7 +8071,8 @@ static void type_error_proc_type_arg_count(
                 decl->col,
                 "proc declared here"
             );
-            exit(1);
+            diag_record_error();
+            return;
         }
         printf(
             "%s:%d:%d: type error: generic proc '%.*s' expects 1 type arg, got %d\n",
@@ -7570,7 +8106,8 @@ static void type_error_proc_type_arg_count(
                 decl->col,
                 "proc declared here"
             );
-            exit(1);
+            diag_record_error();
+            return;
         }
         printf(
             "%s:%d:%d: type error: proc '%.*s' is not generic; got %d type arg%s\n",
@@ -7586,7 +8123,8 @@ static void type_error_proc_type_arg_count(
     diag_print_file_context(diag_current_path(), line, col);
     diag_note_import_chain();
     type_note_proc_decl(decl);
-    exit(1);
+    diag_record_error();
+    return;
 }
 
 static void type_error_proc_arg_count(
@@ -7620,7 +8158,8 @@ static void type_error_proc_arg_count(
                 "proc declared here"
             );
             diag_json_close();
-            exit(1);
+            diag_record_error();
+            return;
         }
         printf(
             "%s:%d:%d: type error: proc '%.*s' expects at least %d args, got %d\n",
@@ -7656,7 +8195,8 @@ static void type_error_proc_arg_count(
                 "proc declared here"
             );
             diag_json_close();
-            exit(1);
+            diag_record_error();
+            return;
         }
         printf(
             "%s:%d:%d: type error: proc '%.*s' expects %d args, got %d\n",
@@ -7690,7 +8230,8 @@ static void type_error_proc_arg_count(
     printf("\n");
     diag_note_import_chain();
     type_note_proc_decl(decl);
-    exit(1);
+    diag_record_error();
+    return;
 }
 
 static void type_error_proc_argument(
@@ -7749,7 +8290,8 @@ static void type_error_proc_argument(
             "parameter declared here"
         );
         diag_json_close();
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: proc '%.*s' argument %d '%.*s' expected '%.*s', got '%.*s'\n",
@@ -7792,7 +8334,8 @@ static void type_error_proc_argument(
         param->name.data
     );
     type_note_proc_decl(decl);
-    exit(1);
+    diag_record_error();
+    return;
 }
 
 static void type_error_call_non_proc(
@@ -7815,7 +8358,8 @@ static void type_error_call_non_proc(
             callee_name.data
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: cannot call non-proc symbol '%.*s' of type '%.*s'\n",
@@ -7848,7 +8392,8 @@ static void type_error_proc_pointer_type_arg_count(
             got == 1 ? "" : "s"
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: proc pointer '%.*s' is not generic; got %d type arg%s\n",
@@ -7888,7 +8433,8 @@ static void type_error_proc_pointer_arg_count(
             diag_json_note_import_chain(&has_note);
             type_json_note_proc_pointer_expected_params(&has_note, proc_type, arena);
             diag_json_close();
-            exit(1);
+            diag_record_error();
+            return;
         }
         printf(
             "%s:%d:%d: type error: proc pointer '%.*s' expects at least %d args, got %d\n",
@@ -7917,7 +8463,8 @@ static void type_error_proc_pointer_arg_count(
             diag_json_note_import_chain(&has_note);
             type_json_note_proc_pointer_expected_params(&has_note, proc_type, arena);
             diag_json_close();
-            exit(1);
+            diag_record_error();
+            return;
         }
         printf(
             "%s:%d:%d: type error: proc pointer '%.*s' expects %d args, got %d\n",
@@ -7993,7 +8540,8 @@ static void type_error_proc_pointer_argument(
         type_json_note_mismatch_details(&has_note, prog, expected, actual, arena);
         type_json_note_proc_pointer_expected_params(&has_note, proc_type, arena);
         diag_json_close();
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: proc pointer '%.*s' argument %d%s%.*s%s expected '%.*s', got '%.*s'\n",
@@ -8051,7 +8599,8 @@ static void type_error_binary_op(TokenKind op, TypeExpr *left, TypeExpr *right, 
             right_name.data
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: operator %s cannot be applied to '%.*s' and '%.*s'\n",
@@ -8079,7 +8628,8 @@ static void type_error_ternary_condition(TypeExpr *cond, i32 line, i32 col, memo
             cond_name.data
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: ternary condition must be scalar/pointer, got '%.*s'\n",
@@ -8105,7 +8655,8 @@ static void type_error_condition(const char *context, TypeExpr *cond, i32 line, 
             cond_name.data
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: %s condition must be scalar/pointer, got '%.*s'\n",
@@ -8134,7 +8685,8 @@ static void type_error_ternary_arms(TypeExpr *right, TypeExpr *third, i32 line, 
             third_name.data
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: ternary arms cannot mix '%.*s' and '%.*s'\n",
@@ -8163,7 +8715,8 @@ static void type_error_enum_member(EnumDecl *decl, string8 member_name, i32 line
             member_name.data
         );
         diag_json_error_range(diag_current_path(), line, col, line, col + (i32)member_name.length + 1, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: enum '%.*s' has no member '%.*s'\n",
@@ -8198,7 +8751,8 @@ static void type_error_field_access(
                 field_name.data
             );
             diag_json_error(diag_current_path(), line, col, "type", message);
-            exit(1);
+            diag_record_error();
+            return;
         }
         printf(
             "%s:%d:%d: type error: cannot resolve base type for field '%.*s'\n",
@@ -8244,7 +8798,8 @@ static void type_error_field_access(
                 );
             }
             diag_json_error(diag_current_path(), line, col, "type", message);
-            exit(1);
+            diag_record_error();
+            return;
         }
         if (base_expr && base_expr->kind == Expr_Name) {
             printf(
@@ -8290,7 +8845,8 @@ static void type_error_field_access(
             field_name.data
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: type '%.*s' has no field '%.*s'\n",
@@ -8325,7 +8881,8 @@ static void type_error_initializer_field(
             field_name.data
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: initializer for type '%.*s' has no field '%.*s'\n",
@@ -8357,7 +8914,8 @@ static void type_error_initializer_count(
             target_name.data
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: too many positional initializer values for type '%.*s'\n",
@@ -8387,7 +8945,8 @@ static void type_error_initializer_duplicate_field(
             field_name.data
         );
         diag_json_error_with_note(diag_current_path(), line, col, "type", message, diag_current_path(), prev_line, prev_col, "previous initializer here");
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: duplicate initializer for field '%.*s' (previous at %d:%d)\n",
@@ -8419,7 +8978,8 @@ static void type_error_initializer_duplicate_index(
             index_name.data
         );
         diag_json_error_with_note(diag_current_path(), line, col, "type", message, diag_current_path(), prev_line, prev_col, "previous initializer here");
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: duplicate initializer for array index '%.*s' (previous at %d:%d)\n",
@@ -8454,7 +9014,8 @@ static void type_error_initializer_index_bounds(
             target_name.data
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: initializer index '%.*s' is out of bounds for type '%.*s'\n",
@@ -8484,7 +9045,8 @@ static void type_error_initializer_index_integer(
             index_name.data
         );
         diag_json_error(diag_current_path(), line, col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: initializer index '%.*s' must be a non-negative integer literal\n",
@@ -8641,12 +9203,14 @@ static void type_check_initializer_against(
             }
             if (!field) {
                 type_error_initializer_field(expected, designator->name, designator->line, designator->col, arena);
+                continue; // no field to check this value against
             }
             init_line = designator->line;
             init_col = designator->col;
         } else if (designator_kind == InitDesignator_None) {
             if (positional_index >= decl->fields.length) {
                 type_error_initializer_count(expected, init->line, init->col, arena);
+                continue; // reading past the field list would be out of bounds
             }
             field = (Field *)decl->fields.data[positional_index];
             positional_index += 1;
@@ -8701,7 +9265,8 @@ static void type_error_missing_type_operation(Expr *call, TypeExpr *type_arg, me
             mangle.data
         );
         diag_json_error(diag_current_path(), call->line, call->col, "type", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf(
         "%s:%d:%d: type error: missing type operation proc '%.*s' for call '%.*s<%.*s>'\n",
@@ -8717,7 +9282,8 @@ static void type_error_missing_type_operation(Expr *call, TypeExpr *type_arg, me
     );
     diag_print_file_context(g_diag_source_path ? g_diag_source_path : g_source_path, call->line, call->col);
     diag_note_import_chain();
-    exit(1);
+    diag_record_error();
+    return;
 }
 
 static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_arena *arena) {
@@ -8739,6 +9305,10 @@ static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_
         TypeExpr *proc_type = type_proc_from_callable_type(prog, callee_type);
         if (!proc_type) {
             type_error_call_non_proc(call->name, callee_type, call->line, call->col, arena);
+            for (i32 i = 0; i < call->args.length; i++) {
+                type_check_expr((Expr *)call->args.data[i], scope, prog, arena);
+            }
+            return; // nothing below can describe a callee that is not callable
         }
         if (call->type_args.length > 0) {
             type_error_proc_pointer_type_arg_count(call->name, call->type_args.length, call->line, call->col);
@@ -8770,6 +9340,12 @@ static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_
     if (decl->is_generic) {
         if (call->type_args.length != 1) {
             type_error_proc_type_arg_count(decl, call->type_args.length, call->line, call->col);
+            /* Parameter types still mention the unsubstituted type param, so
+               checking arguments against them would only invent follow-on errors. */
+            for (i32 i = 0; i < call->args.length; i++) {
+                type_check_expr((Expr *)call->args.data[i], scope, prog, arena);
+            }
+            return;
         }
     } else if (call->type_args.length > 0 && !concrete_specialization) {
         type_error_proc_type_arg_count(decl, call->type_args.length, call->line, call->col);
@@ -9267,10 +9843,12 @@ static const char *printfmt_path(const char *path) {
 static void printfmt_error_at(const char *path, i32 line, i32 col, const char *message) {
     if (g_diag_json) {
         diag_json_error(printfmt_path(path), line, col, "format", message);
-        exit(1);
+        diag_record_error();
+        return;
     }
     printf("%s:%d:%d: format error: %s\n", printfmt_path(path), line, col, message);
-    exit(1);
+    diag_record_error();
+    return;
 }
 
 static bool expr_is_printfmt_call(Expr *e) {
@@ -9391,22 +9969,26 @@ static void rewrite_printfmt_call_stmt(Stmt *stmt, TypeScope *scope, Program *pr
     Expr *call = stmt->expr;
     if (call->args.length < 1) {
         printfmt_error_at(stmt->source_path, call->line, call->col, "printfmt expects a string literal format");
+        return;
     }
     Expr *fmt = (Expr *)call->args.data[0];
     if (!fmt || fmt->kind != Expr_String) {
         printfmt_error_at(stmt->source_path, call->line, call->col, "printfmt expects a string literal format");
+        return; // string_lit is meaningless on any other expression
     }
 
     string8 lit = fmt->string_lit;
     i32 placeholder_count = printfmt_count_placeholders(lit);
     if (placeholder_count < 0) {
         printfmt_error_at(stmt->source_path, fmt->line, fmt->col, "printfmt expects a normal string literal format");
+        return;
     }
     i32 value_count = call->args.length - 1;
     if (placeholder_count != value_count) {
         char message[256];
         snprintf(message, sizeof(message), "printfmt placeholder count (%d) does not match arg count (%d)", placeholder_count, value_count);
         printfmt_error_at(stmt->source_path, fmt->line, fmt->col, message);
+        return; // expanding would read past the supplied arguments
     }
 
     u64 chunk_start = 1;
@@ -9706,7 +10288,7 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
         }
         return;
     }
-    if (e->kind == Expr_String) {
+    if (e->kind == Expr_String || e->kind == Expr_Char) {
         emit_string8(arena, out, e->string_lit);
         return;
     }
@@ -9780,6 +10362,7 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
     if (e->kind == Expr_Unary) {
         if (e->op == Token_Bang) emit_cstr(arena, out, "!");
         else if (e->op == Token_Minus) emit_cstr(arena, out, "-");
+        else if (e->op == Token_Tilde) emit_cstr(arena, out, "~");
         emit_expr(arena, out, e->inner, sub, generic_name);
         return;
     }
@@ -9838,6 +10421,7 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
     if (!s) return;
     emit_line_directive_path(arena, out, s->source_path, s->line);
     if (s->kind == Stmt_Var) {
+        if (s->is_static) emit_cstr(arena, out, "static ");
         emit_decl(arena, out, s->type, s->name, sub);
         if (s->expr) {
             emit_cstr(arena, out, " = ");
@@ -9855,19 +10439,22 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
         emit_cstr(arena, out, ";\n");
         return;
     }
+    if (s->kind == Stmt_Goto) {
+        emit_cstr(arena, out, "goto ");
+        emit_string8(arena, out, s->name);
+        emit_cstr(arena, out, ";\n");
+        return;
+    }
+    if (s->kind == Stmt_Label) {
+        /* The trailing null statement keeps a label legal at the end of a block. */
+        emit_string8(arena, out, s->name);
+        emit_cstr(arena, out, ": ;\n");
+        return;
+    }
     if (s->kind == Stmt_Assign) {
         if (s->lhs) emit_expr(arena, out, s->lhs, sub, generic_name);
         else emit_string8(arena, out, s->name);
-        if (s->assign_op == Token_Equal) emit_cstr(arena, out, " = ");
-        else if (s->assign_op == Token_PlusEqual) emit_cstr(arena, out, " += ");
-        else if (s->assign_op == Token_MinusEqual) emit_cstr(arena, out, " -= ");
-        else if (s->assign_op == Token_StarEqual) emit_cstr(arena, out, " *= ");
-        else if (s->assign_op == Token_SlashEqual) emit_cstr(arena, out, " /= ");
-        else if (s->assign_op == Token_PercentEqual) emit_cstr(arena, out, " %= ");
-        else if (s->assign_op == Token_AmpersandEqual) emit_cstr(arena, out, " &= ");
-        else if (s->assign_op == Token_CaretEqual) emit_cstr(arena, out, " ^= ");
-        else if (s->assign_op == Token_PipeEqual) emit_cstr(arena, out, " |= ");
-        else emit_cstr(arena, out, " = ");
+        emit_assign_op(arena, out, s->assign_op);
         emit_expr_value(arena, out, s->expr, sub, generic_name);
         emit_cstr(arena, out, ";\n");
         return;
@@ -9903,16 +10490,7 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
             if (s->for_step->kind == Stmt_Assign) {
                 if (s->for_step->lhs) emit_expr(arena, out, s->for_step->lhs, sub, generic_name);
                 else emit_string8(arena, out, s->for_step->name);
-                if (s->for_step->assign_op == Token_Equal) emit_cstr(arena, out, " = ");
-                else if (s->for_step->assign_op == Token_PlusEqual) emit_cstr(arena, out, " += ");
-                else if (s->for_step->assign_op == Token_MinusEqual) emit_cstr(arena, out, " -= ");
-                else if (s->for_step->assign_op == Token_StarEqual) emit_cstr(arena, out, " *= ");
-                else if (s->for_step->assign_op == Token_SlashEqual) emit_cstr(arena, out, " /= ");
-                else if (s->for_step->assign_op == Token_PercentEqual) emit_cstr(arena, out, " %= ");
-                else if (s->for_step->assign_op == Token_AmpersandEqual) emit_cstr(arena, out, " &= ");
-                else if (s->for_step->assign_op == Token_CaretEqual) emit_cstr(arena, out, " ^= ");
-                else if (s->for_step->assign_op == Token_PipeEqual) emit_cstr(arena, out, " |= ");
-                else emit_cstr(arena, out, " = ");
+                emit_assign_op(arena, out, s->for_step->assign_op);
                 emit_expr_value(arena, out, s->for_step->expr, sub, generic_name);
             } else if (s->for_step->kind == Stmt_Expr) {
                 emit_expr_value(arena, out, s->for_step->expr, sub, generic_name);
@@ -9986,18 +10564,39 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
     }
 }
 
+static void emit_struct_fields(
+    memops_arena *arena,
+    string8 *out,
+    StructDecl *decl,
+    TypeSub sub,
+    const char *indent
+) {
+    for (i32 i = 0; i < decl->fields.length; i++) {
+        Field *f = (Field *)decl->fields.data[i];
+        emit_line_directive_path(arena, out, decl->source_path, f->line);
+        emit_cstr(arena, out, indent);
+        if (f->anon) {
+            emit_cstr(arena, out, f->anon->is_union ? "union {\n" : "struct {\n");
+            emit_struct_fields(arena, out, f->anon, sub, "        ");
+            emit_cstr(arena, out, indent);
+            emit_cstr(arena, out, "};\n");
+            continue;
+        }
+        emit_decl(arena, out, f->type, f->name, sub);
+        if (f->bit_width.data) {
+            emit_cstr(arena, out, " : ");
+            emit_string8(arena, out, f->bit_width);
+        }
+        emit_cstr(arena, out, ";\n");
+    }
+}
+
 static void emit_struct_decl(memops_arena *arena, string8 *out, StructDecl *decl) {
     emit_line_directive_path(arena, out, decl->source_path, decl->line);
     emit_cstr(arena, out, decl->is_union ? "uniondef(" : "structdef(");
     emit_string8(arena, out, decl->name);
     emit_cstr(arena, out, ") {\n");
-    for (i32 i = 0; i < decl->fields.length; i++) {
-        Field *f = (Field *)decl->fields.data[i];
-        emit_line_directive_path(arena, out, decl->source_path, f->line);
-        emit_cstr(arena, out, "    ");
-        emit_decl(arena, out, f->type, f->name, (TypeSub){0});
-        emit_cstr(arena, out, ";\n");
-    }
+    emit_struct_fields(arena, out, decl, (TypeSub){0}, "    ");
     emit_cstr(arena, out, "};\n\n");
 }
 
@@ -10021,7 +10620,10 @@ static void emit_enum_decl(memops_arena *arena, string8 *out, EnumDecl *decl) {
         emit_string8(arena, out, decl->name);
         emit_cstr(arena, out, "_");
         emit_string8(arena, out, item->name);
-        if (item->value.data) {
+        if (item->value_expr) {
+            emit_cstr(arena, out, " = ");
+            emit_expr(arena, out, item->value_expr, (TypeSub){0}, (string8){0});
+        } else if (item->value.data) {
             emit_cstr(arena, out, " = ");
             emit_string8(arena, out, item->value);
         }
@@ -10078,13 +10680,7 @@ static void emit_struct_decl_mono(memops_arena *arena, string8 *out, StructDecl 
     emit_cstr(arena, out, "_");
     emit_string8(arena, out, type_mangled);
     emit_cstr(arena, out, ") {\n");
-    for (i32 i = 0; i < decl->fields.length; i++) {
-        Field *f = (Field *)decl->fields.data[i];
-        emit_line_directive_path(arena, out, decl->source_path, f->line);
-        emit_cstr(arena, out, "    ");
-        emit_decl(arena, out, f->type, f->name, sub);
-        emit_cstr(arena, out, ";\n");
-    }
+    emit_struct_fields(arena, out, decl, sub, "    ");
     emit_cstr(arena, out, "};\n\n");
 }
 
@@ -10238,6 +10834,7 @@ static void emit_proc_params(memops_arena *arena, string8 *out, ProcDecl *decl, 
 static void emit_proc_decl(memops_arena *arena, string8 *out, ProcDecl *decl) {
     if (decl->is_external) return;
     emit_line_directive_path(arena, out, decl->source_path, decl->line);
+    if (decl->is_static) emit_cstr(arena, out, "static ");
     emit_type(arena, out, decl->ret_type, (TypeSub){0});
     emit_cstr(arena, out, " ");
     if (decl->callconv.data) {
@@ -10258,6 +10855,7 @@ static void emit_proc_decl(memops_arena *arena, string8 *out, ProcDecl *decl) {
 static void emit_proc_proto(memops_arena *arena, string8 *out, ProcDecl *decl) {
     if (decl->is_external && !decl->emit_external_proto) return;
     emit_line_directive_path(arena, out, decl->source_path, decl->line);
+    if (decl->is_static) emit_cstr(arena, out, "static ");
     emit_type(arena, out, decl->ret_type, (TypeSub){0});
     emit_cstr(arena, out, " ");
     if (decl->callconv.data) {
@@ -10430,12 +11028,50 @@ static void emit_c_string_literal_from_cstr(memops_arena *arena, string8 *out, c
     emit_cstr(arena, out, "\"");
 }
 
+/* A '#line N "f"' directive renumbers everything after it, so the emitter tracks
+   where the last one landed and how many lines have been written since. A new
+   directive is only needed when the implied position has drifted from the wanted
+   one, which keeps mappings exact while dropping the redundant majority. */
+static bool g_emit_all_line_directives = false; // --emit-all-line-directives, for the mapping test
+static string8 *g_line_last_out = null;
+static const char *g_line_last_path = null;
+static i32 g_line_last_value = 0;
+static u64 g_line_last_offset = 0;
+
+static void emit_line_directive_reset(void) {
+    g_line_last_out = null;
+    g_line_last_path = null;
+    g_line_last_value = 0;
+    g_line_last_offset = 0;
+}
+
+static i32 emit_count_newlines_since(string8 *out, u64 from) {
+    i32 count = 0;
+    for (u64 i = from; i < out->length; i++) {
+        if (out->data[i] == '\n') count++;
+    }
+    return count;
+}
+
 static void emit_line_directive_path(memops_arena *arena, string8 *out, const char *path, i32 line) {
+    const char *use_path = path ? path : g_source_path;
+    if (!g_emit_all_line_directives &&
+        g_line_last_out == out &&
+        g_line_last_path &&
+        cstr_equals(g_line_last_path, use_path) &&
+        out->length >= g_line_last_offset &&
+        g_line_last_value + emit_count_newlines_since(out, g_line_last_offset) == line) {
+        return;
+    }
     char line_buf[64];
     snprintf(line_buf, sizeof(line_buf), "#line %d ", line);
     emit_cstr(arena, out, line_buf);
-    emit_c_string_literal_from_cstr(arena, out, path ? path : g_source_path);
+    emit_c_string_literal_from_cstr(arena, out, use_path);
     emit_cstr(arena, out, "\n");
+    g_line_last_out = out;
+    g_line_last_path = use_path;
+    g_line_last_value = line;
+    g_line_last_offset = out->length;
 }
 
 static void emit_generated_line_directive(memops_arena *arena, string8 *out) {
@@ -10481,40 +11117,57 @@ static void emit_proc_monomorph_comment(
     emit_cstr(arena, out, " */\n");
 }
 
-static void emit_struct_reflection(
+/* Anonymous members are flattened into the owner's field list, because C lets
+   offsetof reach their members directly. Bitfields have no address, so their
+   offset/size/alignment are reported as zero rather than emitting invalid C. */
+static i32 reflect_field_count(StructDecl *decl) {
+    i32 count = 0;
+    for (i32 i = 0; i < decl->fields.length; i++) {
+        Field *f = (Field *)decl->fields.data[i];
+        count += f->anon ? reflect_field_count(f->anon) : 1;
+    }
+    return count;
+}
+
+static void emit_struct_reflection_fields(
     memops_arena *arena,
     string8 *out,
     StructDecl *decl,
     string8 concrete_name,
     TypeSub sub
 ) {
-    emit_generated_line_directive(arena, out);
-    emit_cstr(arena, out, "static const i_reflect_field i_reflect_fields_");
-    emit_string8(arena, out, concrete_name);
-    emit_cstr(arena, out, "[] = {\n");
     for (i32 i = 0; i < decl->fields.length; i++) {
         Field *f = (Field *)decl->fields.data[i];
+        if (f->anon) {
+            emit_struct_reflection_fields(arena, out, f->anon, concrete_name, sub);
+            continue;
+        }
         TypeExpr *field_type = sub.has ? substitute_type_param(arena, f->type, sub.param, sub.arg) : f->type;
         string8 type_name = type_mangle(arena, field_type, (TypeSub){0});
+        bool is_bitfield = f->bit_width.data != null;
         emit_cstr(arena, out, "    {");
         emit_string8_as_c_string(arena, out, f->name);
         emit_cstr(arena, out, ", ");
         emit_string8_as_c_string(arena, out, type_name);
         emit_cstr(arena, out, ", ");
         emit_string8_as_c_string(arena, out, f->attrs);
-        emit_cstr(arena, out, ", (u64)offsetof(");
-        emit_string8(arena, out, concrete_name);
-        emit_cstr(arena, out, ", ");
-        emit_string8(arena, out, f->name);
-        emit_cstr(arena, out, "), (u64)sizeof(((");
-        emit_string8(arena, out, concrete_name);
-        emit_cstr(arena, out, " *)0)->");
-        emit_string8(arena, out, f->name);
-        emit_cstr(arena, out, "), (u64)__alignof__((( ");
-        emit_string8(arena, out, concrete_name);
-        emit_cstr(arena, out, " *)0)->");
-        emit_string8(arena, out, f->name);
-        emit_cstr(arena, out, "), ");
+        if (is_bitfield) {
+            emit_cstr(arena, out, ", 0, 0, 0, ");
+        } else {
+            emit_cstr(arena, out, ", (u64)offsetof(");
+            emit_string8(arena, out, concrete_name);
+            emit_cstr(arena, out, ", ");
+            emit_string8(arena, out, f->name);
+            emit_cstr(arena, out, "), (u64)sizeof(((");
+            emit_string8(arena, out, concrete_name);
+            emit_cstr(arena, out, " *)0)->");
+            emit_string8(arena, out, f->name);
+            emit_cstr(arena, out, "), (u64)__alignof__((( ");
+            emit_string8(arena, out, concrete_name);
+            emit_cstr(arena, out, " *)0)->");
+            emit_string8(arena, out, f->name);
+            emit_cstr(arena, out, "), ");
+        }
         emit_cstr(arena, out, reflect_type_kind_name(field_type));
         emit_cstr(arena, out, ", ");
         emit_reflect_array_count(arena, out, field_type);
@@ -10532,6 +11185,20 @@ static void emit_struct_reflection(
         emit_cstr(arena, out, reflect_type_has_const(field_type) ? "1" : "0");
         emit_cstr(arena, out, "},\n");
     }
+}
+
+static void emit_struct_reflection(
+    memops_arena *arena,
+    string8 *out,
+    StructDecl *decl,
+    string8 concrete_name,
+    TypeSub sub
+) {
+    emit_generated_line_directive(arena, out);
+    emit_cstr(arena, out, "static const i_reflect_field i_reflect_fields_");
+    emit_string8(arena, out, concrete_name);
+    emit_cstr(arena, out, "[] = {\n");
+    emit_struct_reflection_fields(arena, out, decl, concrete_name, sub);
     emit_cstr(arena, out, "};\n");
     emit_cstr(arena, out, "const i_reflect_type ");
     emit_string8(arena, out, concrete_name);
@@ -10544,7 +11211,7 @@ static void emit_struct_reflection(
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "), ");
     char count_buf[32];
-    snprintf(count_buf, sizeof(count_buf), "%llu", (unsigned long long)decl->fields.length);
+    snprintf(count_buf, sizeof(count_buf), "%llu", (unsigned long long)reflect_field_count(decl));
     emit_cstr(arena, out, count_buf);
     emit_cstr(arena, out, ", i_reflect_fields_");
     emit_string8(arena, out, concrete_name);
@@ -10634,6 +11301,7 @@ static void emit_generated_file_banner(memops_arena *arena, string8 *out, const 
 }
 
 static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
+    emit_line_directive_reset();
     emit_generated_file_banner(arena, out, "source");
     emit_cstr(arena, out, "#include <core.h>\n#include <reflect.h>\n#include <stddef.h>\n\n");
     for (i32 i = 0; i < prog->preprocessor_lines.length; i++) {
@@ -10801,6 +11469,7 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
 }
 
 static void emit_header_program(memops_arena *arena, Program *prog, string8 *out) {
+    emit_line_directive_reset();
     emit_generated_file_banner(arena, out, "header");
     emit_cstr(arena, out, "#pragma once\n#include <core.h>\n#include <reflect.h>\n#include <stddef.h>\n\n");
     for (i32 i = 0; i < prog->preprocessor_lines.length; i++) {
@@ -10881,6 +11550,7 @@ static void emit_header_program(memops_arena *arena, Program *prog, string8 *out
 
     for (i32 i = 0; i < prog->globals.length; i++) {
         Stmt *s = (Stmt *)prog->globals.data[i];
+        if (s->is_static) continue; // internal linkage: not part of the public surface
         emit_line_directive_path(arena, out, s->source_path, s->line);
         emit_cstr(arena, out, "extern ");
         emit_decl(arena, out, s->type, s->name, (TypeSub){0});
@@ -10890,6 +11560,7 @@ static void emit_header_program(memops_arena *arena, Program *prog, string8 *out
 
     for (i32 i = 0; i < prog->procs.length; i++) {
         ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
+        if (decl->is_static) continue; // internal linkage: not part of the public surface
         if (!decl->is_generic) emit_proc_proto(arena, out, decl);
     }
     for (i32 i = 0; i < prog->procs.length; i++) {
@@ -11009,11 +11680,11 @@ static Program parse_i_file(memops_arena *arena, const char *path) {
             char message[1024];
             snprintf(message, sizeof(message), "failed to read import %s", path);
             diag_json_error(g_source_path, 0, 0, "semantic", message);
-            exit(1);
+            diag_exit_with_errors();
         }
         printf("%s:0:0: semantic error: failed to read import %s\n", g_source_path, path);
         diag_note_import_chain();
-        exit(1);
+        diag_exit_with_errors();
     }
 
     const char *prev_source_path = g_source_path;
@@ -11158,7 +11829,7 @@ static Program expand_i_imports(memops_arena *arena, Program *prog, Vec_string8 
         if (cycle_start >= 0) {
             const char *source_path = stack->length > 0 ? (const char *)stack->data[stack->length - 1].data : g_source_path;
             print_import_cycle(stack, cycle_start, path_s, source_path, import_chain, import_line, import_col);
-            exit(1);
+            diag_exit_with_errors();
         }
         if (array_string8_contains(visited, path_s)) {
             continue;
@@ -11183,14 +11854,14 @@ static Program expand_i_imports(memops_arena *arena, Program *prog, Vec_string8 
                     diag_json_note_cstr(&has_note, g_source_path, 0, 0, note);
                 }
                 diag_json_close();
-                exit(1);
+                diag_exit_with_errors();
             }
             printf("%s:%d:%d: semantic error: failed to read import %s\n", g_source_path, import_line, import_col, path);
             diag_print_file_context(g_source_path, import_line, import_col);
             if (import_chain && import_chain[0]) {
                 printf("%s:0:0: note: imported through: %s\n", g_source_path, import_chain);
             }
-            exit(1);
+            diag_exit_with_errors();
         }
 
         const char *prev_source_path = g_source_path;
@@ -11519,6 +12190,7 @@ static bool cli_is_command(const char *arg) {
 static void cli_error_json_or_text(const char *message) {
     if (g_diag_json) {
         diag_json_error("<cli>", 0, 0, "cli", message);
+        diag_json_finish(); // CLI failures are always terminal
     } else {
         printf("i: error: %s\n", message);
     }
@@ -11536,6 +12208,9 @@ static bool cli_expect_value(i32 argc, char *argv[], i32 *index, const char *opt
 }
 
 i32 main(i32 argc, char *argv[]) {
+    /* Guarantees the JSON diagnostic array is closed on every exit path, including
+       the I/O failures that return straight out of main. */
+    atexit(diag_json_finish);
     double profile_start = profile_now_ms();
     double profile_last = profile_start;
     bool check_only = false;
@@ -11613,6 +12288,10 @@ i32 main(i32 argc, char *argv[]) {
             emit_header = false;
             continue;
         }
+        if (cstr_equals(arg, "--emit-all-line-directives")) {
+            g_emit_all_line_directives = true;
+            continue;
+        }
         if (cstr_equals(arg, "--check")) {
             check_only = true;
             if (i + 1 < argc && !cstr_starts_with(argv[i + 1], "--") && !input_path) {
@@ -11674,6 +12353,7 @@ i32 main(i32 argc, char *argv[]) {
             if (i + 1 >= argc) {
                 if (g_diag_json) {
                     diag_json_error("<cli>", 0, 0, "cli", "--stdin-path expects a file path");
+                    diag_json_finish();
                     return 1;
                 }
                 printf("i: error: --stdin-path expects a file path\n");
@@ -11692,6 +12372,7 @@ i32 main(i32 argc, char *argv[]) {
                     char message[1024];
                     snprintf(message, sizeof(message), "unsupported lsp format %s", value);
                     diag_json_error("<cli>", 0, 0, "cli", message);
+                    diag_json_finish();
                     return 1;
                 }
                 printf("i: error: unsupported lsp format %s\n", value);
@@ -11703,6 +12384,7 @@ i32 main(i32 argc, char *argv[]) {
             if (i + 1 >= argc) {
                 if (g_diag_json) {
                     diag_json_error("<cli>", 0, 0, "cli", "--lsp expects a format");
+                    diag_json_finish();
                     return 1;
                 }
                 printf("i: error: --lsp expects a format\n");
@@ -11717,6 +12399,7 @@ i32 main(i32 argc, char *argv[]) {
                     char message[1024];
                     snprintf(message, sizeof(message), "unsupported lsp format %s", value);
                     diag_json_error("<cli>", 0, 0, "cli", message);
+                    diag_json_finish();
                     return 1;
                 }
                 printf("i: error: unsupported lsp format %s\n", value);
@@ -11775,6 +12458,7 @@ i32 main(i32 argc, char *argv[]) {
                     char message[1024];
                     snprintf(message, sizeof(message), "unsupported symbols format %s", value);
                     diag_json_error("<cli>", 0, 0, "cli", message);
+                    diag_json_finish();
                     return 1;
                 }
                 printf("i: error: unsupported symbols format %s\n", value);
@@ -11786,6 +12470,7 @@ i32 main(i32 argc, char *argv[]) {
             if (i + 1 >= argc) {
                 if (g_diag_json) {
                     diag_json_error("<cli>", 0, 0, "cli", "--symbols expects a format");
+                    diag_json_finish();
                     return 1;
                 }
                 printf("i: error: --symbols expects a format\n");
@@ -11800,6 +12485,7 @@ i32 main(i32 argc, char *argv[]) {
                     char message[1024];
                     snprintf(message, sizeof(message), "unsupported symbols format %s", value);
                     diag_json_error("<cli>", 0, 0, "cli", message);
+                    diag_json_finish();
                     return 1;
                 }
                 printf("i: error: unsupported symbols format %s\n", value);
@@ -11816,6 +12502,7 @@ i32 main(i32 argc, char *argv[]) {
                     char message[1024];
                     snprintf(message, sizeof(message), "unsupported diagnostics format %s", value);
                     diag_json_error("<cli>", 0, 0, "cli", message);
+                    diag_json_finish();
                     return 1;
                 }
                 printf("i: error: unsupported diagnostics format %s\n", value);
@@ -11827,6 +12514,7 @@ i32 main(i32 argc, char *argv[]) {
             if (i + 1 >= argc) {
                 if (g_diag_json) {
                     diag_json_error("<cli>", 0, 0, "cli", "--diagnostics expects a format");
+                    diag_json_finish();
                     return 1;
                 }
                 printf("i: error: --diagnostics expects a format\n");
@@ -11840,6 +12528,7 @@ i32 main(i32 argc, char *argv[]) {
                     char message[1024];
                     snprintf(message, sizeof(message), "unsupported diagnostics format %s", value);
                     diag_json_error("<cli>", 0, 0, "cli", message);
+                    diag_json_finish();
                     return 1;
                 }
                 printf("i: error: unsupported diagnostics format %s\n", value);
@@ -11852,6 +12541,7 @@ i32 main(i32 argc, char *argv[]) {
                 char message[1024];
                 snprintf(message, sizeof(message), "unknown option %s", arg);
                 diag_json_error("<cli>", 0, 0, "cli", message);
+                diag_json_finish();
                 return 1;
             }
             printf("i: error: unknown option %s\n", arg);
@@ -11868,6 +12558,7 @@ i32 main(i32 argc, char *argv[]) {
                 char message[1024];
                 snprintf(message, sizeof(message), "unexpected argument %s", arg);
                 diag_json_error("<cli>", 0, 0, "cli", message);
+                diag_json_finish();
                 return 1;
             }
             printf("i: error: unexpected argument %s\n", arg);
@@ -11895,6 +12586,7 @@ i32 main(i32 argc, char *argv[]) {
         if (!g_stdin_override_source.data) {
             if (g_diag_json) {
                 diag_json_error(stdin_override_path_arg, 0, 0, "io", "failed to read stdin");
+                diag_json_finish();
                 return 1;
             }
             printf("i: error: failed to read stdin\n");
@@ -11920,6 +12612,7 @@ i32 main(i32 argc, char *argv[]) {
             char message[1024];
             snprintf(message, sizeof(message), "failed to read %s", input_from_stdin ? "stdin" : input_path);
             diag_json_error(input_path, 0, 0, "io", message);
+            diag_json_finish();
             return 1;
         }
         printf("i: error: failed to read %s\n", input_from_stdin ? "stdin" : input_path);
@@ -11947,6 +12640,12 @@ i32 main(i32 argc, char *argv[]) {
     }
     prog = expand_i_imports(&arena, &prog, &visited_imports, &import_stack);
     profile_mark("expand imports", &profile_last, profile_start);
+    /* Lex and parse errors are all reported together, but analysis does not run on
+       a tree that failed to parse, because the follow-on errors would be noise. */
+    if (g_error_count > 0) {
+        diag_json_finish();
+        return 1;
+    }
     profile_import_summary();
     Vec_string8 symbol_known_types = semantic_collect_known_type_names(&prog, &arena);
     semantic_collect_program_external_type_names(&prog, &symbol_known_types, &arena);
@@ -11965,6 +12664,13 @@ i32 main(i32 argc, char *argv[]) {
     profile_mark("type check", &profile_last, profile_start);
     rewrite_printfmt_formats(&prog, &arena);
     profile_mark("printfmt rewrite", &profile_last, profile_start);
+
+    /* Every semantic and type diagnostic has been reported by here, so nothing is
+       generated if any of them failed. */
+    if (g_error_count > 0) {
+        diag_json_finish();
+        return 1;
+    }
 
     if (lsp_json) {
         emit_lsp_json(&arena, &prog);
@@ -12001,6 +12707,7 @@ i32 main(i32 argc, char *argv[]) {
             char message[1024];
             snprintf(message, sizeof(message), "failed to write %s", output_path);
             diag_json_error(output_path, 0, 0, "io", message);
+            diag_json_finish();
             return 1;
         }
         printf("i: error: failed to write %s\n", output_path);
@@ -12013,6 +12720,7 @@ i32 main(i32 argc, char *argv[]) {
                 char message[1024];
                 snprintf(message, sizeof(message), "failed to write %s", header_path);
                 diag_json_error(header_path, 0, 0, "io", message);
+                diag_json_finish();
                 return 1;
             }
             printf("i: error: failed to write %s\n", header_path);
