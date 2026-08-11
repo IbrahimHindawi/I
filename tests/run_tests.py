@@ -7249,6 +7249,15 @@ c:proc()->i32 = { return 2; }
             (),
         ),
         (
+            # Stray statements between switch arms must be reported once, not
+            # re-reported until the diagnostic cap stops the loop.
+            "switch_stray_statement_resync",
+            "main:proc()->i32 = {\n    switch (1) {\n        case 1: { break; }\n"
+            "        stray_call();\n        case 2: { break; }\n    }\n    return 0;\n}\n",
+            ("expected case/default in switch",),
+            (),
+        ),
+        (
             "blockless_label_rejected",
             "main:proc()->i32 = {\n    done: label;\n    return 0;\n}\n",
             ("expected '=' after label",),

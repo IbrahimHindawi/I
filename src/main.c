@@ -70,6 +70,7 @@ static const char *g_diag_source_path = null;
 static const char *g_diag_import_chain = null;
 static const char *g_stdin_override_path = null;
 static string8 g_stdin_override_source = {0};
+static memops_arena *g_index_arena = null; // owns compiler-internal lookup tables
 static bool g_diag_json = false;
 static bool g_profile = false;
 
@@ -2535,8 +2536,16 @@ static Stmt *parse_stmt(Parser *p) {
                 }
                 continue;
             }
+            /* Report once, then skip to the next arm. Without this the loop would
+               re-report the same token until the diagnostic cap stopped it. */
             Token *t = parser_peek(p);
             parser_error_token(p, t, "expected case/default in switch");
+            while (parser_peek(p)->kind != Token_Keyword_Case &&
+                   parser_peek(p)->kind != Token_Keyword_Default &&
+                   parser_peek(p)->kind != Token_RBrace &&
+                   parser_peek(p)->kind != Token_EOF) {
+                parser_next(p);
+            }
         }
         return s;
     }
@@ -6235,6 +6244,36 @@ static bool collect_generic_calls_from_stmt(
     return false;
 }
 
+/* The instantiation closure is a property of the whole program, not of the decl
+   being asked about: decl only selects which results come back at the end. Running
+   it per decl meant repeating a whole-program fixpoint once per generic proc, which
+   on a project pulling in the std containers is 135 times per pass. It is computed
+   once and shared instead.
+
+   The cache is keyed on anything that can change the answer: the proc list growing
+   (imports) and the printfmt pass rewriting bodies, which can introduce new generic
+   calls. */
+static Vec_voidptr g_generic_entries;
+static Vec_voidptr g_generic_sites;
+static bool g_generic_cache_ready = false;
+static i32 g_generic_cache_procs = -1;
+static u64 g_generic_cache_generation = 0;
+static u64 g_program_generation = 0;
+
+static void collect_generic_proc_instances_build(Program *prog, memops_arena *arena);
+
+static Vec_voidptr *generic_entries_get(Program *prog, memops_arena *arena) {
+    if (!g_generic_cache_ready ||
+        g_generic_cache_procs != prog->procs.length ||
+        g_generic_cache_generation != g_program_generation) {
+        collect_generic_proc_instances_build(prog, arena);
+        g_generic_cache_ready = true;
+        g_generic_cache_procs = prog->procs.length;
+        g_generic_cache_generation = g_program_generation;
+    }
+    return &g_generic_entries;
+}
+
 static void collect_generic_proc_instances_with_sites(
     Program *prog,
     ProcDecl *decl,
@@ -6243,6 +6282,28 @@ static void collect_generic_proc_instances_with_sites(
     Vec_voidptr *constraint_sites,
     memops_arena *arena
 ) {
+    Vec_voidptr *cached = generic_entries_get(prog, arena);
+    if (constraint_sites) {
+        for (i32 i = 0; i < g_generic_sites.length; i++) {
+            ptr_array_append(arena, constraint_sites, g_generic_sites.data[i]);
+        }
+    }
+    GenericProcEntry *target = generic_entry_from_decl(cached, decl);
+    if (!target) return;
+    for (i32 i = 0; i < target->instances.length; i++) {
+        string8 mangle = target->instances.data[i];
+        if (!array_string8_contains(out, mangle)) {
+            Vec_string8_append(arena, out, mangle);
+            if (out_subs) {
+                Vec_string8_append(arena, out_subs, target->sub_instances.data[i]);
+            }
+        }
+    }
+}
+
+static void collect_generic_proc_instances_build(Program *prog, memops_arena *arena) {
+    Vec_voidptr *constraint_sites = &g_generic_sites;
+    *constraint_sites = ptr_array_reserve(arena, 16);
     Vec_voidptr entries = ptr_array_reserve(arena, 32);
     for (i32 i = 0; i < prog->procs.length; i++) {
         ProcDecl *p = (ProcDecl *)prog->procs.data[i];
@@ -6291,17 +6352,7 @@ static void collect_generic_proc_instances_with_sites(
         }
     }
 
-    GenericProcEntry *target = generic_entry_from_decl(&entries, decl);
-    if (!target) return;
-    for (i32 i = 0; i < target->instances.length; i++) {
-        string8 mangle = target->instances.data[i];
-        if (!array_string8_contains(out, mangle)) {
-            Vec_string8_append(arena, out, mangle);
-            if (out_subs) {
-                Vec_string8_append(arena, out_subs, target->sub_instances.data[i]);
-            }
-        }
-    }
+    g_generic_entries = entries;
 }
 
 static bool type_expr_equal_resolved(Program *prog, TypeExpr *a, TypeExpr *b);
@@ -6528,11 +6579,19 @@ static void validate_generic_constraints(Program *prog, memops_arena *arena) {
     }
 }
 
-typedef struct TypeScope {
+/* Scopes chain to their enclosing scope rather than copying it. Copying meant every
+   proc and every nested block duplicated the whole outer scope, which on a real
+   project came to ~1.9M element copies because the outermost scope already holds a
+   reflection global per struct. Lookup walks outward, so shadowing still works:
+   the innermost match wins. A child never outlives its parent; every child is a
+   local in a frame nested inside the parent's. */
+typedef struct TypeScope TypeScope;
+struct TypeScope {
     Vec_string8 names;
     Vec_voidptr types; // TypeExpr*
     TypeSub sub;
-} TypeScope;
+    TypeScope *parent;
+};
 
 static TypeExpr *type_name_expr_const(memops_arena *arena, const char *name);
 static TypeExpr *substitute_type_param(memops_arena *arena, TypeExpr *src, string8 param, TypeExpr *arg);
@@ -6545,12 +6604,9 @@ static TypeScope type_scope_make(memops_arena *arena, i32 cap) {
 }
 
 static TypeScope type_scope_copy(memops_arena *arena, TypeScope *src) {
-    TypeScope dst = type_scope_make(arena, src->names.length + 8);
+    TypeScope dst = type_scope_make(arena, 8);
     dst.sub = src->sub;
-    for (i32 i = 0; i < src->names.length; i++) {
-        Vec_string8_append(arena, &dst.names, src->names.data[i]);
-        ptr_array_append(arena, &dst.types, src->types.data[i]);
-    }
+    dst.parent = src;
     return dst;
 }
 
@@ -6597,9 +6653,11 @@ static void type_scope_add_reflection_globals(memops_arena *arena, TypeScope *sc
 }
 
 static TypeExpr *type_scope_lookup(TypeScope *s, string8 name) {
-    for (i32 i = s->names.length - 1; i >= 0; i--) {
-        if (string8_equals(&s->names.data[i], &name)) {
-            return (TypeExpr *)s->types.data[i];
+    for (TypeScope *level = s; level; level = level->parent) {
+        for (i32 i = level->names.length - 1; i >= 0; i--) {
+            if (string8_equals(&level->names.data[i], &name)) {
+                return (TypeExpr *)level->types.data[i];
+            }
         }
     }
     return null;
@@ -6816,12 +6874,60 @@ static StructDecl *lookup_aggregate_decl(Program *prog, TypeExpr *type, TypeSub 
     return null;
 }
 
-static ProcDecl *lookup_proc_decl(Program *prog, string8 name) {
+/* Proc lookup by name runs once per call site across three whole-program passes.
+   As a linear scan that is quadratic in program size: a 771-proc project spent
+   ~5M string comparisons here. The table is rebuilt whenever the proc list grows,
+   which is the only way it changes, and keeps first-declaration-wins so behaviour
+   matches the scan it replaces. */
+static string8 *g_proc_index_names = null;
+static ProcDecl **g_proc_index_decls = null;
+static i32 g_proc_index_cap = 0;
+static i32 g_proc_index_built_for = -1;
+
+static u64 name_hash(string8 name) {
+    u64 h = 1469598103934665603ull;
+    for (u64 i = 0; i < name.length; i++) {
+        h ^= (u64)name.data[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+static void proc_index_build(memops_arena *arena, Program *prog) {
+    i32 cap = 64;
+    while (cap < prog->procs.length * 2) cap *= 2;
+    g_proc_index_cap = cap;
+    g_proc_index_names = memops_arena_push_array_zero(arena, string8, (u64)cap);
+    g_proc_index_decls = memops_arena_push_array_zero(arena, ProcDecl *, (u64)cap);
+
     for (i32 i = 0; i < prog->procs.length; i++) {
         ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
-        if (string8_equals(&decl->name, &name)) {
-            return decl;
+        u64 slot = name_hash(decl->name) & (u64)(cap - 1);
+        bool duplicate = false;
+        while (g_proc_index_decls[slot]) {
+            if (string8_equals(&g_proc_index_names[slot], &decl->name)) {
+                duplicate = true; // keep the first declaration, as the scan did
+                break;
+            }
+            slot = (slot + 1) & (u64)(cap - 1);
         }
+        if (duplicate) continue;
+        g_proc_index_names[slot] = decl->name;
+        g_proc_index_decls[slot] = decl;
+    }
+    g_proc_index_built_for = prog->procs.length;
+}
+
+static ProcDecl *lookup_proc_decl(Program *prog, string8 name) {
+    if (g_proc_index_built_for != prog->procs.length) {
+        proc_index_build(g_index_arena, prog);
+    }
+    u64 slot = name_hash(name) & (u64)(g_proc_index_cap - 1);
+    while (g_proc_index_decls[slot]) {
+        if (string8_equals(&g_proc_index_names[slot], &name)) {
+            return g_proc_index_decls[slot];
+        }
+        slot = (slot + 1) & (u64)(g_proc_index_cap - 1);
     }
     return null;
 }
@@ -10085,6 +10191,9 @@ static void rewrite_printfmt_in_expr(Expr *e, const char *path) {
 }
 
 static void rewrite_printfmt_call_stmt(Stmt *stmt, TypeScope *scope, Program *prog, memops_arena *arena, Vec_voidptr *out) {
+    /* Expanding a printfmt replaces statements and can introduce generic print
+       calls, so anything cached about instantiation has to be recomputed. */
+    g_program_generation++;
     Expr *call = stmt->expr;
     if (call->args.length < 1) {
         printfmt_error_at(stmt->source_path, call->line, call->col, "printfmt expects a string literal format");
@@ -12795,6 +12904,7 @@ i32 main(i32 argc, char *argv[]) {
 
     memops_arena arena = {0};
     memops_arena_initialize(&arena);
+    g_index_arena = &arena;
     add_import_dir(exe_import_root(&arena, argv[0]));
 
     const char *canonical_input_path = canonicalize_path(&arena, string8_from_cstr(&arena, input_path));
@@ -12882,7 +12992,6 @@ i32 main(i32 argc, char *argv[]) {
     profile_mark("type check", &profile_last, profile_start);
     rewrite_printfmt_formats(&prog, &arena);
     profile_mark("printfmt rewrite", &profile_last, profile_start);
-
     /* Every semantic and type diagnostic has been reported by here, so nothing is
        generated if any of them failed. */
     if (g_error_count > 0) {

@@ -92,6 +92,92 @@ is a block.
 - [x] Verified in real Neovim: filetype, syntax groups, LSP attachment, and three
       simultaneous red squiggles from one buffer.
 
+## Real-Project Validation (Gini)
+
+- [x] Gini compiles with the current toolchain: 14,896 lines across 15 files,
+      full import graph, parse + semantic + type check clean, and codegen to
+      20,585 lines of C. Needed 42 blockless switch arms migrated for the new
+      block rule; nothing else in 14k lines had to change.
+- [x] Compiling Gini immediately found a compiler bug the fixture suite missed:
+      a stray statement between switch arms was re-reported until the diagnostic
+      cap stopped it, because that loop reported without advancing. Fixed, with a
+      regression test.
+- [x] Scopes now chain to their parent instead of deep-copying it. Copying meant
+      every proc and nested block duplicated the whole outer scope: ~1.9M element
+      copies on Gini, because the outermost scope holds a reflection global per
+      struct.
+- [x] Proc lookup by name is hashed instead of a linear scan: ~5M string
+      comparisons on Gini, quadratic in program size.
+
+### Resolved: `check` on a real project was ~6x slower than it needed to be
+
+`collect_generic_proc_instances_with_sites(prog, decl, ...)` computed a whole-program
+instantiation closure — seeding from every global and every non-generic proc body,
+then iterating a fixpoint over generic bodies — and did it **once per generic proc**.
+But `decl` only selects which results are returned in the last ten lines; everything
+before it is identical no matter which decl is asked about. A project pulling in the
+std containers has 135 generic procs, so that closure ran 135 times per pass, in
+three passes.
+
+It is now computed once and shared, invalidated when the proc list grows (imports)
+or when the printfmt pass rewrites bodies, which can introduce new generic calls.
+
+| | before | after |
+| --- | --- | --- |
+| debug build | ~910 ms | ~155 ms |
+| optimized build | ~690 ms | ~135 ms |
+
+Verified semantics-preserving: generated `.c` and `.h` for a 14,896-line project are
+byte-identical before and after, 274 checks pass, 3000 fuzz inputs clean, and the
+project still builds and links.
+
+Found by profiling, after four rounds of measurement had ruled out the wrong things.
+The lesson worth keeping: the per-statement counters looked flat because they only
+counted the outer walk; these collectors do their own separate full-program walks.
+
+### Historical: the measurements that ruled out other suspects
+
+This matters because it is the LSP's hot path. Measured, so nobody repeats it:
+
+| pass | time |
+| --- | --- |
+| expand imports (21 imports, lex + parse) | 33 ms |
+| semantic check | ~339 ms |
+| type check | ~383 ms |
+| printfmt rewrite | ~319 ms |
+
+Ruled out by measurement, not by reasoning:
+
+- the mangle registry added for the monomorph fix (identical timing with it disabled)
+- scope copy volume (1.9M copies removed, ~5% total gain)
+- proc name lookup (5M comparisons removed, folded into the same ~5%)
+- allocation volume: only 159k `type_new`, 113k `clone_type_expr`, 113k
+  `infer_expr_type` calls for the whole program
+
+The cost is spread almost evenly across three whole-program passes, and
+`semantic check` costs as much as the others while using none of the type-checking
+machinery.
+
+Two measurements narrow it a long way:
+
+1. **The printfmt pass does no printfmt work.** With the project's only two
+   `printfmt` calls commented out, so the program contains zero, the pass still
+   costs 264ms versus 261ms with them. It is paying the traversal, nothing else.
+2. **Nothing is being re-walked.** Statement visits per pass: `semantic` 10,003,
+   `type` 10,109, `printfmt` 10,003. One visit per statement, as intended.
+
+So the cost is roughly **27 microseconds per statement node**, in three passes that
+share nothing but the walk. That is ~100k cycles per statement, so it is one
+expensive thing happening per node, not an algorithmic blowup.
+
+Next step is a sampling profiler. The question to answer is narrow: *what costs
+27µs on a single statement node?* Ruled out above: re-traversal, printfmt work,
+mangle registry, scope copying, proc lookup, allocation volume.
+
+The two fixes above are still worth keeping: both replace superlinear work with
+linear, which matters more as projects grow, and generated C is byte-identical
+after both.
+
 Follow-ups worth doing next:
 
 - [ ] `#define`s in opposing `#if`/`#else` branches collide as duplicate globals,
