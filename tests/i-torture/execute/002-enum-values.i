@@ -21,10 +21,10 @@ Flags: enum = {
 
 describe: proc(s: Status)->i32 = {
     switch (s) {
-        case Status_Failed: return 100;
-        case Status_Cancelled: return 200;
-        case Status_Idle: return 300;
-        default: return 400;
+        case Status_Failed: { return 100; }
+        case Status_Cancelled: { return 200; }
+        case Status_Idle: { return 300; }
+        default: { return 400; }
     }
 }
 

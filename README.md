@@ -41,7 +41,29 @@ I is C-shaped code with a smaller syntax surface and compile-time metaprogrammin
   `tests\i-torture\execute`, links it, runs it, and compares stdout against the
   companion `.expected` file. Re-record expectations with `--bless` after an
   intentional behaviour change.
+- `tests\run_i_debuginfo.py` builds a fixture with DWARF and reads the resulting
+  line table, checking that generated code maps back to `.i` source and that
+  reduced `#line` output is byte-identical to `--emit-all-line-directives` output.
+- `tests\run_i_fuzz.py` mutates the corpus and asserts the front end always
+  degrades into diagnostics rather than a crash, a hang, or malformed JSON. The
+  suite runs a bounded pass; soak it with
+  `python tests\run_i_fuzz.py --iterations 6000 --seed 99 --keep-going`.
 - `tests\run_tests.py` also runs the `gcc.c-torture/compile` hook. By default it compiles the tiny local smoke fixture in `tests\gcc.c-torture\compile`; set `I_GCC_TORTURE` or pass `--suite` to `tests\run_c_torture.py` to point at a full GCC checkout.
+
+### Editor Support
+- `python nvim/install.py` installs filetype detection, syntax highlighting, and
+  LSP attachment into your Neovim config. See `nvim/README.md` for options.
+
+## Uniform Declaration And Block Rules
+
+Every declaration is `name : kind = value`, and every body is a block:
+
+- variables must be initialized: `= {}` zeroes, `= ?` leaves storage untouched
+- switch cases and defaults take a block, giving each case its own scope
+- labels take a block: `done: label = { ... }`
+
+Struct fields and proc parameters have nothing to initialize, so the rule does not
+reach them.
 
 ## Comments And The Preprocessor
 
@@ -114,6 +136,16 @@ Header:struct = {
     }
 }
 
+// volatile, for memory-mapped registers and signal-visible state
+Regs:struct = {
+    status:volatile u32;
+    data:*volatile u32;
+}
+
+// type arguments are not limited to plain names
+pointers:array<*i32> = {};
+strings:array<*const char> = {};
+
 // boring C control flow/operators
 Packet:struct = {
     values:[4]i32;
@@ -122,19 +154,26 @@ Packet:struct = {
 
 WinProc:proc[WINCALL](value:i32)->i32 = {
     letter:char = 'x';
+    scratch:[64]u8 = ?;      // deliberately not zeroed
     while (value > 0) {
         value -= 1;
         value %= 8;
         if (value == 2) { continue; }
         if (value == 7) { goto done; }
         switch (value) {
-            case 1: break;
-            default: break;
+            case 1: {
+                step:i32 = 1;    // each case is its own scope
+                value -= step;
+                break;
+            }
+            default: { break; }
         }
     }
     value shl= 1;
     value = ~value;
-done:
+done: label = {
+    letter = 'y';
+}
     return (value shl 1) | 1;
 }
 ```

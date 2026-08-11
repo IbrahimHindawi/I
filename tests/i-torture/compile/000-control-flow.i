@@ -12,15 +12,18 @@ TorturePair:struct = {
 torture_sum:proc(pair:TorturePair, kind:TortureKind)->i32 = {
     total:i32 = pair.x + pair.y;
     switch (kind) {
-        case TortureKind_A:
+        case TortureKind_A: {
             total += 3;
             break;
-        case TortureKind_B:
+        }
+        case TortureKind_B: {
             total += 5;
             break;
-        default:
+        }
+        default: {
             total += 7;
             break;
+        }
     }
     for (i:i32 = 0; i < 4; i += 1) {
         if (i == 2) {

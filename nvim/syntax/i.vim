@@ -8,15 +8,12 @@ endif
 syn case match
 syn sync minlines=80
 
-" Preprocessor passthrough and comments
-syn match iPreProc "^\s*#\s*\(define\|include\|if\|ifdef\|ifndef\|elif\|else\|endif\|undef\|pragma\|error\|warning\|line\)\>.*$" contains=iString,iChar,iNumber,iTodo
-syn match iComment "^\s*#.*$" contains=iTodo
-syn keyword iTodo TODO FIXME NOTE contained
+syn keyword iTodo TODO FIXME NOTE XXX HACK contained
 
 " Keywords
-syn keyword iKeyword proc return import cinclude define
+syn keyword iKeyword proc return import cinclude define goto label
 syn keyword iStructure struct enum union alias
-syn keyword iStorageClass const
+syn keyword iStorageClass const volatile static
 syn keyword iExternal external external_emit
 syn keyword iConditional if else switch case default
 syn keyword iRepeat for while do break continue
@@ -66,9 +63,7 @@ syn match iNumber "\<[0-9]\+\([uif][0-9]\+\)\?\>"
 syn match iNumber "\<[0-9]\+\.[0-9]*\(f32\|f64\|f\)\?\>"
 syn match iNumber "\<[0-9]*\.[0-9]\+\(f32\|f64\|f\)\?\>"
 
-" Strings
-syn region iString start=+"+ skip=+\\\\\|\\"+ end=+"+ contains=iEscape
-syn region iChar start=+'+ skip=+\\\\\|\\'+ end=+'+ contains=iEscape
+" Strings (the regions themselves are defined near the end, for priority)
 syn match iEscape "\\\(.\|x[0-9A-Fa-f]\{2}\)" contained
 
 " Operators and punctuation
@@ -79,21 +74,43 @@ syn match iOperator "\.\.\."
 syn match iOperator "==\|!=\|<=\|>="
 syn match iOperator "&&\|||"
 syn match iOperator "+=\|-=\|\*=\|/=\|%=\|&=\|\^=\||="
+syn match iOperatorWord "\<shl=\|\<shr="
 syn match iOperator "[:=,;.@&|^%*/!+?~-]"
 syn match iDelimiter "[(){}\[\]<>]"
 syn keyword iCoreTypeInType i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 usize b32 bool void char va_list FILE contained
-syn match iTypeName "\%(\<proc\>\|\<struct\>\|\<enum\>\|\<union\>\|\<alias\>\|\<external\>\|\<external_emit\>\)\@!\<[A-Za-z_][A-Za-z0-9_]*\>\%(\s*<\)\@!" contained
-syn match iTypePrefix ":\|->" nextgroup=iTypePointerPrefix,iFixedArrayPrefix,iCoreTypeInType,iTypeName skipwhite
-syn match iTypePointerPrefix "\*" contained nextgroup=iTypePointerPrefix,iFixedArrayPrefix,iCoreTypeInType,iTypeName skipwhite
+" Qualifiers and storage classes sit in type position, so they must be consumed
+" there or they get coloured as if they were the type name.
+syn keyword iQualifierInType const volatile static contained nextgroup=iTypePointerPrefix,iFixedArrayPrefix,iCoreTypeInType,iQualifierInType,iTypeName skipwhite
+" Declaration kinds are not type names either.
+syn keyword iDeclKindInType proc struct enum union alias label contained
+syn match iTypeName "\%(\<proc\>\|\<struct\>\|\<enum\>\|\<union\>\|\<alias\>\|\<label\>\|\<const\>\|\<volatile\>\|\<static\>\|\<external\>\|\<external_emit\>\)\@!\<[A-Za-z_][A-Za-z0-9_]*\>\%(\s*<\)\@!" contained
+syn match iTypePrefix ":\|->" nextgroup=iTypePointerPrefix,iFixedArrayPrefix,iCoreTypeInType,iQualifierInType,iDeclKindInType,iTypeName skipwhite
+syn match iTypePointerPrefix "\*" contained nextgroup=iTypePointerPrefix,iFixedArrayPrefix,iCoreTypeInType,iQualifierInType,iTypeName skipwhite
 syn match iArrayIndexNumber "\[\s*\zs[0-9]\+\ze\s*]"
 syn match iFixedArrayPrefix "\[\s*[0-9]*\s*]" contained contains=iFixedArrayNumber,iFixedArrayDelimiter transparent nextgroup=iTypePointerPrefix,iCoreTypeInType,iTypeName skipwhite
 syn match iFixedArrayNumber "[0-9]\+" contained
 syn match iFixedArrayDelimiter "[\[\]]" contained
 
+" Defined last on purpose. When two items can start at the same column Vim keeps
+" the one defined latest, so comments, strings and preprocessor lines have to come
+" after the operator and identifier matches or '/' and '#' get claimed first.
+syn match iUninitialized "=\s*?\ze\s*;"
+syn region iString start=+"+ skip=+\\\\\|\\"+ end=+"+ contains=iEscape
+syn region iChar start=+'+ skip=+\\\\\|\\'+ end=+'+ contains=iEscape
+" '#' is C preprocessor passthrough, never a comment. A '#' line that is not a
+" recognized directive is a compile error, so it is shown as one. iPreProc is
+" defined after iPreProcError so a valid directive wins at the same start column.
+syn match iPreProcError "^\s*#.*$"
+syn match iPreProc "^\s*#\s*\%(define\|include\|ifdef\|ifndef\|if\|elif\|else\|endif\|undef\|pragma\|error\|warning\|line\)\>.*$" contains=iString,iChar,iNumber,iTodo
+syn region iComment start="//" end="$" keepend contains=iTodo,@Spell
+syn region iComment start="/\*" end="\*/" contains=iTodo,@Spell
+
 " Highlight links
 hi def link iPreProc PreProc
+hi def link iPreProcError Error
 hi def link iComment Comment
 hi def link iTodo Todo
+hi def link iUninitialized Special
 hi def link iKeyword Keyword
 hi def link iStructure Type
 hi def link iStorageClass StorageClass
@@ -104,6 +121,8 @@ hi def link iOperatorWord Operator
 hi def link iBoolean Boolean
 hi def link iCoreType Type
 hi def link iCoreTypeInType Type
+hi def link iQualifierInType StorageClass
+hi def link iDeclKindInType Type
 hi def link iInteropType Structure
 hi def link iBuiltin Function
 hi def link iProcDeclName Function

@@ -399,6 +399,7 @@ typedef enum TokenKind {
     Token_Keyword_Union,
     Token_Keyword_Alias,
     Token_Keyword_Const,
+    Token_Keyword_Volatile,
     Token_Keyword_While,
     Token_Keyword_Do,
     Token_Keyword_Break,
@@ -481,6 +482,7 @@ static const char *token_kind_name(TokenKind kind) {
         case Token_Keyword_Union: return "'union'";
         case Token_Keyword_Alias: return "'alias'";
         case Token_Keyword_Const: return "'const'";
+        case Token_Keyword_Volatile: return "'volatile'";
         case Token_Keyword_While: return "'while'";
         case Token_Keyword_Do: return "'do'";
         case Token_Keyword_Break: return "'break'";
@@ -526,6 +528,7 @@ struct TypeExpr {
     string8 name;
     string8 array_count;
     bool is_const;
+    bool is_volatile;
     i32 line;
     i32 col;
     TypeExpr *elem;
@@ -606,6 +609,7 @@ struct Stmt {
     const char *import_chain;
     bool is_external;
     bool is_static;
+    bool is_uninitialized; // '= ?': deliberately left with indeterminate contents
     Expr *lhs;
     Expr *expr;
     TokenKind assign_op;
@@ -622,6 +626,7 @@ struct Stmt {
     Expr *switch_expr;
     Vec_voidptr switch_cases; // SwitchCase*
     Vec_voidptr switch_default_body; // Stmt*
+    bool has_switch_default; // an empty 'default: { }' is still a default
     i32 line;
     i32 col;
 };
@@ -881,6 +886,7 @@ static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) 
             else if (string8slice_equals_cstr(text, "union")) kind = Token_Keyword_Union;
             else if (string8slice_equals_cstr(text, "alias")) kind = Token_Keyword_Alias;
             else if (string8slice_equals_cstr(text, "const")) kind = Token_Keyword_Const;
+            else if (string8slice_equals_cstr(text, "volatile")) kind = Token_Keyword_Volatile;
             else if (string8slice_equals_cstr(text, "while")) kind = Token_Keyword_While;
             else if (string8slice_equals_cstr(text, "do")) kind = Token_Keyword_Do;
             else if (string8slice_equals_cstr(text, "break")) kind = Token_Keyword_Break;
@@ -1570,6 +1576,12 @@ static TypeExpr *parse_type(Parser *p) {
     if (parser_match(p, Token_Keyword_Const)) {
         TypeExpr *inner = parse_type(p);
         inner->is_const = true;
+        return inner;
+    }
+
+    if (parser_match(p, Token_Keyword_Volatile)) {
+        TypeExpr *inner = parse_type(p);
+        inner->is_volatile = true;
         return inner;
     }
 
@@ -2362,6 +2374,22 @@ static Stmt *parse_stmt_recovering(Parser *p) {
     return s;
 }
 
+/* Variables must say what they start as. '= {}' zeroes, and '= ?' opts out for the
+   cases where zeroing a large buffer would be real work the C never asked for. */
+static void parse_var_initializer(Parser *p, Stmt *s, Token *name_tok) {
+    if (!parser_match(p, Token_Equal)) {
+        parser_error_token(p, name_tok,
+                           "variable declaration needs an initializer; use '= {}' to zero it "
+                           "or '= ?' to leave it uninitialized");
+        return;
+    }
+    if (parser_match(p, Token_Question)) {
+        s->is_uninitialized = true;
+        return;
+    }
+    s->expr = parse_expr(p);
+}
+
 static Stmt *parse_for_clause_stmt(Parser *p, bool allow_var_decl) {
     if (parser_peek(p)->kind == Token_Identifier &&
         allow_var_decl &&
@@ -2373,9 +2401,7 @@ static Stmt *parse_for_clause_stmt(Parser *p, bool allow_var_decl) {
         s->type = parse_type(p);
         s->line = name_tok->line;
         s->col = name_tok->col;
-        if (parser_match(p, Token_Equal)) {
-            s->expr = parse_expr(p);
-        }
+        parse_var_initializer(p, s, name_tok);
         return s;
     }
 
@@ -2491,20 +2517,20 @@ static Stmt *parse_stmt(Parser *p) {
                 sc->expr = parse_expr(p);
                 sc->body = ptr_array_reserve(p->arena, 8);
                 parser_expect(p, Token_Colon, "expected ':' after case");
-                while (parser_peek(p)->kind != Token_Keyword_Case &&
-                       parser_peek(p)->kind != Token_Keyword_Default &&
-                       parser_peek(p)->kind != Token_EOF &&
-                       parser_peek(p)->kind != Token_RBrace) {
+                /* Cases take a block, so per-case locals get their own C scope
+                   instead of colliding in the switch's single shared scope. */
+                parser_expect(p, Token_LBrace, "expected '{' after case; a switch case takes a block");
+                while (!parser_at_block_end(p)) {
                     ptr_array_append(p->arena, &sc->body, parse_stmt_recovering(p));
                 }
                 ptr_array_append(p->arena, &s->switch_cases, sc);
                 continue;
             }
             if (parser_match(p, Token_Keyword_Default)) {
+                s->has_switch_default = true;
                 parser_expect(p, Token_Colon, "expected ':' after default");
-                while (parser_peek(p)->kind != Token_Keyword_Case &&
-                       parser_peek(p)->kind != Token_EOF &&
-                       parser_peek(p)->kind != Token_RBrace) {
+                parser_expect(p, Token_LBrace, "expected '{' after default; a switch default takes a block");
+                while (!parser_at_block_end(p)) {
                     ptr_array_append(p->arena, &s->switch_default_body, parse_stmt_recovering(p));
                 }
                 continue;
@@ -2591,17 +2617,22 @@ static Stmt *parse_stmt(Parser *p) {
     if (parser_match(p, Token_Identifier)) {
         Token *name_tok = parser_prev(p);
         if (parser_match(p, Token_Colon)) {
-            /* 'done: label;' declares a jump target, matching the 'name : kind'
-               shape used by every other declaration. */
+            /* 'done: label = { ... }' declares a jump target and the block it
+               labels, matching the 'name : kind = value' shape used by every
+               other declaration, including switch cases. */
             if (parser_peek(p)->kind == Token_Identifier &&
-                string8slice_equals_cstr(parser_peek(p)->text, "label") &&
-                parser_peek_n(p, 1)->kind == Token_Semicolon) {
+                string8slice_equals_cstr(parser_peek(p)->text, "label")) {
                 parser_next(p); // 'label'
-                parser_next(p); // ';'
                 Stmt *s = stmt_new(p->arena, Stmt_Label);
                 s->name = token_to_string8(p->arena, name_tok);
                 s->line = name_tok->line;
                 s->col = name_tok->col;
+                s->while_body = ptr_array_reserve(p->arena, 8);
+                parser_expect(p, Token_Equal, "expected '=' after label");
+                parser_expect(p, Token_LBrace, "expected '{' after label; a label takes a block");
+                while (!parser_at_block_end(p)) {
+                    ptr_array_append(p->arena, &s->while_body, parse_stmt_recovering(p));
+                }
                 return s;
             }
             Stmt *s = stmt_new(p->arena, Stmt_Var);
@@ -2610,9 +2641,7 @@ static Stmt *parse_stmt(Parser *p) {
             s->type = parse_type(p);
             s->line = name_tok->line;
             s->col = name_tok->col;
-            if (parser_match(p, Token_Equal)) {
-                s->expr = parse_expr(p);
-            }
+            parse_var_initializer(p, s, name_tok);
             parser_expect(p, Token_Semicolon, "expected ';' after var decl");
             return s;
         }
@@ -3141,9 +3170,15 @@ static Program parse_program(Parser *p) {
                 parser_peek_n(p, 1)->kind == Token_Semicolon) {
                 parser_next(p);
                 s->is_external = true;
+            } else if (parser_match(p, Token_Question)) {
+                s->is_uninitialized = true;
             } else {
                 s->expr = parse_expr(p);
             }
+        } else {
+            parser_error_token(p, head_tok,
+                               "global declaration needs an initializer; use '= {}' to zero it "
+                               "or '= ?' to leave it uninitialized");
         }
         parser_expect(p, Token_Semicolon, "expected ';' after global var");
         ptr_array_append(p->arena, &prog.globals, s);
@@ -3803,8 +3838,18 @@ static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_str
         }
         return;
     }
-    if (stmt->kind == Stmt_Goto || stmt->kind == Stmt_Label) {
+    if (stmt->kind == Stmt_Goto) {
         return; // resolved against the proc-wide label set in semantic_check_proc
+    }
+    if (stmt->kind == Stmt_Label) {
+        /* The body is a scope but not a loop, so break/continue inside it stay
+           illegal unless a real loop encloses the label. */
+        Scope label_scope = *scope;
+        scope_copy_locals(arena, &label_scope, scope, 16);
+        for (i32 i = 0; i < stmt->while_body.length; i++) {
+            semantic_check_stmt(prog, (Stmt *)stmt->while_body.data[i], &label_scope, known_types, generic_param, arena);
+        }
+        return;
     }
     semantic_error("unknown statement kind", stmt->line, stmt->col);
 }
@@ -4737,6 +4782,9 @@ static bool string8_is_symbolic_type_name(string8 s) {
 }
 
 static string8 type_mangle(memops_arena *arena, TypeExpr *type, TypeSub sub);
+static string8 type_mangle_impl(memops_arena *arena, TypeExpr *type, TypeSub sub);
+static void mangle_register(memops_arena *arena, string8 mangle, TypeExpr *type);
+static TypeExpr *substitute_type_param(memops_arena *arena, TypeExpr *src, string8 param, TypeExpr *arg);
 
 static void emit_cstr(memops_arena *arena, string8 *out, const char *cstr) {
     string8_append_cstr(arena, out, cstr);
@@ -4762,24 +4810,33 @@ static void emit_assign_op(memops_arena *arena, string8 *out, TokenKind op) {
     }
 }
 
+static void emit_type_qualifiers(memops_arena *arena, string8 *out, TypeExpr *type) {
+    if (type->is_const) emit_cstr(arena, out, "const ");
+    if (type->is_volatile) emit_cstr(arena, out, "volatile ");
+}
+
 static void emit_type(memops_arena *arena, string8 *out, TypeExpr *type, TypeSub sub) {
     if (type->kind == Type_Name) {
         if (sub.has && string8_equals_name(type->name, sub.param)) {
-            if (type->is_const) emit_cstr(arena, out, "const ");
+            emit_type_qualifiers(arena, out, type);
             emit_type(arena, out, sub.arg, (TypeSub){0});
             return;
         }
-        if (type->is_const) emit_cstr(arena, out, "const ");
+        emit_type_qualifiers(arena, out, type);
         emit_string8(arena, out, type->name);
         return;
     }
     if (type->kind == Type_Ptr) {
         emit_type(arena, out, type->elem, sub);
-        emit_cstr(arena, out, type->is_const ? " * const" : " *");
+        /* Qualifiers on a pointer type apply to the pointer itself, so they land
+           after the '*' the way C spells them. */
+        emit_cstr(arena, out, " *");
+        if (type->is_const) emit_cstr(arena, out, " const");
+        if (type->is_volatile) emit_cstr(arena, out, " volatile");
         return;
     }
     if (type->kind == Type_Generic) {
-        if (type->is_const) emit_cstr(arena, out, "const ");
+        emit_type_qualifiers(arena, out, type);
         string8 mangle = type_mangle(arena, type, sub);
         emit_string8(arena, out, mangle);
         return;
@@ -4798,10 +4855,23 @@ static void emit_type(memops_arena *arena, string8 *out, TypeExpr *type, TypeSub
     }
 }
 
+/* Recording the mangle here, where it is produced, means emission can always
+   recover the real type behind a monomorph name. Doing it at the collection sites
+   instead was too late: consumers looked up mangles before collection ran. */
 static string8 type_mangle(memops_arena *arena, TypeExpr *type, TypeSub sub) {
+    string8 mangle = type_mangle_impl(arena, type, sub);
+    mangle_register(arena, mangle,
+                    sub.has ? substitute_type_param(arena, type, sub.param, sub.arg) : type);
+    return mangle;
+}
+
+static string8 type_mangle_impl(memops_arena *arena, TypeExpr *type, TypeSub sub) {
     string8 out = string8_reserve(arena, 64);
     if (type->is_const) {
         emit_cstr(arena, &out, "const_");
+    }
+    if (type->is_volatile) {
+        emit_cstr(arena, &out, "volatile_");
     }
     if (type->kind == Type_Name) {
         if (sub.has && string8_equals_name(type->name, sub.param)) {
@@ -4861,6 +4931,9 @@ static void format_type_i(memops_arena *arena, string8 *out, TypeExpr *type, Typ
     }
     if (type->is_const) {
         emit_cstr(arena, out, "const ");
+    }
+    if (type->is_volatile) {
+        emit_cstr(arena, out, "volatile ");
     }
     if (type->kind == Type_Name) {
         if (sub.has && string8_equals_name(type->name, sub.param)) {
@@ -5421,6 +5494,52 @@ static i32 array_string8_index(Vec_string8 *arr, string8 value) {
 
 static bool type_is_concrete_under_sub(TypeExpr *type, TypeSub sub);
 
+/* Monomorph instances are tracked by mangled name, but emitting a substituted body
+   needs the type the mangle came from: 'Array<*i32>' must emit 'i32 *' for its
+   field, not the mangled spelling 'ptr_i32', which is not a C type name. Every
+   instance mangle is recorded here as it is produced so emission can recover the
+   real type instead of fabricating a Type_Name from the mangle. */
+typedef struct MangleBinding {
+    string8 mangle;
+    TypeExpr *type;
+} MangleBinding;
+
+static Vec_voidptr g_mangle_bindings;
+static bool g_mangle_bindings_ready = false;
+static TypeExpr *clone_type_expr(memops_arena *arena, TypeExpr *src);
+static TypeExpr *substitute_type_param(memops_arena *arena, TypeExpr *src, string8 param, TypeExpr *arg);
+
+static void mangle_register(memops_arena *arena, string8 mangle, TypeExpr *type) {
+    if (!type || !mangle.data) return;
+    if (!g_mangle_bindings_ready) {
+        g_mangle_bindings = ptr_array_reserve(arena, 32);
+        g_mangle_bindings_ready = true;
+    }
+    for (i32 i = 0; i < g_mangle_bindings.length; i++) {
+        MangleBinding *binding = (MangleBinding *)g_mangle_bindings.data[i];
+        if (string8_equals(&binding->mangle, &mangle)) return;
+    }
+    MangleBinding *entry = memops_arena_push_struct(arena, MangleBinding);
+    entry->mangle = mangle;
+    entry->type = clone_type_expr(arena, type);
+    ptr_array_append(arena, &g_mangle_bindings, entry);
+}
+
+/* Falls back to a plain name so anything unregistered behaves as it always has. */
+static TypeExpr *mangle_type_for(memops_arena *arena, string8 mangle) {
+    if (g_mangle_bindings_ready) {
+        for (i32 i = 0; i < g_mangle_bindings.length; i++) {
+            MangleBinding *binding = (MangleBinding *)g_mangle_bindings.data[i];
+            if (string8_equals(&binding->mangle, &mangle)) {
+                return clone_type_expr(arena, binding->type);
+            }
+        }
+    }
+    TypeExpr *fallback = type_new(arena, Type_Name);
+    fallback->name = mangle;
+    return fallback;
+}
+
 static void collect_type_instances(TypeExpr *type, string8 base, Vec_string8 *out, memops_arena *arena) {
     if (!type) return;
     if (type->kind == Type_Generic && string8_equals_name(type->name, base)) {
@@ -5531,7 +5650,7 @@ static void collect_type_instances_from_stmt(Stmt *s, string8 base, Vec_string8 
         for (i32 i = 0; i < s->while_body.length; i++) {
             collect_type_instances_from_stmt((Stmt *)s->while_body.data[i], base, out, arena);
         }
-    } else if (s->kind == Stmt_DoWhile) {
+    } else if (s->kind == Stmt_DoWhile || s->kind == Stmt_Label) {
         for (i32 i = 0; i < s->while_body.length; i++) {
             collect_type_instances_from_stmt((Stmt *)s->while_body.data[i], base, out, arena);
         }
@@ -5646,7 +5765,7 @@ static void collect_type_instances_from_stmt_sub(Stmt *s, string8 base, Vec_stri
         for (i32 i = 0; i < s->while_body.length; i++) {
             collect_type_instances_from_stmt_sub((Stmt *)s->while_body.data[i], base, out, arena, sub);
         }
-    } else if (s->kind == Stmt_DoWhile) {
+    } else if (s->kind == Stmt_DoWhile || s->kind == Stmt_Label) {
         for (i32 i = 0; i < s->while_body.length; i++) {
             collect_type_instances_from_stmt_sub((Stmt *)s->while_body.data[i], base, out, arena, sub);
         }
@@ -5759,8 +5878,7 @@ static void collect_generic_struct_instances(Program *prog, StructDecl *decl, Ve
             collect_generic_struct_instances(prog, s, &owner_instances, arena);
             collecting_nested_dependencies = false;
             for (i32 j = 0; j < owner_instances.length; j++) {
-                TypeExpr *arg = type_new(arena, Type_Name);
-                arg->name = owner_instances.data[j];
+                TypeExpr *arg = mangle_type_for(arena, owner_instances.data[j]);
                 TypeSub sub = {0};
                 sub.has = true;
                 sub.param = s->type_param;
@@ -5789,8 +5907,7 @@ static void collect_generic_struct_instances(Program *prog, StructDecl *decl, Ve
             Vec_voidptr instance_sites = ptr_array_reserve(arena, 4);
             collect_generic_proc_instances_with_sites(prog, p, &proc_instances, null, &instance_sites, arena);
             for (i32 j = 0; j < proc_instances.length; j++) {
-                TypeExpr *arg = type_new(arena, Type_Name);
-                arg->name = proc_instances.data[j];
+                TypeExpr *arg = mangle_type_for(arena, proc_instances.data[j]);
                 TypeSub sub = {0};
                 sub.has = true;
                 sub.param = p->type_param;
@@ -6094,7 +6211,7 @@ static bool collect_generic_calls_from_stmt(
         }
         return changed;
     }
-    if (s->kind == Stmt_DoWhile) {
+    if (s->kind == Stmt_DoWhile || s->kind == Stmt_Label) {
         for (i32 i = 0; i < s->while_body.length; i++) {
             if (collect_generic_calls_from_stmt((Stmt *)s->while_body.data[i], sub, entries, constraint_sites, arena)) changed = true;
         }
@@ -6159,8 +6276,7 @@ static void collect_generic_proc_instances_with_sites(
         for (i32 i = 0; i < entries.length; i++) {
             GenericProcEntry *entry = (GenericProcEntry *)entries.data[i];
             for (i32 j = 0; j < entry->instances.length; j++) {
-                TypeExpr *arg = type_new(arena, Type_Name);
-                arg->name = entry->sub_instances.data[j];
+                TypeExpr *arg = mangle_type_for(arena, entry->sub_instances.data[j]);
                 TypeSub sub = {0};
                 sub.has = true;
                 sub.param = entry->decl->type_param;
@@ -6517,6 +6633,7 @@ static TypeExpr *clone_type_expr(memops_arena *arena, TypeExpr *src) {
     dst->name = src->name;
     dst->array_count = src->array_count;
     dst->is_const = src->is_const;
+    dst->is_volatile = src->is_volatile;
     dst->is_variadic = src->is_variadic;
     if (src->elem) {
         dst->elem = clone_type_expr(arena, src->elem);
@@ -6548,6 +6665,7 @@ static TypeExpr *substitute_type_param(memops_arena *arena, TypeExpr *src, strin
     dst->name = src->name;
     dst->array_count = src->array_count;
     dst->is_const = src->is_const;
+    dst->is_volatile = src->is_volatile;
     dst->is_variadic = src->is_variadic;
     if (src->elem) {
         dst->elem = substitute_type_param(arena, src->elem, param, arg);
@@ -9706,12 +9824,14 @@ static void type_check_stmt(
         g_diag_import_chain = prev_diag_import_chain;
         return;
     }
-    if (s->kind == Stmt_DoWhile) {
+    if (s->kind == Stmt_DoWhile || s->kind == Stmt_Label) {
         TypeScope loop_scope = type_scope_copy(arena, scope);
         for (i32 i = 0; i < s->while_body.length; i++) {
             type_check_stmt((Stmt *)s->while_body.data[i], &loop_scope, prog, return_type, current_proc, arena);
         }
-        type_check_condition("do while", s->while_cond, &loop_scope, prog, arena);
+        if (s->kind == Stmt_DoWhile) {
+            type_check_condition("do while", s->while_cond, &loop_scope, prog, arena);
+        }
         g_diag_source_path = prev_diag_source_path;
         g_diag_import_chain = prev_diag_import_chain;
         return;
@@ -9796,8 +9916,7 @@ static void type_check_generic_proc_instances(
         Vec_voidptr instance_sites = ptr_array_reserve(arena, 4);
         collect_generic_proc_instances_with_sites(prog, p, &instances, &sub_instances, &instance_sites, arena);
         for (i32 j = 0; j < instances.length; j++) {
-            TypeExpr *arg = type_new(arena, Type_Name);
-            arg->name = sub_instances.data[j];
+            TypeExpr *arg = mangle_type_for(arena, sub_instances.data[j]);
             TypeSub sub = {0};
             sub.has = true;
             sub.param = p->type_param;
@@ -10048,7 +10167,7 @@ static void rewrite_printfmt_stmt_in_place(Stmt *s, TypeScope *scope, Program *p
         rewrite_printfmt_body(&s->while_body, &loop_scope, prog, arena);
         return;
     }
-    if (s->kind == Stmt_DoWhile) {
+    if (s->kind == Stmt_DoWhile || s->kind == Stmt_Label) {
         TypeScope loop_scope = type_scope_copy(arena, scope);
         rewrite_printfmt_body(&s->while_body, &loop_scope, prog, arena);
         rewrite_printfmt_in_expr(s->while_cond, path);
@@ -10423,7 +10542,9 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
     if (s->kind == Stmt_Var) {
         if (s->is_static) emit_cstr(arena, out, "static ");
         emit_decl(arena, out, s->type, s->name, sub);
-        if (s->expr) {
+        /* '= ?' lowers to a plain C declaration, so it costs exactly what the
+           equivalent C would: nothing. */
+        if (s->expr && !s->is_uninitialized) {
             emit_cstr(arena, out, " = ");
             emit_expr(arena, out, s->expr, sub, generic_name);
         }
@@ -10446,9 +10567,13 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
         return;
     }
     if (s->kind == Stmt_Label) {
-        /* The trailing null statement keeps a label legal at the end of a block. */
         emit_string8(arena, out, s->name);
-        emit_cstr(arena, out, ": ;\n");
+        emit_cstr(arena, out, ": {\n");
+        for (i32 i = 0; i < s->while_body.length; i++) {
+            emit_cstr(arena, out, "    ");
+            emit_stmt(arena, out, (Stmt *)s->while_body.data[i], sub, generic_name);
+        }
+        emit_cstr(arena, out, "}\n");
         return;
     }
     if (s->kind == Stmt_Assign) {
@@ -10542,18 +10667,22 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
             SwitchCase *sc = (SwitchCase *)s->switch_cases.data[i];
             emit_cstr(arena, out, "    case ");
             emit_expr(arena, out, sc->expr, sub, generic_name);
-            emit_cstr(arena, out, ":\n");
+            /* The block is real in C too, so locals in one case cannot collide
+               with locals in another. */
+            emit_cstr(arena, out, ": {\n");
             for (i32 j = 0; j < sc->body.length; j++) {
                 emit_cstr(arena, out, "        ");
                 emit_stmt(arena, out, (Stmt *)sc->body.data[j], sub, generic_name);
             }
+            emit_cstr(arena, out, "    }\n");
         }
-        if (s->switch_default_body.length > 0) {
-            emit_cstr(arena, out, "    default:\n");
+        if (s->has_switch_default) {
+            emit_cstr(arena, out, "    default: {\n");
             for (i32 i = 0; i < s->switch_default_body.length; i++) {
                 emit_cstr(arena, out, "        ");
                 emit_stmt(arena, out, (Stmt *)s->switch_default_body.data[i], sub, generic_name);
             }
+            emit_cstr(arena, out, "    }\n");
         }
         emit_cstr(arena, out, "    }\n");
         return;
@@ -10739,8 +10868,7 @@ static Vec_voidptr collect_concrete_struct_defs(memops_arena *arena, Program *pr
         Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_struct_instances(prog, decl, &instances, arena);
         for (i32 j = 0; j < instances.length; j++) {
-            TypeExpr *arg = type_new(arena, Type_Name);
-            arg->name = instances.data[j];
+            TypeExpr *arg = mangle_type_for(arena, instances.data[j]);
             string8 name = concrete_struct_mono_name(arena, decl, instances.data[j]);
             ptr_array_append(arena, &defs, concrete_struct_def_new(arena, decl, true, name, instances.data[j], arg));
         }
@@ -11381,8 +11509,7 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
             string8_append_bytes(arena, &concrete_name, decl->name.data, decl->name.length);
             string8_append_cstr(arena, &concrete_name, "_");
             string8_append_bytes(arena, &concrete_name, mangle.data, mangle.length);
-            TypeExpr *arg = type_new(arena, Type_Name);
-            arg->name = mangle;
+            TypeExpr *arg = mangle_type_for(arena, mangle);
             TypeSub sub = {0};
             sub.has = true;
             sub.param = decl->type_param;
@@ -11434,8 +11561,7 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
         collect_generic_proc_instances_with_sites(prog, decl, &instances, &sub_instances, &instance_sites, arena);
         for (i32 j = 0; j < instances.length; j++) {
             string8 mangle = instances.data[j];
-            TypeExpr *arg = type_new(arena, Type_Name);
-            arg->name = sub_instances.data[j];
+            TypeExpr *arg = mangle_type_for(arena, sub_instances.data[j]);
             emit_proc_proto_mono(arena, out, decl, mangle, arg, generic_instance_site_find(&instance_sites, decl->name, mangle));
         }
     }
@@ -11461,8 +11587,7 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
         collect_generic_proc_instances_with_sites(prog, decl, &instances, &sub_instances, &instance_sites, arena);
         for (i32 j = 0; j < instances.length; j++) {
             string8 mangle = instances.data[j];
-            TypeExpr *arg = type_new(arena, Type_Name);
-            arg->name = sub_instances.data[j];
+            TypeExpr *arg = mangle_type_for(arena, sub_instances.data[j]);
             emit_proc_decl_mono(arena, out, decl, mangle, arg, generic_instance_site_find(&instance_sites, decl->name, mangle));
         }
     }
@@ -11571,8 +11696,7 @@ static void emit_header_program(memops_arena *arena, Program *prog, string8 *out
         Vec_voidptr instance_sites = ptr_array_reserve(arena, 4);
         collect_generic_proc_instances_with_sites(prog, decl, &instances, &sub_instances, &instance_sites, arena);
         for (i32 j = 0; j < instances.length; j++) {
-            TypeExpr *arg = type_new(arena, Type_Name);
-            arg->name = sub_instances.data[j];
+            TypeExpr *arg = mangle_type_for(arena, sub_instances.data[j]);
             emit_proc_proto_mono(arena, out, decl, instances.data[j], arg, generic_instance_site_find(&instance_sites, decl->name, instances.data[j]));
         }
     }
@@ -11602,7 +11726,102 @@ static bool preprocessor_line_is_c_directive(u8 *line, u64 length) {
     return false;
 }
 
+typedef enum PreprocessorConditional {
+    Preproc_NotConditional = 0,
+    Preproc_If,    // if, ifdef, ifndef
+    Preproc_Elif,
+    Preproc_Else,
+    Preproc_Endif,
+} PreprocessorConditional;
+
+static PreprocessorConditional preprocessor_conditional_kind(u8 *line, u64 length) {
+    u64 i = 0;
+    while (i < length && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i >= length || line[i] != '#') return Preproc_NotConditional;
+    i++;
+    while (i < length && (line[i] == ' ' || line[i] == '\t')) i++;
+
+    struct { const char *name; PreprocessorConditional kind; } table[] = {
+        {"ifdef", Preproc_If},
+        {"ifndef", Preproc_If},
+        {"if", Preproc_If},
+        {"elif", Preproc_Elif},
+        {"else", Preproc_Else},
+        {"endif", Preproc_Endif},
+    };
+    for (i32 d = 0; d < (i32)(sizeof(table) / sizeof(table[0])); d++) {
+        u64 name_len = (u64)strlen(table[d].name);
+        if (i + name_len > length) continue;
+        if (strncmp((const char *)(line + i), table[d].name, name_len) != 0) continue;
+        u64 end = i + name_len;
+        if (end == length || line[end] == ' ' || line[end] == '\t' || line[end] == '\r' ||
+            line[end] == '(' || line[end] == '!') {
+            return table[d].kind;
+        }
+    }
+    return Preproc_NotConditional;
+}
+
+static void preprocessor_error(i32 line, const char *message) {
+    if (g_diag_json) {
+        diag_json_error(g_source_path, line, 1, "preprocessor", message);
+    } else {
+        printf("%s:%d:1: preprocessor error: %s\n", g_source_path, line, message);
+        diag_print_file_context(g_source_path, line, 1);
+    }
+    diag_record_error();
+}
+
+/* Passthrough directives reach the generated C untouched, so an unbalanced
+   conditional would surface as a C error pointing at emitted code. Checking the
+   balance here reports it against the .i line that actually caused it. */
+static void validate_preprocessor_balance(string8 src) {
+    i32 open_lines[64];
+    i32 depth = 0;
+    bool overflowed = false;
+    i32 line_no = 0;
+    u8 *p = src.data;
+    u8 *end = src.data + src.length;
+    while (p < end) {
+        u8 *line_start = p;
+        while (p < end && *p != '\n') p++;
+        u8 *line_end = p;
+        if (line_end > line_start && line_end[-1] == '\r') line_end--;
+        line_no++;
+
+        switch (preprocessor_conditional_kind(line_start, (u64)(line_end - line_start))) {
+            case Preproc_If:
+                if (depth < (i32)(sizeof(open_lines) / sizeof(open_lines[0]))) {
+                    open_lines[depth] = line_no;
+                } else {
+                    overflowed = true;
+                }
+                depth++;
+                break;
+            case Preproc_Elif:
+                if (depth == 0) preprocessor_error(line_no, "'#elif' without a matching '#if'");
+                break;
+            case Preproc_Else:
+                if (depth == 0) preprocessor_error(line_no, "'#else' without a matching '#if'");
+                break;
+            case Preproc_Endif:
+                if (depth == 0) preprocessor_error(line_no, "'#endif' without a matching '#if'");
+                else depth--;
+                break;
+            case Preproc_NotConditional:
+                break;
+        }
+        if (p < end && *p == '\n') p++;
+    }
+
+    for (i32 i = depth; i > 0; i--) {
+        if (overflowed || i > (i32)(sizeof(open_lines) / sizeof(open_lines[0]))) continue;
+        preprocessor_error(open_lines[i - 1], "unterminated '#if': missing '#endif'");
+    }
+}
+
 static Vec_string8 collect_preprocessor_lines(memops_arena *arena, string8 src) {
+    validate_preprocessor_balance(src);
     Vec_string8 lines = Vec_string8_reserve(arena, 8);
     u8 *p = src.data;
     u8 *end = src.data + src.length;
@@ -12086,8 +12305,7 @@ static bool emit_native_monomorph_headers(memops_arena *arena, Program *prog, co
             string8_append_cstr(arena, &concrete_name, "_");
             string8_append_bytes(arena, &concrete_name, mangle.data, mangle.length);
 
-            TypeExpr *arg = type_new(arena, Type_Name);
-            arg->name = mangle;
+            TypeExpr *arg = mangle_type_for(arena, mangle);
 
             string8 file_name = string8_reserve(arena, concrete_name.length + 3);
             string8_append_bytes(arena, &file_name, concrete_name.data, concrete_name.length);

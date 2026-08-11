@@ -13,7 +13,9 @@ find_pair: proc(target: i32)->i32 = {
             }
         }
     }
-done: label;
+done: label = {
+    printf("searched\n");
+}
     return found;
 }
 
@@ -21,12 +23,13 @@ done: label;
 countdown: proc(from: i32)->i32 = {
     n: i32 = from;
     steps: i32 = 0;
-top: label;
+top: label = {
     if (n > 0) {
         n -= 1;
         steps += 1;
         goto top;
     }
+}
     return steps;
 }
 

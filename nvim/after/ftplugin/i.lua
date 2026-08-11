@@ -6,7 +6,29 @@ if not (vim.lsp and vim.lsp.start) then
   return
 end
 
-local command = vim.g.i_lsp_command or { "python", "-u", "C:/devel/i/scripts/i_lsp.py" }
+-- Resolution order, most specific first:
+--   1. vim.g.i_lsp_command, for anyone who wants to override it outright
+--   2. $I_HOME/scripts/i_lsp.py, the packaged toolchain layout
+--   3. the repo path recorded by nvim/install.py at install time
+local function default_command()
+  local i_home = vim.env.I_HOME
+  if i_home and i_home ~= "" then
+    local packaged = i_home .. "/scripts/i_lsp.py"
+    if vim.fn.filereadable(packaged) == 1 then
+      return { "python", "-u", packaged }
+    end
+  end
+
+  -- install.py rewrites this placeholder with the repo it was run from.
+  local repo = "@I_REPO@"
+  if not repo:find("^@") then
+    return { "python", "-u", repo .. "/scripts/i_lsp.py" }
+  end
+
+  return { "python", "-u", "scripts/i_lsp.py" }
+end
+
+local command = vim.g.i_lsp_command or default_command()
 if type(command) == "string" then
   command = { command }
 end

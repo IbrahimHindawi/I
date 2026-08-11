@@ -42,7 +42,7 @@ main: proc(argc: i32, argv: **char)-> i32 = {
         printf("i = {}, ", numbers.data[i]); 
     }
 
-    numberchain: *List<payload>;
+    numberchain: *List<payload> = {};
     numberchain = List<payload>create(&arena);
     List<payload>append(arena.&, numberchain, { .x = 3.16 });
     List<payload>append(arena.&, numberchain, { .x = 8.6 });

@@ -155,12 +155,14 @@ Kind:enum = {
 main:proc()->i32 = {
     kind:Kind = Kind.Ready;
     switch (kind) {
-        case Kind.None:
+        case Kind.None: {
             printf("none\n");
             return 0;
-        case Kind.Ready:
+        }
+        case Kind.Ready: {
             printf("%d\n", kind);
             return 0;
+        }
     }
     return 1;
 }
@@ -940,12 +942,14 @@ main:proc()->i32={
     total:i32 = 0;
     mod:i32 = p.flags % 4;
     switch (p.values[1]) {
-        case 2:
+        case 2: {
             total = platform_add(p.values[1], p.flags + mod);
             break;
-        default:
+        }
+        default: {
             total = 99;
             break;
+        }
     }
     if (!(total >= 10 and total <= 10 and p.values[2] == 0) or p.values[3] != 6) {
         total = -1;
@@ -3883,8 +3887,9 @@ main:proc()->i32 = {
     control_switch_break_i.write_text(r'''
 main:proc()->i32 = {
     switch (1) {
-        case 1:
+        case 1: {
             break;
+        }
     }
     return 0;
 }
@@ -3901,8 +3906,9 @@ main:proc()->i32 = {
     control_switch_continue_i.write_text(r'''
 main:proc()->i32 = {
     switch (1) {
-        case 1:
+        case 1: {
             continue;
+        }
     }
     return 0;
 }
@@ -5641,10 +5647,12 @@ Kind:enum = {
 
 main:proc(kind:Kind)->i32 = {
     switch (kind) {
-        case Kind_None:
+        case Kind_None: {
             return 0;
-        case Kind_Ready:
+        }
+        case Kind_Ready: {
             return 1;
+        }
     }
     return -1;
 }
@@ -5670,8 +5678,9 @@ Other:enum = {
 
 main:proc(kind:Kind)->i32 = {
     switch (kind) {
-        case Other_Bad:
+        case Other_Bad: {
             return 1;
+        }
     }
     return 0;
 }
@@ -5698,8 +5707,9 @@ Payload:struct = {
 main:proc(value:i32)->i32 = {
     payload:Payload = {};
     switch (value) {
-        case payload:
+        case payload: {
             return 1;
+        }
     }
     return 0;
 }
@@ -7224,6 +7234,99 @@ c:proc()->i32 = { return 2; }
             ("unclosed '{'",),
             (),
         ),
+        # Uniform block rule: switch cases, switch defaults, and labels all take a
+        # block, and variables all say what they start as.
+        (
+            "blockless_case_rejected",
+            "main:proc()->i32 = {\n    switch (1) {\n        case 1: return 5;\n    }\n    return 0;\n}\n",
+            ("a switch case takes a block",),
+            (),
+        ),
+        (
+            "blockless_default_rejected",
+            "main:proc()->i32 = {\n    switch (1) {\n        default: return 5;\n    }\n    return 0;\n}\n",
+            ("a switch default takes a block",),
+            (),
+        ),
+        (
+            "blockless_label_rejected",
+            "main:proc()->i32 = {\n    done: label;\n    return 0;\n}\n",
+            ("expected '=' after label",),
+            (),
+        ),
+        (
+            "uninitialized_local_rejected",
+            "main:proc()->i32 = {\n    x: i32;\n    return x;\n}\n",
+            ("needs an initializer", "'= ?'"),
+            (),
+        ),
+        (
+            "uninitialized_global_rejected",
+            "g: i32;\nmain:proc()->i32 = { return g; }\n",
+            ("needs an initializer",),
+            (),
+        ),
+        # Passthrough directives reach the generated C untouched, so an unbalanced
+        # conditional must be caught here rather than surfacing as a C error that
+        # points at emitted code.
+        (
+            "preproc_unterminated_if",
+            "#if 0\nmain:proc()->i32 = { return 0; }\n",
+            ("unterminated '#if'", ":1:1"),
+            (),
+        ),
+        (
+            "preproc_stray_endif",
+            "main:proc()->i32 = { return 0; }\n#endif\n",
+            ("'#endif' without a matching '#if'", ":2:1"),
+            (),
+        ),
+        (
+            "preproc_stray_else",
+            "#else\nmain:proc()->i32 = { return 0; }\n",
+            ("'#else' without a matching '#if'",),
+            (),
+        ),
+        (
+            "preproc_stray_elif",
+            "#elif 1\nmain:proc()->i32 = { return 0; }\n",
+            ("'#elif' without a matching '#if'",),
+            (),
+        ),
+        # Independent errors inside one statement must all be reported, while an
+        # expression whose type could not be resolved stays quiet instead of
+        # cascading. Unresolved types act as the poison value that makes both hold.
+        (
+            "recovery_within_statement",
+            r'''
+P:struct = { v:i32; }
+takes_two:proc(a:i32, b:i32)->i32 = { return a + b; }
+gen:proc<T>(x:T)->T = { return x; }
+
+main:proc()->i32 = {
+    p:P = {};
+    a:i32 = takes_two(undeclared_thing, p);
+    b:i32 = takes_two(p.nofield, p);
+    c:i32 = takes_two(gen<i32, f32>(1), p);
+    d:i32 = p.missing_x + p.missing_y;
+    return a + b + c + d;
+}
+''',
+            (
+                "use of undeclared identifier 'undeclared_thing'",
+                "type 'P' has no field 'nofield'",
+                "generic proc 'gen' expects 1 type arg, got 2",
+                # the independent sibling argument is still checked in each case
+                "argument 2 'b' expected 'i32', got 'P'",
+                # both sides of one binary expression report
+                "has no field 'missing_x'",
+                "has no field 'missing_y'",
+            ),
+            (
+                # the unresolved arguments must not also produce argument-1 type errors
+                "argument 1 'a' expected",
+            ),
+        ),
     )
     for name, source, expected, forbidden in recovery_cases:
         rec_i = TEST_DIR / f"{name}.i"
@@ -7257,6 +7360,69 @@ c:proc()->i32 = { return 2; }
             print(rec_json.stdout)
             return 1
         print(f"ok {name}")
+
+    # Fields and parameters have nothing to initialize, so the rule must not reach
+    # them; '= ?' must lower to a plain C declaration with no zeroing.
+    exempt_i = TEST_DIR / "init_exemptions.i"
+    exempt_c = TEST_DIR / "init_exemptions.c"
+    exempt_i.write_text(
+        "S:struct = {\n    a:i32;\n    b:*S;\n}\n"
+        "g_scratch:[8]u8 = ?;\n"
+        "f:proc(x:i32, y:*S)->i32 = {\n    buf:[16]u8 = ?;\n    buf[0] = 1;\n    return x + cast(buf[0], i32);\n}\n"
+        "main:proc()->i32 = { s:S = {}; return f(s.a, s.b); }\n",
+        encoding="utf-8", newline="\n",
+    )
+    exempt = run([str(I_EXE), "compile", str(exempt_i), "-o", str(exempt_c), "--no-header"])
+    if exempt.returncode != 0:
+        print("init_exemptions: struct fields, params, and '= ?' should all be accepted")
+        print(exempt.stdout)
+        return 1
+    exempt_generated = exempt_c.read_text(encoding="utf-8")
+    if "u8 g_scratch[8];" not in exempt_generated or "u8 buf[16];" not in exempt_generated:
+        print("init_exemptions: '= ?' should emit a bare declaration with no initializer")
+        print(exempt_generated)
+        return 1
+    if "g_scratch[8] = " in exempt_generated or "buf[16] = " in exempt_generated:
+        print("init_exemptions: '= ?' must not emit an initializer")
+        return 1
+    print("ok init_exemptions")
+
+    # Same-named locals in different switch cases used to emit a C redefinition.
+    case_scope_i = TEST_DIR / "case_scope.i"
+    case_scope_c = TEST_DIR / "case_scope.c"
+    case_scope_i.write_text(
+        "main:proc()->i32 = {\n    x:i32 = 1;\n    switch (x) {\n"
+        "        case 1: {\n            a:i32 = 5;\n            return a;\n        }\n"
+        "        case 2: {\n            a:i32 = 6;\n            return a;\n        }\n"
+        "    }\n    return 0;\n}\n",
+        encoding="utf-8", newline="\n",
+    )
+    case_scope = run([str(I_EXE), "compile", str(case_scope_i), "-o", str(case_scope_c), "--no-header"])
+    if case_scope.returncode != 0:
+        print("case_scope: per-case locals should compile")
+        print(case_scope.stdout)
+        return 1
+    case_generated = case_scope_c.read_text(encoding="utf-8")
+    if "case 1: {" not in case_generated or "case 2: {" not in case_generated:
+        print("case_scope: expected each case to emit its own C block")
+        print(case_generated)
+        return 1
+    print("ok case_scope")
+
+    # Balanced conditionals, including the ifdef/ifndef spellings, must stay silent.
+    balanced_i = TEST_DIR / "preproc_balanced.i"
+    balanced_i.write_text(
+        "#if 0\n#define PREPROC_A 1\n#else\n#define PREPROC_B 2\n#endif\n"
+        "#ifdef PREPROC_Y\n#endif\n#ifndef PREPROC_Z\n#endif\n"
+        "main:proc()->i32 = { return 0; }\n",
+        encoding="utf-8", newline="\n",
+    )
+    balanced = run([str(I_EXE), "check", str(balanced_i)])
+    if balanced.returncode != 0:
+        print("preproc_balanced: balanced conditionals should check cleanly")
+        print(balanced.stdout)
+        return 1
+    print("ok preproc_balanced")
 
     # 'c' is valid code in the resync case, so it must produce no diagnostics at all
     resync = run([str(I_EXE), "check", str(TEST_DIR / "recovery_parse_resync.i"), "--diagnostics=json"])
@@ -7313,6 +7479,20 @@ c:proc()->i32 = { return 2; }
         print(i_execute.stdout)
         return i_execute.returncode
     print(i_execute.stdout.rstrip())
+
+    i_debuginfo = run([sys.executable, "tests/run_i_debuginfo.py"])
+    if i_debuginfo.returncode != 0:
+        print(i_debuginfo.stdout)
+        return i_debuginfo.returncode
+    print(i_debuginfo.stdout.rstrip())
+
+    # Bounded here so the suite stays quick; soak with
+    # `python tests/run_i_fuzz.py --iterations 6000 --seed <n> --keep-going`.
+    i_fuzz = run([sys.executable, "tests/run_i_fuzz.py", "--iterations", "400"])
+    if i_fuzz.returncode != 0:
+        print(i_fuzz.stdout)
+        return i_fuzz.returncode
+    print(i_fuzz.stdout.rstrip())
 
     torture = run([sys.executable, "tests/run_c_torture.py"])
     if torture.returncode != 0:

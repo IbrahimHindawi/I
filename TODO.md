@@ -36,14 +36,73 @@
 - [x] Error-recovery regression tests cover multi-error reporting, parse resync, and
       unclosed braces in both terminal and JSON modes.
 
+- [x] `volatile` type qualifier, for memory-mapped registers and signal-visible
+      state. Carried through generics and mangled distinctly, so `Array<volatile T>`
+      and `Array<T>` stay separate monomorphs.
+- [x] Fixed a long-standing monomorph bug: a generic instantiated on anything other
+      than a plain name emitted the mangled spelling as a C type name, so
+      `Array<*i32>` generated `ptr_i32 * data;` and did not compile. The same held
+      for `Array<const i32>` and `Array<*const char>`. Mangles are now recorded
+      against the type they came from, and emission recovers the real type.
+- [x] Passthrough `#if`/`#endif` balance is validated, so an unterminated conditional
+      or a stray `#endif`/`#else`/`#elif` is an I diagnostic pointing at the `.i`
+      line instead of a C error pointing at generated code.
+- [x] `tests/run_i_fuzz.py` mutates the corpus and asserts the front end always
+      degrades into diagnostics, never a crash, hang, or malformed JSON. It found
+      four real defects when first written: an infinite loop on a non-literal
+      `printfmt` format, two segfaults, and an out-of-bounds argument read.
+- [x] `tests/run_i_debuginfo.py` reads the DWARF line table and confirms generated
+      code maps back to `.i` source and that reduced `#line` output produces a table
+      identical to full output. Verified non-vacuous: stripping `#line` makes rows
+      point at the generated `.c`.
+- [N] Expression-level poison type. Already satisfied: an unresolved
+      `infer_expr_type` result is the poison value, so independent errors in one
+      statement all report while unresolved sub-expressions stay quiet. Locked in by
+      the `recovery_within_statement` test.
+- [N] LSP single-diagnostic assumptions. `compiler_diag_items_to_lsp_diags` already
+      iterates the array, so multi-error publishing needed no change.
+
+## Uniform Declarations And Blocks
+
+One rule, no exceptions: every declaration is `name : kind = value`, and every body
+is a block.
+
+- [x] Variables must be initialized. `= {}` zeroes; `= ?` leaves storage untouched
+      and lowers to a plain C declaration, so a large buffer costs exactly what the
+      equivalent C costs. Struct fields and proc parameters are exempt: they have
+      nothing to initialize.
+- [x] Switch cases and defaults take a block and emit a real C block. This fixed a
+      live miscompile: same-named locals in two cases used to land in the switch's
+      single shared scope and emit a C redefinition error, which the compiler
+      accepted and clang rejected.
+- [x] Labels take a block: `done: label = { ... }` emits `done: { ... }`. Note the
+      block is scoping only. Control still falls out of it into the following code,
+      so stacked labels chain the way C labels always have.
+- [x] Neovim support moved under `nvim/` with `install.py` (copy, `--link`,
+      `--dest`, `--dry-run`, `--uninstall`).
+- [x] Filetype detection rewritten in Lua using `vim.filetype.add()`. Neovim's
+      built-in table claims `*.i` for Progress, and a plain autocmd races it;
+      verified stock Neovim reports `filetype=progress` and the installed config
+      reports `filetype=i`.
+- [x] Syntax file corrected: `//` and `/* */` had no rules at all and fell through
+      to the identifier match, and `#` was styled as a comment. Comments, strings
+      and directives are now defined last so they win at the same start column, and
+      a `#` line that is not a recognized directive is highlighted as an error,
+      matching the compiler.
+- [x] Verified in real Neovim: filetype, syntax groups, LSP attachment, and three
+      simultaneous red squiggles from one buffer.
+
 Follow-ups worth doing next:
 
-- [ ] Recover inside expressions with a poison type, so a bad sub-expression reports
-      once rather than suppressing the rest of the enclosing statement.
-- [ ] Validate that passthrough `#if`/`#endif` directives balance, so an unterminated
-      conditional is an I diagnostic instead of a generated-C error.
-- [ ] Teach the LSP that a check can now return many diagnostics per file, and drop
-      any single-diagnostic assumptions left in the Python layer.
+- [ ] `#define`s in opposing `#if`/`#else` branches collide as duplicate globals,
+      because conditionals are collected without being evaluated. Pre-existing, and
+      only reachable when both branches define the same name.
+- [ ] Volatile is transparent to type compatibility: it is mangled and emitted, but
+      not enforced, so dropping `volatile` through a pointer is left to the C
+      compiler to reject. Match the existing `const` pointer rules if that becomes
+      a real problem.
+- [ ] Consider replacing the linear mangle registry scan with a hash if compile time
+      on large projects starts to show it; it is not measurable today.
 
 ## Current Target: Clangd-Style Ergonomics
 
