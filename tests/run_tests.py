@@ -7418,6 +7418,334 @@ main:proc()->i32 = {
         return 1
     print("ok case_scope")
 
+    # An external enum is defined by a C header, so its members already carry their
+    # real C names. Prefixing them would reference a symbol the header never
+    # declared, which only shows up at C compile time.
+    ext_enum_i = TEST_DIR / "external_enum_member.i"
+    ext_enum_c = TEST_DIR / "external_enum_member.c"
+    ext_enum_i.write_text(
+        "Owned:enum = { Alpha, Beta }\n"
+        "Foreign:enum = {\n    foreign_ok = 0,\n    foreign_bad = 1,\n    external;\n}\n"
+        "main:proc()->i32 = {\n"
+        "    a:Owned = Owned.Alpha;\n"
+        "    f:Foreign = Foreign.foreign_ok;\n"
+        "    return cast(a, i32) + cast(f, i32);\n}\n",
+        encoding="utf-8", newline="\n",
+    )
+    ext_enum = run([str(I_EXE), "compile", str(ext_enum_i), "-o", str(ext_enum_c), "--no-header"])
+    if ext_enum.returncode != 0:
+        print("external_enum_member: expected a clean compile")
+        print(ext_enum.stdout)
+        return 1
+    ext_generated = ext_enum_c.read_text(encoding="utf-8")
+    if "Foreign_foreign_ok" in ext_generated:
+        print("external_enum_member: external enum member should not be prefixed")
+        print(ext_generated)
+        return 1
+    if "foreign_ok" not in ext_generated:
+        print("external_enum_member: expected the external member name to be emitted as-is")
+        return 1
+    if "Owned_Alpha" not in ext_generated:
+        print("external_enum_member: an owned enum member should still be prefixed")
+        print(ext_generated)
+        return 1
+    print("ok external_enum_member")
+
+    # An array may be sized by an enum member so a table stays in step with the enum
+    # it is indexed by. The member's C name is emitted, not its numeric value, so the
+    # generated C keeps the same symbolic link to the enum that the I source has.
+    count_i = TEST_DIR / "array_count_enum.i"
+    count_c = TEST_DIR / "array_count_enum.c"
+    count_i.write_text(
+        "Kind:enum = { A, B, Count }\n"
+        "Ext:enum = {\n    EXT_N = 3,\n    external;\n}\n"
+        "g_table:[Kind.Count]i32 = {};\n"
+        "g_ext:[Ext.EXT_N]i32 = {};\n"
+        "g_grid:[Kind.Count][4]i32 = {};\n"
+        "main:proc()->i32 = { return g_table[0] + g_ext[0] + g_grid[0][0]; }\n",
+        encoding="utf-8", newline="\n",
+    )
+    count = run([str(I_EXE), "compile", str(count_i), "-o", str(count_c), "--no-header"])
+    if count.returncode != 0:
+        print("array_count_enum: expected a clean compile")
+        print(count.stdout)
+        return 1
+    count_generated = count_c.read_text(encoding="utf-8")
+    if "i32 g_table[Kind_Count]" not in count_generated:
+        print("array_count_enum: expected the owned enum member as the array count")
+        print(count_generated)
+        return 1
+    if "i32 g_ext[EXT_N]" not in count_generated:
+        print("array_count_enum: an external enum member should not be prefixed")
+        print(count_generated)
+        return 1
+    if "i32 g_grid[Kind_Count][4]" not in count_generated:
+        print("array_count_enum: expected a symbolic count to nest with a literal one")
+        print(count_generated)
+        return 1
+    print("ok array_count_enum")
+
+    # An array can also be sized by how many members an enum declares, so a table
+    # indexed by that enum cannot fall out of step with it. Reflection is a
+    # runtime value, but the count is known at compile time, so it must resolve
+    # to a literal -- a C array size cannot be a struct member read.
+    reflect_count_i = TEST_DIR / "array_count_reflect.i"
+    reflect_count_c = TEST_DIR / "array_count_reflect.c"
+    reflect_count_i.write_text(
+        "Kind:enum = { A, B, C }\n"
+        "g_table:[Kind<>.value_count]i32 = {};\n"
+        "g_grid:[Kind<>.value_count][2]i32 = {};\n"
+        "main:proc()->i32 = { return g_table[0] + g_grid[0][0]; }\n",
+        encoding="utf-8", newline="\n",
+    )
+    reflect_count = run([str(I_EXE), "compile", str(reflect_count_i), "-o", str(reflect_count_c), "--no-header"])
+    if reflect_count.returncode != 0:
+        print("array_count_reflect: expected a clean compile")
+        print(reflect_count.stdout)
+        return 1
+    reflect_generated = reflect_count_c.read_text(encoding="utf-8")
+    if "i32 g_table[3]" not in reflect_generated:
+        print("array_count_reflect: expected value_count to resolve to a literal")
+        print(reflect_generated)
+        return 1
+    if "i32 g_grid[3][2]" not in reflect_generated:
+        print("array_count_reflect: expected a reflected count to nest with a literal one")
+        print(reflect_generated)
+        return 1
+    print("ok array_count_reflect")
+
+    # A signed exponent belongs to the float literal. Lexing `3.4e+38f` as
+    # `3.4e`, `+`, `38f` still parses as an expression, so the mistake only
+    # surfaces as invalid C much later.
+    exponent_i = TEST_DIR / "float_exponent.i"
+    exponent_c = TEST_DIR / "float_exponent.c"
+    exponent_i.write_text(
+        "main:proc()->i32 = {\n"
+        "    a:f32 = 3.402823466e+38f;\n"
+        "    b:f32 = 1.5e-3f;\n"
+        "    c:f32 = 2.0e10f;\n"
+        "    d:u64 = 0xdeadbeef;\n"
+        "    e:i32 = 5;\n"
+        "    return cast(a + b + c, i32) + cast(d, i32) + e;\n}\n",
+        encoding="utf-8", newline="\n",
+    )
+    exponent = run([str(I_EXE), "compile", str(exponent_i), "-o", str(exponent_c), "--no-header"])
+    if exponent.returncode != 0:
+        print("float_exponent: expected a clean compile")
+        print(exponent.stdout)
+        return 1
+    exponent_generated = exponent_c.read_text(encoding="utf-8")
+    for needle in ("3.402823466e+38f", "1.5e-3f", "2.0e10f", "0xdeadbeef"):
+        if needle not in exponent_generated:
+            print(f"float_exponent: expected {needle!r} to survive lexing intact")
+            print(exponent_generated)
+            return 1
+    if "3.402823466e + 38f" in exponent_generated:
+        print("float_exponent: exponent was split into separate tokens")
+        print(exponent_generated)
+        return 1
+    print("ok float_exponent")
+
+    # Only value_count makes sense as a size, and the enum still has to exist.
+    for src, label in (
+        ("Kind:enum = { A }\ng_t:[Nope<>.value_count]i32 = {};\nmain:proc()->i32 = { return 0; }\n",
+         "unknown enum"),
+        ("Kind:enum = { A }\ng_t:[Kind<>.name]i32 = {};\nmain:proc()->i32 = { return 0; }\n",
+         "only 'value_count'"),
+    ):
+        bad_reflect_i = TEST_DIR / "array_count_reflect_bad.i"
+        bad_reflect_i.write_text(src, encoding="utf-8", newline="\n")
+        bad_reflect = run([str(I_EXE), "check", str(bad_reflect_i)])
+        if bad_reflect.returncode == 0 or label not in bad_reflect.stdout:
+            print(f"array_count_reflect_bad: expected a {label!r} error")
+            print(bad_reflect.stdout)
+            return 1
+    print("ok array_count_reflect_bad")
+
+    # A count naming something that does not exist has to be reported, not passed
+    # through to the C compiler as an undeclared identifier.
+    for src, label in (
+        ("Kind:enum = { A }\ng_t:[Nope.Count]i32 = {};\nmain:proc()->i32 = { return 0; }\n", "unknown enum"),
+        ("Kind:enum = { A }\ng_t:[Kind.Nope]i32 = {};\nmain:proc()->i32 = { return 0; }\n", "unknown enum member"),
+    ):
+        bad_i = TEST_DIR / "array_count_enum_bad.i"
+        bad_i.write_text(src, encoding="utf-8", newline="\n")
+        bad = run([str(I_EXE), "check", str(bad_i)])
+        if bad.returncode == 0 or label not in bad.stdout:
+            print(f"array_count_enum_bad: expected a '{label}' error")
+            print(bad.stdout)
+            return 1
+    print("ok array_count_enum_bad")
+
+    # A proc pointer reached through a field, an index, or a chain of both is
+    # callable directly. This is what lets I describe a C vtable, where the
+    # callee is never a plain name.
+    indirect_i = TEST_DIR / "call_indirect.i"
+    indirect_c = TEST_DIR / "call_indirect.c"
+    indirect_i.write_text(
+        "Vtbl:struct = {\n"
+        "    add: *proc(a: i32, b: i32)->i32;\n"
+        "    scale: *proc(v: i32)->i32;\n}\n"
+        "Obj:struct = { vtbl: *const Vtbl; bias: i32; }\n"
+        "add_impl:proc(a: i32, b: i32)->i32 = { return a + b; }\n"
+        "scale_impl:proc(v: i32)->i32 = { return v * 3; }\n"
+        "g_vtbl:Vtbl = {};\n"
+        "g_table:[2]*proc(v: i32)->i32 = {};\n"
+        "main:proc()->i32 = {\n"
+        "    g_vtbl.add = add_impl;\n"
+        "    g_vtbl.scale = scale_impl;\n"
+        "    obj:Obj = {};\n"
+        "    obj.vtbl = g_vtbl.&;\n"
+        "    obj.bias = 1;\n"
+        "    g_table[0] = scale_impl;\n"
+        "    direct:i32 = g_vtbl.add(2, 3);\n"
+        "    through_ptr:i32 = obj.vtbl[0].scale(4);\n"
+        "    through_index:i32 = g_table[0](5);\n"
+        "    return direct + through_ptr + through_index + obj.bias;\n}\n",
+        encoding="utf-8", newline="\n",
+    )
+    indirect = run([str(I_EXE), "compile", str(indirect_i), "-o", str(indirect_c), "--no-header"])
+    if indirect.returncode != 0:
+        print("call_indirect: expected a clean compile")
+        print(indirect.stdout)
+        return 1
+    indirect_generated = indirect_c.read_text(encoding="utf-8")
+    for needle in ("g_vtbl.add(2, 3)", "obj.vtbl[0].scale(4)", "g_table[0](5)"):
+        if needle not in indirect_generated:
+            print(f"call_indirect: expected {needle!r} in the generated C")
+            print(indirect_generated)
+            return 1
+    print("ok call_indirect")
+
+    # A switch case takes a block, so it does not fall through. This shipped
+    # falling through: an enemy AI ran its "approach" case, fell into "retreat",
+    # and negated its own movement vector -- every approaching enemy walked
+    # directly away from its target, and nothing failed to compile.
+    sw_i = TEST_DIR / "switch_no_fallthrough.i"
+    sw_c = TEST_DIR / "switch_no_fallthrough.c"
+    sw_i.write_text(
+        "Mode:enum = { Approach, Retreat, Idle, }\n"
+        "pick:proc(m: Mode)->i32 = {\n"
+        "    v:i32 = 0;\n"
+        "    switch (m) {\n"
+        "        case Mode.Approach: { v = 1; }\n"
+        "        case Mode.Retreat: { v = -1; }\n"
+        "        default: { v = 0; }\n"
+        "    }\n"
+        "    return v;\n}\n"
+        "early:proc(m: Mode)->i32 = {\n"
+        "    switch (m) {\n"
+        "        case Mode.Approach: { return 7; }\n"
+        "        case Mode.Retreat: { return 8; }\n"
+        "        default: { return 9; }\n"
+        "    }\n"
+        "    return 0;\n}\n"
+        "main:proc()->i32 = {\n"
+        "    return pick(Mode.Approach) + early(Mode.Retreat);\n}\n",
+        encoding="utf-8", newline="\n",
+    )
+    sw = run([str(I_EXE), "compile", str(sw_i), "-o", str(sw_c), "--no-header"])
+    if sw.returncode != 0:
+        print("switch_no_fallthrough: expected a clean compile")
+        print(sw.stdout)
+        return 1
+    sw_generated = sw_c.read_text(encoding="utf-8")
+    # An assigning case gets a break; a case that already returns does not need
+    # one, and emitting it anyway would be unreachable code.
+    if sw_generated.count("break;") != 2:
+        print("switch_no_fallthrough: expected exactly 2 emitted breaks")
+        print(sw_generated)
+        return 1
+    if "return 7;\n    }\n    break;" in sw_generated:
+        print("switch_no_fallthrough: break emitted after a returning case")
+        print(sw_generated)
+        return 1
+    # Behaviour, not just shape: Approach must stay 1 rather than falling into
+    # Retreat and becoming -1.
+    sw_exe = TEST_DIR / "switch_no_fallthrough.exe"
+    sw_build = run(["clang.exe", str(sw_c), "-I", "src", "-I", "src/std", "-o", str(sw_exe)])
+    if sw_build.returncode != 0:
+        print("switch_no_fallthrough: generated C did not build")
+        print(sw_build.stdout)
+        return 1
+    sw_run = run([str(sw_exe)])
+    if sw_run.returncode != 9:
+        print(f"switch_no_fallthrough: expected exit 9 (1 + 8), got {sw_run.returncode}")
+        return 1
+    print("ok switch_no_fallthrough")
+
+    # The result of an indirect call carries the proc's return type, and the
+    # arguments are checked against the proc type -- it is not an escape hatch.
+    bad_indirect_i = TEST_DIR / "call_indirect_bad.i"
+    for src, label in (
+        ("Vtbl:struct = { add: *proc(a: i32, b: i32)->i32; }\n"
+         "g_v:Vtbl = {};\n"
+         "main:proc()->i32 = { return g_v.add(1); }\n", "argument"),
+        ("Vtbl:struct = { name: i32; }\n"
+         "g_v:Vtbl = {};\n"
+         "main:proc()->i32 = { return g_v.name(1); }\n", "not a proc"),
+    ):
+        bad_indirect_i.write_text(src, encoding="utf-8", newline="\n")
+        bad_indirect = run([str(I_EXE), "check", str(bad_indirect_i)])
+        if bad_indirect.returncode == 0:
+            print(f"call_indirect_bad: expected an error mentioning {label!r}")
+            print(bad_indirect.stdout)
+            return 1
+    print("ok call_indirect_bad")
+
+    # Identifiers that are legal in I but are C keywords used to reach the C
+    # compiler verbatim: `typedef: i32 = 1;` emitted `i32 typedef = 1;` and
+    # clang rejected it, pointing at generated code the author never wrote.
+    # They are rejected here instead, on the real source line.
+    reserved_i = TEST_DIR / "reserved_c_identifier.i"
+    for name in ("typedef", "register", "restrict", "auto", "inline", "unsigned"):
+        reserved_i.write_text(
+            "main:proc()->i32 = {\n"
+            f"    {name}: i32 = 1;\n"
+            f"    return {name};\n"
+            "}\n",
+            encoding="utf-8", newline="\n",
+        )
+        reserved = run([str(I_EXE), "check", str(reserved_i)])
+        if reserved.returncode == 0:
+            print(f"reserved_c_identifier: {name!r} should be rejected as a local name")
+            print(reserved.stdout)
+            return 1
+        if "reserved by the C backend" not in reserved.stdout:
+            print(f"reserved_c_identifier: {name!r} rejected without the expected message")
+            print(reserved.stdout)
+            return 1
+
+    # The same applies to parameters, which also become C declarations.
+    reserved_i.write_text(
+        "f:proc(typedef: i32)->i32 = { return typedef; }\n"
+        "main:proc()->i32 = { return f(1); }\n",
+        encoding="utf-8", newline="\n",
+    )
+    reserved_param = run([str(I_EXE), "check", str(reserved_i)])
+    if reserved_param.returncode == 0 or "reserved by the C backend" not in reserved_param.stdout:
+        print("reserved_c_identifier: a parameter named 'typedef' should be rejected")
+        print(reserved_param.stdout)
+        return 1
+    print("ok reserved_c_identifier")
+
+    # Enum members lower to Enum_Member, so a global spelled that way collides
+    # with one after mangling. Two distinct I names, one C name, and whichever
+    # the C compiler picks is silently wrong -- so it has to be caught here.
+    collide_i = TEST_DIR / "mangle_collision.i"
+    collide_i.write_text(
+        "Mode: enum = { A, B, }\n"
+        "Mode_A: i32 = 777;\n"
+        "main:proc()->i32 = { return Mode_A; }\n",
+        encoding="utf-8", newline="\n",
+    )
+    collide = run([str(I_EXE), "check", str(collide_i)])
+    if collide.returncode == 0:
+        print("mangle_collision: 'Mode_A' collides with enum member 'Mode.A' after mangling")
+        print(collide.stdout)
+        return 1
+    print("ok mangle_collision")
+
     # Balanced conditionals, including the ifdef/ifndef spellings, must stay silent.
     balanced_i = TEST_DIR / "preproc_balanced.i"
     balanced_i.write_text(

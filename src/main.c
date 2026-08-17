@@ -730,6 +730,11 @@ typedef struct Program {
     Vec_voidptr aliases; // AliasDecl*
     Vec_voidptr procs;   // ProcDecl*
     Vec_voidptr globals; // Stmt* (var decl)
+    /* Array types whose count is a symbolic constant (`[Enum.Member]`) rather
+       than a literal. The enum may be declared after — or imported alongside —
+       the use, so the text is kept as written and resolved to its C name once
+       every declaration is in scope. */
+    Vec_voidptr pending_array_counts; // TypeExpr*
 } Program;
 
 typedef struct Scope {
@@ -755,6 +760,7 @@ typedef struct Parser {
     i32 index;
     bool pending_equal;
     bool reported_eof; // so an unclosed '{' reports once, not once per nesting level
+    Vec_voidptr *pending_array_counts; // borrowed from the Program being parsed
 } Parser;
 
 static bool is_alpha(u8 c) {
@@ -925,6 +931,33 @@ static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) 
                 while (p < end && is_digit(*p)) {
                     p++;
                     col++;
+                }
+            }
+            /* A signed exponent is part of the literal, not a following operator.
+               Without this `3.4e+38f` lexes as `3.4e`, `+`, `38f` and emits C
+               that will not compile. Hex literals are excluded because their
+               'e' digits are mantissa, not an exponent marker. */
+            bool is_hex = (p - start) > 1 && start[0] == '0' &&
+                          (start[1] == 'x' || start[1] == 'X');
+            if (!is_hex && p < end && (*p == 'e' || *p == 'E')) {
+                u8 *exp_start = p;
+                i32 exp_col = col;
+                u8 *q = p + 1;
+                i32 qcol = col + 1;
+                if (q < end && (*q == '+' || *q == '-')) {
+                    q++;
+                    qcol++;
+                }
+                if (q < end && is_digit(*q)) {
+                    p = q;
+                    col = qcol;
+                    while (p < end && is_digit(*p)) {
+                        p++;
+                        col++;
+                    }
+                } else {
+                    p = exp_start;
+                    col = exp_col;
                 }
             }
             while (p < end && is_alnum(*p)) {
@@ -1520,6 +1553,7 @@ static TypeExpr *type_new(memops_arena *arena, TypeKind kind) {
 }
 
 static TypeExpr *parse_type(Parser *p);
+static string8 concat_name2(memops_arena *arena, string8 a, const char *sep, string8 b);
 
 static string8 type_mangle_concrete(memops_arena *arena, TypeExpr *type) {
     string8 out = string8_reserve(arena, 32);
@@ -1626,12 +1660,45 @@ static TypeExpr *parse_type(Parser *p) {
     }
 
     if (parser_match(p, Token_LBracket)) {
-        Token *count_tok = parser_expect(p, Token_Number, "expected array count");
-        parser_expect(p, Token_RBracket, "expected ']' after array count");
-        TypeExpr *inner = parse_type(p);
         TypeExpr *array = type_new(p->arena, Type_Array);
-        array->array_count = token_to_string8(p->arena, count_tok);
-        array->elem = inner;
+        bool symbolic = false;
+        if (parser_peek(p)->kind == Token_Identifier) {
+            /* A symbolic count: an enum member (`Enum.Member`) or a bare C
+               constant. Kept as written and resolved once all enums are known. */
+            Token *first = parser_next(p);
+            array->line = first->line;
+            array->col = first->col;
+            array->array_count = token_to_string8(p->arena, first);
+            /* `Type<>.value_count` sizes an array by how many members its enum
+               declares, so a table indexed by an enum cannot fall out of step
+               with it. Reflection is a runtime value, but the count is known at
+               compile time, so it resolves to a literal below. */
+            if (parser_peek(p)->kind == Token_LAngle && parser_peek_n(p, 1)->kind == Token_RAngle) {
+                parser_next(p);
+                parser_next(p);
+                parser_expect(p, Token_Dot, "expected '.' after '<>' in array count");
+                Token *member = parser_expect(p, Token_Identifier, "expected reflection member after '<>.' in array count");
+                if (member) {
+                    array->array_count = concat_name2(p->arena, array->array_count, "<>.",
+                                                      token_to_string8(p->arena, member));
+                }
+            } else if (parser_match(p, Token_Dot)) {
+                Token *member = parser_expect(p, Token_Identifier, "expected enum member after '.' in array count");
+                if (member) {
+                    array->array_count = concat_name2(p->arena, array->array_count, ".",
+                                                      token_to_string8(p->arena, member));
+                }
+            }
+            symbolic = true;
+        } else {
+            Token *count_tok = parser_expect(p, Token_Number, "expected array count");
+            array->array_count = token_to_string8(p->arena, count_tok);
+        }
+        parser_expect(p, Token_RBracket, "expected ']' after array count");
+        array->elem = parse_type(p);
+        if (symbolic && p->pending_array_counts) {
+            ptr_array_append(p->arena, p->pending_array_counts, array);
+        }
         return array;
     }
 
@@ -1764,6 +1831,7 @@ static Expr *parse_multiplicative(Parser *p);
 static Expr *parse_additive(Parser *p);
 static Expr *parse_relational(Parser *p);
 static Expr *parse_equality(Parser *p);
+static Expr *parse_bitwise_or(Parser *p);
 static Expr *parse_postfix(Parser *p, Expr *base);
 
 static Expr *parse_initializer_list_after_lbrace(Parser *p, Token *lb) {
@@ -2062,6 +2130,27 @@ static Expr *parse_postfix(Parser *p, Expr *base) {
             result = field;
             continue;
         }
+        /* Calling something that is not a plain name -- a proc pointer held in a
+           field or an array of them. A direct call keeps its name; here the
+           callee is the expression in `base`, which is what marks it indirect. */
+        if (parser_match(p, Token_LParen)) {
+            Token *lp = parser_prev(p);
+            Vec_voidptr args = ptr_array_reserve(p->arena, 2);
+            if (!parser_match(p, Token_RParen)) {
+                do {
+                    Expr *arg = parse_expr(p);
+                    ptr_array_append(p->arena, &args, arg);
+                } while (parser_match(p, Token_Comma));
+                parser_expect(p, Token_RParen, "expected ')'");
+            }
+            Expr *call = expr_new(p->arena, Expr_Call);
+            call->base = result;
+            call->args = args;
+            call->line = lp->line;
+            call->col = lp->col;
+            result = call;
+            continue;
+        }
         break;
     }
     return result;
@@ -2163,7 +2252,7 @@ static Expr *parse_shift(Parser *p) {
 }
 
 static Expr *parse_relational(Parser *p) {
-    Expr *left = parse_shift(p);
+    Expr *left = parse_bitwise_or(p);
     while (parser_peek(p)->kind == Token_LAngle ||
            parser_peek(p)->kind == Token_RAngle ||
            parser_peek(p)->kind == Token_LessEqual ||
@@ -2171,7 +2260,7 @@ static Expr *parse_relational(Parser *p) {
         Token *op_tok = parser_peek(p);
         TokenKind op = op_tok->kind;
         parser_next(p);
-        Expr *right = parse_shift(p);
+        Expr *right = parse_bitwise_or(p);
         Expr *bin = expr_new(p->arena, Expr_Binary);
         bin->left = left;
         bin->right = right;
@@ -2202,11 +2291,11 @@ static Expr *parse_equality(Parser *p) {
 }
 
 static Expr *parse_bitwise_and(Parser *p) {
-    Expr *left = parse_equality(p);
+    Expr *left = parse_shift(p);
     while (parser_peek(p)->kind == Token_Ampersand) {
         Token *op_tok = parser_peek(p);
         parser_next(p);
-        Expr *right = parse_equality(p);
+        Expr *right = parse_shift(p);
         Expr *bin = expr_new(p->arena, Expr_Binary);
         bin->left = left;
         bin->right = right;
@@ -2253,11 +2342,11 @@ static Expr *parse_bitwise_or(Parser *p) {
 }
 
 static Expr *parse_logical_and(Parser *p) {
-    Expr *left = parse_bitwise_or(p);
+    Expr *left = parse_equality(p);
     while (parser_peek(p)->kind == Token_Keyword_And) {
         Token *op_tok = parser_peek(p);
         parser_next(p);
-        Expr *right = parse_bitwise_or(p);
+        Expr *right = parse_equality(p);
         Expr *bin = expr_new(p->arena, Expr_Binary);
         bin->left = left;
         bin->right = right;
@@ -3057,6 +3146,8 @@ static Program parse_program(Parser *p) {
     prog.aliases = ptr_array_reserve(p->arena, 8);
     prog.procs = ptr_array_reserve(p->arena, 8);
     prog.globals = ptr_array_reserve(p->arena, 8);
+    prog.pending_array_counts = ptr_array_reserve(p->arena, 8);
+    p->pending_array_counts = &prog.pending_array_counts;
 
     i32 errors_at_decl_start = g_error_count;
     i32 index_at_decl_start = -1;
@@ -3704,6 +3795,15 @@ static void semantic_check_expr(Expr *e, Scope *scope) {
         return;
     }
     if (e->kind == Expr_Call) {
+        /* An indirect call has no name to resolve; the callee is checked like any
+           other expression. */
+        if (e->base) {
+            semantic_check_expr(e->base, scope);
+            for (i32 i = 0; i < e->args.length; i++) {
+                semantic_check_expr((Expr *)e->args.data[i], scope);
+            }
+            return;
+        }
         if (string8_equals_cstr(&e->name, "printf")) {
             for (i32 i = 0; i < e->args.length; i++) {
                 semantic_check_expr((Expr *)e->args.data[i], scope);
@@ -3738,10 +3838,43 @@ static void semantic_check_type(Program *prog, TypeExpr *type, Vec_string8 *know
 static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_string8 *known_types, string8 generic_param, memops_arena *arena);
 static void semantic_error_control_flow(const char *keyword, const char *context, i32 line, i32 col);
 
+/* Identifiers that are not I keywords but are C keywords. I lowers to C, so a
+   local named `typedef` emits `i32 typedef = 1;` and the C compiler rejects it
+   with an error pointing at generated code the author never wrote. Rejecting
+   here turns that into a diagnostic on the real source line.
+
+   This is deliberately a restriction rather than a mangling: relaxing it later
+   is backward compatible, and mangling every identifier would make the
+   generated C harder to read, which matters because it is meant to be read.
+   See docs/compiler-hardening.md. */
+static bool ident_is_c_reserved(string8 name) {
+    static const char *reserved[] = {
+        "auto", "double", "extern", "float", "inline", "int", "long",
+        "register", "restrict", "short", "signed", "typedef", "unsigned",
+        "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic",
+        "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local",
+    };
+    for (i32 i = 0; i < (i32)(sizeof(reserved) / sizeof(reserved[0])); i++) {
+        if (string8_equals_cstr(&name, reserved[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void semantic_check_ident_available(string8 name, i32 line, i32 col) {
+    if (ident_is_c_reserved(name)) {
+        semantic_error_name(
+            "identifier is reserved by the C backend and cannot be used as a name",
+            name, line, col);
+    }
+}
+
 static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_string8 *known_types, string8 generic_param, memops_arena *arena) {
     if (stmt->kind == Stmt_Var) {
         semantic_check_type(prog, stmt->type, known_types, generic_param, stmt->source_path);
         if (stmt->expr) semantic_check_expr(stmt->expr, scope);
+        semantic_check_ident_available(stmt->name, stmt->line, stmt->col);
         LocalDeclSite *prev = scope_find_local_site(scope, stmt->name);
         if (prev) {
             semantic_error_name_dup("duplicate local declaration", stmt->name, stmt->line, stmt->col, prev->line, prev->col);
@@ -3943,6 +4076,7 @@ static void semantic_check_proc(Program *prog, ProcDecl *proc, Scope *base_scope
         if (!proc->is_external) {
             semantic_check_type(prog, param->type, known_types, proc->type_param, proc->source_path);
         }
+        semantic_check_ident_available(param->name, param->line, param->col);
         if (scope_has(&scope.locals, param->name)) {
             // locate previous parameter declaration
             i32 prev_line = param->line;
@@ -6951,7 +7085,63 @@ static EnumItem *lookup_enum_item(EnumDecl *decl, string8 name) {
 
 static string8 enum_item_c_name(memops_arena *arena, EnumDecl *decl, EnumItem *item) {
     if (!decl || !item) return (string8){0};
+    /* An external enum is defined by the C header, so its items already carry
+       their real C names. Prefixing them would invent a symbol that header never
+       declared. Only enums I emits itself get the generated prefix. */
+    if (decl->is_external) return item->name;
     return concat_name2(arena, decl->name, "_", item->name);
+}
+
+/* Rewrites `[Enum.Member]` array counts to the member's C name, now that every
+   import has been merged and all enums are visible. A bare identifier is left
+   alone: it names a C constant or macro the generated code refers to directly. */
+static void resolve_array_count_constants(memops_arena *arena, Program *prog) {
+    for (i32 i = 0; i < prog->pending_array_counts.length; i++) {
+        TypeExpr *type = (TypeExpr *)prog->pending_array_counts.data[i];
+        if (!type) continue;
+
+        i32 dot = -1;
+        for (i32 c = 0; c < type->array_count.length; c++) {
+            if (type->array_count.data[c] == '.') { dot = c; break; }
+        }
+        if (dot < 0) continue;
+
+        /* `Enum<>.value_count` is known once the enum is parsed, so it becomes a
+           literal here rather than a reflection lookup the C array size could
+           not use. */
+        if (dot >= 2 && type->array_count.data[dot - 2] == '<' && type->array_count.data[dot - 1] == '>') {
+            string8 reflect_enum_name = { type->array_count.data, dot - 2 };
+            string8 reflect_member = { type->array_count.data + dot + 1, type->array_count.length - dot - 1 };
+            EnumDecl *reflect_decl = lookup_enum_decl(prog, reflect_enum_name);
+            if (!reflect_decl) {
+                semantic_error_name("unknown enum in array count", reflect_enum_name, type->line, type->col);
+                continue;
+            }
+            if (!string8_equals_cstr(&reflect_member, "value_count")) {
+                semantic_error_name("only 'value_count' can size an array", reflect_member, type->line, type->col);
+                continue;
+            }
+            char count_buf[32];
+            snprintf(count_buf, sizeof(count_buf), "%d", (i32)reflect_decl->items.length);
+            type->array_count = string8_from_cstr(arena, count_buf);
+            continue;
+        }
+
+        string8 enum_name = { type->array_count.data, dot };
+        string8 member_name = { type->array_count.data + dot + 1, type->array_count.length - dot - 1 };
+
+        EnumDecl *decl = lookup_enum_decl(prog, enum_name);
+        if (!decl) {
+            semantic_error_name("unknown enum in array count", enum_name, type->line, type->col);
+            continue;
+        }
+        EnumItem *item = lookup_enum_item(decl, member_name);
+        if (!item) {
+            semantic_error_name("unknown enum member in array count", type->array_count, type->line, type->col);
+            continue;
+        }
+        type->array_count = enum_item_c_name(arena, decl, item);
+    }
 }
 
 static bool resolve_enum_member_expr(Program *prog, Expr *e, EnumDecl **out_decl, EnumItem **out_item) {
@@ -7139,6 +7329,13 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, Program *prog, memop
         return right;
     }
     if (e->kind == Expr_Call) {
+        /* Indirect call: the result is whatever the callee's proc type returns.
+           The callee is normally a pointer to a proc, so step through it. */
+        if (e->base) {
+            TypeExpr *callee = infer_expr_type(e->base, scope, prog, arena);
+            TypeExpr *proc_type = callee ? type_proc_from_callable_type(prog, callee) : null;
+            return proc_type ? proc_type->ret_type : null;
+        }
         if (string8_equals_cstr(&e->name, "sizeof") || string8_equals_cstr(&e->name, "alignof")) {
             return type_name_expr(arena, "usize");
         }
@@ -9511,6 +9708,47 @@ static void type_error_missing_type_operation(Expr *call, TypeExpr *type_arg, me
 }
 
 static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_arena *arena) {
+    /* Indirect call through an expression -- a proc pointer in a field, an array
+       element, and so on. Argument checking is the same as for a proc-pointer
+       variable; only finding the callee's type differs. */
+    if (call->base) {
+        type_check_expr(call->base, scope, prog, arena);
+        TypeExpr *callee_type = infer_expr_type(call->base, scope, prog, arena);
+        TypeExpr *proc_type = callee_type ? type_proc_from_callable_type(prog, callee_type) : null;
+        string8 callee_name = string8_from_cstr(arena, "callee expression");
+        if (!proc_type) {
+            type_error_call_non_proc(callee_name, callee_type, call->line, call->col, arena);
+            for (i32 i = 0; i < call->args.length; i++) {
+                type_check_expr((Expr *)call->args.data[i], scope, prog, arena);
+            }
+            return;
+        }
+        if (proc_type->is_variadic) {
+            if (call->args.length < proc_type->args.length) {
+                type_error_proc_pointer_arg_count(callee_name, proc_type, call->args.length, call->line, call->col, arena);
+            }
+        } else if (call->args.length != proc_type->args.length) {
+            type_error_proc_pointer_arg_count(callee_name, proc_type, call->args.length, call->line, call->col, arena);
+        }
+        for (i32 i = 0; i < call->args.length && i < proc_type->args.length; i++) {
+            TypeExpr *expected = (TypeExpr *)proc_type->args.data[i];
+            Expr *arg = (Expr *)call->args.data[i];
+            type_check_initializer_against(arg, expected, scope, prog, arena);
+            type_check_expr(arg, scope, prog, arena);
+            TypeExpr *actual = infer_expr_type(arg, scope, prog, arena);
+            if (expected && actual && !type_compatible(prog, expected, actual)) {
+                type_error_proc_pointer_argument(prog, callee_name, proc_type, i, expected, actual,
+                                                 arg ? arg->line : call->line, arg ? arg->col : call->col, arena);
+            }
+        }
+        if (proc_type->is_variadic) {
+            for (i32 i = proc_type->args.length; i < call->args.length; i++) {
+                type_check_expr((Expr *)call->args.data[i], scope, prog, arena);
+            }
+        }
+        return;
+    }
+
     TypeExpr *type_arg = null;
     bool concrete_specialization = false;
     ProcDecl *decl = lookup_call_proc_decl(prog, call, scope, arena, &type_arg, &concrete_specialization);
@@ -10334,6 +10572,25 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
 static void emit_expr_value(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, string8 generic_name);
 static void emit_expr_condition(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, string8 generic_name);
 static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, string8 generic_name);
+
+/* True when control cannot run off the end of the list, so an appended break
+   would be unreachable. An if/else counts only when both arms jump. */
+static bool stmt_list_ends_in_jump(Vec_voidptr *body) {
+    if (body->length == 0) {
+        return false;
+    }
+    Stmt *last = (Stmt *)body->data[body->length - 1];
+    if (last->kind == Stmt_Return || last->kind == Stmt_Break ||
+        last->kind == Stmt_Continue || last->kind == Stmt_Goto) {
+        return true;
+    }
+    if (last->kind == Stmt_If && last->if_else_body.length > 0 && !last->if_else_if) {
+        return stmt_list_ends_in_jump(&last->if_then_body) &&
+               stmt_list_ends_in_jump(&last->if_else_body);
+    }
+    return false;
+}
+
 static void emit_proc_monomorph_comment(memops_arena *arena, string8 *out, ProcDecl *decl, string8 type_mangled, GenericInstanceSite *site);
 static void emit_line_directive_path(memops_arena *arena, string8 *out, const char *path, i32 line);
 static void emit_generated_line_directive(memops_arena *arena, string8 *out);
@@ -10622,6 +10879,18 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
         return;
     }
     if (e->kind == Expr_Call) {
+        if (e->base) {
+            /* Indirect call: the callee is an expression, not a name, so there is
+               no monomorph mangling to apply. */
+            emit_expr_value(arena, out, e->base, sub, generic_name);
+            emit_cstr(arena, out, "(");
+            for (i32 i = 0; i < e->args.length; i++) {
+                if (i > 0) emit_cstr(arena, out, ", ");
+                emit_expr_value(arena, out, (Expr *)e->args.data[i], sub, generic_name);
+            }
+            emit_cstr(arena, out, ")");
+            return;
+        }
         if (e->type_args.length == 1) {
             TypeExpr *arg = (TypeExpr *)e->type_args.data[0];
             string8 mangle = type_mangle(arena, arg, sub);
@@ -10784,6 +11053,14 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
                 emit_stmt(arena, out, (Stmt *)sc->body.data[j], sub, generic_name);
             }
             emit_cstr(arena, out, "    }\n");
+            /* A case takes a block, so it reads as self-contained and does not
+               fall through. Without this the C fell into the next case: an
+               approaching enemy ran the approach case, fell into retreat, and
+               walked directly away from its target. Skip it when the body
+               already ends in a jump so the C stays warning-clean. */
+            if (!stmt_list_ends_in_jump(&sc->body)) {
+                emit_cstr(arena, out, "    break;\n");
+            }
         }
         if (s->has_switch_default) {
             emit_cstr(arena, out, "    default: {\n");
@@ -11964,6 +12241,7 @@ static void program_init_lists(memops_arena *arena, Program *prog) {
     prog->aliases = ptr_array_reserve(arena, 8);
     prog->procs = ptr_array_reserve(arena, 8);
     prog->globals = ptr_array_reserve(arena, 8);
+    prog->pending_array_counts = ptr_array_reserve(arena, 8);
 }
 
 static void program_append_string_unique(memops_arena *arena, Vec_string8 *dst, string8 value) {
@@ -11996,6 +12274,9 @@ static void program_append_program(memops_arena *arena, Program *dst, Program *s
     }
     for (i32 i = 0; i < src->globals.length; i++) {
         ptr_array_append(arena, &dst->globals, src->globals.data[i]);
+    }
+    for (i32 i = 0; i < src->pending_array_counts.length; i++) {
+        ptr_array_append(arena, &dst->pending_array_counts, src->pending_array_counts.data[i]);
     }
 }
 
@@ -12974,6 +13255,9 @@ i32 main(i32 argc, char *argv[]) {
         diag_json_finish();
         return 1;
     }
+    /* Every import is merged, so a `[Enum.Member]` count can now name an enum
+       from any of them. Runs before analysis so array types are final. */
+    resolve_array_count_constants(&arena, &prog);
     profile_import_summary();
     Vec_string8 symbol_known_types = semantic_collect_known_type_names(&prog, &arena);
     semantic_collect_program_external_type_names(&prog, &symbol_known_types, &arena);
