@@ -7746,6 +7746,101 @@ main:proc()->i32 = {
         return 1
     print("ok mangle_collision")
 
+    # Per-module output. Two modules that both instantiate the same generic must
+    # link: the instantiation is emitted once, into the shared monomorph unit,
+    # so there is no second definition for the linker to collide with. And two
+    # module headers pulled into one translation unit must not redefine a type,
+    # which is the same hazard arriving through the preprocessor instead.
+    mod_dir = TEST_DIR / "modules_src"
+    mod_out = TEST_DIR / "modules_out"
+    for d in (mod_dir, mod_out):
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True, exist_ok=True)
+
+    (mod_dir / "shared.i").write_text(
+        "Box: struct<T> = { v: T; }\n"
+        "Box<T>make: proc<T>(v: T)->Box<T> = { b: Box<T> = {}; b.v = v; return b; }\n"
+        "Box<T>get: proc<T>(b: *Box<T>)->T = { return b[0].v; }\n"
+        "Shared: struct = { n: i32; }\n",
+        encoding="utf-8", newline="\n",
+    )
+    # Both of these instantiate Box<i32>. Under a naive split each module's
+    # object file would carry its own Box_i32_make and the link would fail.
+    (mod_dir / "alpha.i").write_text(
+        'import "shared.i"\n'
+        "alpha_val: proc()->i32 = { b: Box<i32> = Box<i32>make(10); return Box<i32>get(b.&); }\n",
+        encoding="utf-8", newline="\n",
+    )
+    (mod_dir / "beta.i").write_text(
+        'import "shared.i"\n'
+        "beta_val: proc()->i32 = { b: Box<i32> = Box<i32>make(32); return Box<i32>get(b.&); }\n",
+        encoding="utf-8", newline="\n",
+    )
+    # main imports both, so main.h includes alpha.h and beta.h -- and both of
+    # those include shared.h. Without include guards and without the shared type
+    # header this is a redefinition.
+    (mod_dir / "main.i").write_text(
+        'cinclude "stdio.h"\n'
+        'import "alpha.i"\n'
+        'import "beta.i"\n'
+        "printf: proc(fmt: *const char, ...)->i32 = { external; }\n"
+        "main: proc()->i32 = {\n"
+        "    s: Shared = {}; s.n = 0;\n"
+        '    printf("%d\\n", alpha_val() + beta_val() + s.n);\n'
+        "    return 0;\n}\n",
+        encoding="utf-8", newline="\n",
+    )
+
+    gen = run([str(I_EXE), "compile", str(mod_dir / "main.i"), "--modules", str(mod_out)])
+    if gen.returncode != 0:
+        print("modules_emit: expected per-module generation to succeed")
+        print(gen.stdout)
+        return 1
+
+    produced = sorted(f.name for f in mod_out.glob("*"))
+    # Generated headers carry an i_ prefix so they cannot shadow a vendored C
+    # header of the same name sitting later on the include path.
+    for needed in ("i_types.h", "i_monomorphs.h", "i_monomorphs.c", "i_all.h",
+                   "i_main.c", "i_main.h", "i_alpha.c", "i_alpha.h",
+                   "i_beta.c", "i_beta.h", "i_shared.c", "i_shared.h"):
+        if needed not in produced:
+            print(f"modules_emit: expected {needed} in {produced}")
+            return 1
+
+    # A module header includes its dependency's header rather than copying it.
+    alpha_h = (mod_out / "i_alpha.h").read_text(encoding="utf-8")
+    if '#include "i_shared.h"' not in alpha_h:
+        print("modules_emit: i_alpha.h should include i_shared.h")
+        print(alpha_h)
+        return 1
+
+    # The instantiation exists exactly once, in the shared unit.
+    mono_c = (mod_out / "i_monomorphs.c").read_text(encoding="utf-8")
+    if mono_c.count("Box_i32_make(") < 1:
+        print("modules_emit: Box_i32_make should be defined in i_monomorphs.c")
+        return 1
+    for other in ("i_alpha.c", "i_beta.c", "i_main.c"):
+        body = (mod_out / other).read_text(encoding="utf-8")
+        if "Box_i32_make(Box_i32" in body or "Box_i32 Box_i32_make(i32 v) {" in body:
+            print(f"modules_emit: {other} should not define Box_i32_make")
+            return 1
+    print("ok modules_emit")
+
+    # The link is the real assertion: it fails loudly on a duplicate symbol.
+    mod_exe = mod_out / "modules_link.exe"
+    link = run(["clang.exe"] + [str(f) for f in sorted(mod_out.glob("*.c"))] +
+               ["-I", str(mod_out), "-I", "src", "-I", "src/std", "-o", str(mod_exe)])
+    if link.returncode != 0:
+        print("modules_link: per-module sources failed to compile or link")
+        print(link.stdout)
+        return 1
+    ran = run([str(mod_exe)])
+    if ran.returncode != 0 or ran.stdout.strip() != "42":
+        print(f"modules_link: expected 42, got {ran.stdout.strip()!r} (exit {ran.returncode})")
+        return 1
+    print("ok modules_link")
+    print("ok modules_headers_no_redefinition")
+
     # Balanced conditionals, including the ifdef/ifndef spellings, must stay silent.
     balanced_i = TEST_DIR / "preproc_balanced.i"
     balanced_i.write_text(

@@ -735,6 +735,11 @@ typedef struct Program {
        the use, so the text is kept as written and resolved to its C name once
        every declaration is in scope. */
     Vec_voidptr pending_array_counts; // TypeExpr*
+    /* Module dependency edges, recorded while imports are expanded. The
+       expanded Program is flat, so without these the per-module headers would
+       have no way to know which other headers to include. */
+    Vec_string8 module_edge_from;
+    Vec_string8 module_edge_to;
 } Program;
 
 typedef struct Scope {
@@ -11979,6 +11984,356 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
     }
 }
 
+static void program_append_string_unique(memops_arena *arena, Vec_string8 *dst, string8 value);
+
+/* ---------------------------------------------------------------------------
+   Module output.
+
+   Instead of one translation unit holding the whole program, emit a .h/.c pair
+   per source module plus two shared files:
+
+     i_types.h        every type declaration, in dependency order
+     i_monomorphs.h   prototypes and reflect externs for monomorphised generics
+     i_monomorphs.c   the one definition of each monomorphised body and table
+
+   Types all live in one header because a monomorphised generic can embed a
+   module's type by value (Box<Point> holds a Point), while that module needs
+   Box<Point> in turn. Splitting types per module makes that a cycle; keeping
+   them together does not, and the compiler already sorts them by dependency.
+
+   Monomorphs have external linkage and are defined exactly once, in the shared
+   TU. That is what makes the per-module split safe: no translation unit ever
+   emits a second copy, so there is nothing for the linker to collide.
+   --------------------------------------------------------------------------- */
+
+static bool decl_in_module(const char *source_path, string8 module) {
+    if (!source_path) {
+        return false;
+    }
+    return string8_equals_cstr(&module, source_path);
+}
+
+/* "src/gops.i" -> "i_gops". The prefix matters: generated headers sit on the
+   include path ahead of the vendored C headers, so an unprefixed module named
+   cgltf.i would emit a cgltf.h that shadows the real one. */
+static string8 module_stem(memops_arena *arena, string8 path) {
+    i64 start = 0;
+    for (i64 i = 0; i < (i64)path.length; i++) {
+        if (path.data[i] == '/' || path.data[i] == '\\') {
+            start = i + 1;
+        }
+    }
+    i64 end = (i64)path.length;
+    if (end - start > 2 && path.data[end - 2] == '.' && path.data[end - 1] == 'i') {
+        end -= 2;
+    }
+    string8 stem = string8_reserve(arena, (u64)(end - start) + 2);
+    string8_append_cstr(arena, &stem, "i_");
+    string8_append_bytes(arena, &stem, path.data + start, (u64)(end - start));
+    return stem;
+}
+
+/* Unique module paths in dependency order. Imports are appended before the
+   file that imports them, so first appearance is already topological. */
+static void collect_module_paths(memops_arena *arena, Program *prog, Vec_string8 *out) {
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *d = (StructDecl *)prog->structs.data[i];
+        if (d->source_path) program_append_string_unique(arena, out, string8_from_cstr(arena, d->source_path));
+    }
+    for (i32 i = 0; i < prog->enums.length; i++) {
+        EnumDecl *d = (EnumDecl *)prog->enums.data[i];
+        if (d->source_path) program_append_string_unique(arena, out, string8_from_cstr(arena, d->source_path));
+    }
+    for (i32 i = 0; i < prog->aliases.length; i++) {
+        AliasDecl *d = (AliasDecl *)prog->aliases.data[i];
+        if (d->source_path) program_append_string_unique(arena, out, string8_from_cstr(arena, d->source_path));
+    }
+    for (i32 i = 0; i < prog->globals.length; i++) {
+        Stmt *d = (Stmt *)prog->globals.data[i];
+        if (d->source_path) program_append_string_unique(arena, out, string8_from_cstr(arena, d->source_path));
+    }
+    for (i32 i = 0; i < prog->procs.length; i++) {
+        ProcDecl *d = (ProcDecl *)prog->procs.data[i];
+        if (d->source_path) program_append_string_unique(arena, out, string8_from_cstr(arena, d->source_path));
+    }
+}
+
+static void emit_common_preamble(memops_arena *arena, Program *prog, string8 *out) {
+    for (i32 i = 0; i < prog->preprocessor_lines.length; i++) {
+        emit_string8(arena, out, prog->preprocessor_lines.data[i]);
+        emit_cstr(arena, out, "\n");
+    }
+    if (prog->preprocessor_lines.length > 0) emit_cstr(arena, out, "\n");
+    for (i32 i = 0; i < prog->defines.length; i++) {
+        string8 macro = prog->defines.data[i];
+        if (macro.length >= 2 && macro.data[0] == '"' && macro.data[macro.length - 1] == '"') {
+            macro = string8_copy_from_slice(arena, macro.data + 1, macro.length - 2);
+        }
+        emit_cstr(arena, out, "#define ");
+        emit_string8(arena, out, macro);
+        emit_cstr(arena, out, "\n");
+    }
+    if (prog->defines.length > 0) emit_cstr(arena, out, "\n");
+    for (i32 i = 0; i < prog->c_imports.length; i++) {
+        emit_cstr(arena, out, "#include ");
+        emit_string8(arena, out, prog->c_imports.data[i]);
+        emit_cstr(arena, out, "\n");
+    }
+    if (prog->c_imports.length > 0) emit_cstr(arena, out, "\n");
+}
+
+static void emit_monomorph_struct_fwd_decls(memops_arena *arena, Program *prog, string8 *out) {
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (!decl->is_generic || decl->is_external) continue;
+        Vec_string8 instances = Vec_string8_reserve(arena, 4);
+        collect_generic_struct_instances(prog, decl, &instances, arena);
+        for (i32 j = 0; j < instances.length; j++) {
+            string8 mono = string8_reserve(arena, decl->name.length + 1 + instances.data[j].length);
+            string8_append_bytes(arena, &mono, decl->name.data, decl->name.length);
+            string8_append_cstr(arena, &mono, "_");
+            string8_append_bytes(arena, &mono, instances.data[j].data, instances.data[j].length);
+            emit_struct_fwd_decl(arena, out, mono, decl->is_union);
+        }
+    }
+}
+
+/* i_types.h -- every type in the program, module and monomorphised alike. */
+static void emit_types_header(memops_arena *arena, Program *prog, string8 *out) {
+    emit_line_directive_reset();
+    emit_generated_file_banner(arena, out, "types header");
+    emit_cstr(arena, out, "#pragma once\n#include <core.h>\n#include <reflect.h>\n#include <stddef.h>\n\n");
+    emit_common_preamble(arena, prog, out);
+
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (!decl->is_generic && !decl->is_external) emit_struct_fwd_decl(arena, out, decl->name, decl->is_union);
+    }
+    emit_monomorph_struct_fwd_decls(arena, prog, out);
+    emit_cstr(arena, out, "\n");
+
+    for (i32 i = 0; i < prog->aliases.length; i++) {
+        emit_alias_decl(arena, out, (AliasDecl *)prog->aliases.data[i]);
+    }
+    for (i32 i = 0; i < prog->enums.length; i++) {
+        emit_enum_decl(arena, out, (EnumDecl *)prog->enums.data[i]);
+    }
+    emit_native_monomorph_umbrella_includes(arena, prog, out);
+    emit_cstr(arena, out, "\n");
+
+    /* This already covers monomorphised structs as well, ordered by
+       dependency, which is why types can share one header without a cycle. */
+    emit_concrete_struct_defs_sorted(arena, out, prog);
+}
+
+/* <module>.h -- this module's public surface only.
+
+   The includes follow dependency order rather than only the module's declared
+   imports. Modules are listed with every import ahead of the file that imports
+   it, so including all earlier headers is acyclic and reproduces exactly what a
+   single translation unit used to provide. Restricting this to declared imports
+   is the stricter and better rule, but it surfaces every implicit cross-module
+   dependency at once, and real code has plenty -- see docs/modules.md. */
+static void emit_module_header(memops_arena *arena, Program *prog, Vec_string8 *modules, i32 index, string8 *out) {
+    string8 module = modules->data[index];
+    emit_line_directive_reset();
+    emit_generated_file_banner(arena, out, "module header");
+    emit_cstr(arena, out, "#pragma once\n");
+    emit_cstr(arena, out, "#include \"i_types.h\"\n");
+    emit_cstr(arena, out, "#include \"i_monomorphs.h\"\n");
+
+    for (i32 i = 0; i < index; i++) {
+        string8 stem = module_stem(arena, modules->data[i]);
+        emit_cstr(arena, out, "#include \"");
+        emit_string8(arena, out, stem);
+        emit_cstr(arena, out, ".h\"\n");
+    }
+    emit_cstr(arena, out, "\n");
+
+    for (i32 i = 0; i < prog->enums.length; i++) {
+        EnumDecl *d = (EnumDecl *)prog->enums.data[i];
+        if (decl_in_module(d->source_path, module)) emit_enum_reflection_extern(arena, out, d);
+    }
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *d = (StructDecl *)prog->structs.data[i];
+        if (d->is_generic || d->is_external) continue;
+        if (decl_in_module(d->source_path, module)) emit_struct_reflection_extern(arena, out, d->name);
+    }
+    emit_cstr(arena, out, "\n");
+
+    for (i32 i = 0; i < prog->globals.length; i++) {
+        Stmt *g = (Stmt *)prog->globals.data[i];
+        if (g->is_static || !decl_in_module(g->source_path, module)) continue;
+        emit_line_directive_path(arena, out, g->source_path, g->line);
+        emit_cstr(arena, out, "extern ");
+        emit_decl(arena, out, g->type, g->name, (TypeSub){0});
+        emit_cstr(arena, out, ";\n");
+    }
+    emit_cstr(arena, out, "\n");
+
+    for (i32 i = 0; i < prog->procs.length; i++) {
+        ProcDecl *d = (ProcDecl *)prog->procs.data[i];
+        if (d->is_static || d->is_generic) continue;
+        if (decl_in_module(d->source_path, module)) emit_proc_proto(arena, out, d);
+    }
+}
+
+/* <module>.c -- this module's definitions only. */
+static void emit_module_source(memops_arena *arena, Program *prog, string8 module, string8 *out) {
+    emit_line_directive_reset();
+    emit_generated_file_banner(arena, out, "module source");
+    emit_cstr(arena, out, "#include \"i_all.h\"\n\n");
+
+    for (i32 i = 0; i < prog->enums.length; i++) {
+        EnumDecl *d = (EnumDecl *)prog->enums.data[i];
+        if (decl_in_module(d->source_path, module)) emit_enum_reflection(arena, out, d);
+    }
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *d = (StructDecl *)prog->structs.data[i];
+        if (d->is_generic || d->is_external) continue;
+        if (decl_in_module(d->source_path, module)) {
+            emit_struct_reflection(arena, out, d, d->name, (TypeSub){0});
+        }
+    }
+    emit_cstr(arena, out, "\n");
+
+    for (i32 i = 0; i < prog->globals.length; i++) {
+        Stmt *g = (Stmt *)prog->globals.data[i];
+        if (!decl_in_module(g->source_path, module)) continue;
+        emit_line_directive_path(arena, out, g->source_path, g->line);
+        if (g->is_external) {
+            emit_cstr(arena, out, "extern ");
+            emit_decl(arena, out, g->type, g->name, (TypeSub){0});
+            emit_cstr(arena, out, ";\n");
+            continue;
+        }
+        emit_stmt(arena, out, g, (TypeSub){0}, (string8){0});
+    }
+    emit_cstr(arena, out, "\n");
+
+    /* Forward prototypes for this module's static procs. The public ones are
+       already declared in the header, but a static proc called before its
+       definition has nowhere else to be declared -- in the single-file build
+       every prototype preceded every body, which hid the need for these. */
+    for (i32 i = 0; i < prog->procs.length; i++) {
+        ProcDecl *d = (ProcDecl *)prog->procs.data[i];
+        if (d->is_generic || !d->is_static) continue;
+        if (decl_in_module(d->source_path, module)) emit_proc_proto(arena, out, d);
+    }
+    emit_cstr(arena, out, "\n");
+
+    for (i32 i = 0; i < prog->procs.length; i++) {
+        ProcDecl *d = (ProcDecl *)prog->procs.data[i];
+        if (d->is_generic) continue;
+        if (decl_in_module(d->source_path, module)) emit_proc_decl(arena, out, d);
+    }
+}
+
+static void emit_monomorph_struct_reflection(memops_arena *arena, Program *prog, string8 *out) {
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (!decl->is_generic || decl->is_external) continue;
+        Vec_string8 instances = Vec_string8_reserve(arena, 4);
+        collect_generic_struct_instances(prog, decl, &instances, arena);
+        for (i32 j = 0; j < instances.length; j++) {
+            string8 mangle = instances.data[j];
+            string8 concrete_name = string8_reserve(arena, decl->name.length + 1 + mangle.length);
+            string8_append_bytes(arena, &concrete_name, decl->name.data, decl->name.length);
+            string8_append_cstr(arena, &concrete_name, "_");
+            string8_append_bytes(arena, &concrete_name, mangle.data, mangle.length);
+            TypeExpr *arg = mangle_type_for(arena, mangle);
+            TypeSub sub = {0};
+            sub.has = true;
+            sub.param = decl->type_param;
+            sub.arg = arg;
+            emit_struct_reflection(arena, out, decl, concrete_name, sub);
+        }
+    }
+}
+
+/* i_all.h -- every module header in dependency order.
+
+   Included by module sources, never by module headers, so it cannot form a
+   cycle. It exists because real code has backward references between modules:
+   a low-level module calling a diagnostic helper declared in a high-level one.
+   njinn's memops_pool reaches for gin_fatal, declared in gin.i, which no
+   acyclic per-module include can express. A stricter system would reject that
+   and make the author restructure; this reproduces what the single translation
+   unit provided, so the split stays a build change rather than a source one. */
+static void emit_all_header(memops_arena *arena, Vec_string8 *modules, string8 *out) {
+    emit_line_directive_reset();
+    emit_generated_file_banner(arena, out, "all-modules header");
+    emit_cstr(arena, out, "#pragma once\n");
+    for (i32 i = 0; i < modules->length; i++) {
+        string8 stem = module_stem(arena, modules->data[i]);
+        emit_cstr(arena, out, "#include \"");
+        emit_string8(arena, out, stem);
+        emit_cstr(arena, out, ".h\"\n");
+    }
+}
+
+/* i_monomorphs.h -- prototypes and reflect externs for every instantiation. */
+static void emit_monomorph_header(memops_arena *arena, Program *prog, string8 *out) {
+    emit_line_directive_reset();
+    emit_generated_file_banner(arena, out, "monomorph header");
+    emit_cstr(arena, out, "#pragma once\n#include \"i_types.h\"\n\n");
+
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (!decl->is_generic || decl->is_external) continue;
+        Vec_string8 instances = Vec_string8_reserve(arena, 4);
+        collect_generic_struct_instances(prog, decl, &instances, arena);
+        for (i32 j = 0; j < instances.length; j++) {
+            string8 concrete = string8_reserve(arena, decl->name.length + 1 + instances.data[j].length);
+            string8_append_bytes(arena, &concrete, decl->name.data, decl->name.length);
+            string8_append_cstr(arena, &concrete, "_");
+            string8_append_bytes(arena, &concrete, instances.data[j].data, instances.data[j].length);
+            emit_struct_reflection_extern(arena, out, concrete);
+        }
+    }
+    emit_cstr(arena, out, "\n");
+
+    for (i32 i = 0; i < prog->procs.length; i++) {
+        ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
+        if (!decl->is_generic) continue;
+        Vec_string8 instances = Vec_string8_reserve(arena, 4);
+        Vec_string8 sub_instances = Vec_string8_reserve(arena, 4);
+        Vec_voidptr instance_sites = ptr_array_reserve(arena, 4);
+        collect_generic_proc_instances_with_sites(prog, decl, &instances, &sub_instances, &instance_sites, arena);
+        for (i32 j = 0; j < instances.length; j++) {
+            TypeExpr *arg = mangle_type_for(arena, sub_instances.data[j]);
+            emit_proc_proto_mono(arena, out, decl, instances.data[j], arg,
+                generic_instance_site_find(&instance_sites, decl->name, instances.data[j]));
+        }
+    }
+}
+
+/* i_monomorphs.c -- the single definition of each instantiation. */
+static void emit_monomorph_source(memops_arena *arena, Program *prog, Vec_string8 *modules, string8 *out) {
+    (void)modules;
+    emit_line_directive_reset();
+    emit_generated_file_banner(arena, out, "monomorph source");
+    /* Instantiated bodies call ordinary module procs -- Array<T>reserve reaches
+       for memops_arena_push_zero -- so this unit needs every declaration. */
+    emit_cstr(arena, out, "#include \"i_all.h\"\n\n");
+
+    emit_monomorph_struct_reflection(arena, prog, out);
+
+    for (i32 i = 0; i < prog->procs.length; i++) {
+        ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
+        if (!decl->is_generic) continue;
+        Vec_string8 instances = Vec_string8_reserve(arena, 4);
+        Vec_string8 sub_instances = Vec_string8_reserve(arena, 4);
+        Vec_voidptr instance_sites = ptr_array_reserve(arena, 4);
+        collect_generic_proc_instances_with_sites(prog, decl, &instances, &sub_instances, &instance_sites, arena);
+        for (i32 j = 0; j < instances.length; j++) {
+            TypeExpr *arg = mangle_type_for(arena, sub_instances.data[j]);
+            emit_proc_decl_mono(arena, out, decl, instances.data[j], arg,
+                generic_instance_site_find(&instance_sites, decl->name, instances.data[j]));
+        }
+    }
+}
+
 static void emit_header_program(memops_arena *arena, Program *prog, string8 *out) {
     emit_line_directive_reset();
     emit_generated_file_banner(arena, out, "header");
@@ -12242,6 +12597,8 @@ static void program_init_lists(memops_arena *arena, Program *prog) {
     prog->procs = ptr_array_reserve(arena, 8);
     prog->globals = ptr_array_reserve(arena, 8);
     prog->pending_array_counts = ptr_array_reserve(arena, 8);
+    prog->module_edge_from = Vec_string8_reserve(arena, 8);
+    prog->module_edge_to = Vec_string8_reserve(arena, 8);
 }
 
 static void program_append_string_unique(memops_arena *arena, Vec_string8 *dst, string8 value) {
@@ -12259,6 +12616,10 @@ static void program_append_program(memops_arena *arena, Program *dst, Program *s
     }
     for (i32 i = 0; i < src->c_imports.length; i++) {
         program_append_string_unique(arena, &dst->c_imports, src->c_imports.data[i]);
+    }
+    for (i32 i = 0; i < src->module_edge_from.length; i++) {
+        Vec_string8_append(arena, &dst->module_edge_from, src->module_edge_from.data[i]);
+        Vec_string8_append(arena, &dst->module_edge_to, src->module_edge_to.data[i]);
     }
     for (i32 i = 0; i < src->structs.length; i++) {
         ptr_array_append(arena, &dst->structs, src->structs.data[i]);
@@ -12433,6 +12794,14 @@ static Program expand_i_imports(memops_arena *arena, Program *prog, Vec_string8 
         i32 import_line = i < prog->i_import_lines.length ? prog->i_import_lines.data[i] : 0;
         i32 import_col = i < prog->i_import_cols.length ? prog->i_import_cols.data[i] : 0;
         string8 path_s = string8_from_cstr(arena, path);
+        {
+            const char *importer = stack->length > 0
+                ? (const char *)stack->data[stack->length - 1].data
+                : g_source_path;
+            Vec_string8_append(arena, &expanded.module_edge_from,
+                string8_from_cstr(arena, importer ? importer : ""));
+            Vec_string8_append(arena, &expanded.module_edge_to, path_s);
+        }
         const char *import_chain = import_chain_from_stack(arena, stack);
         i32 cycle_start = array_string8_index(stack, path_s);
         if (cycle_start >= 0) {
@@ -12825,6 +13194,7 @@ i32 main(i32 argc, char *argv[]) {
     bool symbols_json = false;
     bool lsp_json = false;
     bool emit_header = true;
+    const char *modules_dir = null;
     bool read_source_from_stdin = false;
     const char *input_path = null;
     const char *stdin_override_path_arg = null;
@@ -12894,6 +13264,19 @@ i32 main(i32 argc, char *argv[]) {
         }
         if (cstr_equals(arg, "--no-header")) {
             emit_header = false;
+            continue;
+        }
+        if (cstr_equals(arg, "--modules")) {
+            if (i + 1 >= argc) {
+                if (g_diag_json) {
+                    diag_json_error("<cli>", 0, 0, "cli", "--modules expects a directory");
+                    diag_json_finish();
+                    return 1;
+                }
+                printf("i: error: --modules expects a directory\n");
+                return 1;
+            }
+            modules_dir = argv[++i];
             continue;
         }
         if (cstr_equals(arg, "--emit-all-line-directives")) {
@@ -13296,6 +13679,80 @@ i32 main(i32 argc, char *argv[]) {
             printf("i: checked %s\n", input_path);
         }
         profile_mark("check done", &profile_last, profile_start);
+        return 0;
+    }
+
+    /* Per-module output: a .h/.c pair for each source module, plus the shared
+       type header and the single translation unit that owns every monomorph.
+       The whole-program single-file path below is unchanged and remains the
+       default, so a unity build costs exactly what it did before. */
+    if (modules_dir) {
+        Vec_string8 modules = Vec_string8_reserve(&arena, 16);
+        collect_module_paths(&arena, &prog, &modules);
+
+        char path_buf[4096];
+        string8 buf;
+
+        buf = string8_reserve(&arena, input.length + 4096);
+        emit_types_header(&arena, &prog, &buf);
+        snprintf(path_buf, sizeof(path_buf), "%s/i_types.h", modules_dir);
+        if (!write_string8_to_file(path_buf, buf)) {
+            printf("i: error: failed to write %s\n", path_buf);
+            return 1;
+        }
+
+        buf = string8_reserve(&arena, input.length + 4096);
+        emit_monomorph_header(&arena, &prog, &buf);
+        snprintf(path_buf, sizeof(path_buf), "%s/i_monomorphs.h", modules_dir);
+        if (!write_string8_to_file(path_buf, buf)) {
+            printf("i: error: failed to write %s\n", path_buf);
+            return 1;
+        }
+
+        buf = string8_reserve(&arena, input.length + 4096);
+        emit_monomorph_source(&arena, &prog, &modules, &buf);
+        snprintf(path_buf, sizeof(path_buf), "%s/i_monomorphs.c", modules_dir);
+        if (!write_string8_to_file(path_buf, buf)) {
+            printf("i: error: failed to write %s\n", path_buf);
+            return 1;
+        }
+
+        for (i32 m = 0; m < modules.length; m++) {
+            string8 module = modules.data[m];
+            string8 stem = module_stem(&arena, module);
+            if (string8_equals_cstr(&stem, "i_types") || string8_equals_cstr(&stem, "i_monomorphs")) {
+                printf("i: error: module name collides with a generated file: %.*s\n",
+                    (int)module.length, module.data);
+                return 1;
+            }
+
+            buf = string8_reserve(&arena, input.length + 4096);
+            emit_module_header(&arena, &prog, &modules, m, &buf);
+            snprintf(path_buf, sizeof(path_buf), "%s/%.*s.h", modules_dir, (int)stem.length, stem.data);
+            if (!write_string8_to_file(path_buf, buf)) {
+                printf("i: error: failed to write %s\n", path_buf);
+                return 1;
+            }
+
+            buf = string8_reserve(&arena, input.length + 4096);
+            emit_module_source(&arena, &prog, module, &buf);
+            snprintf(path_buf, sizeof(path_buf), "%s/%.*s.c", modules_dir, (int)stem.length, stem.data);
+            if (!write_string8_to_file(path_buf, buf)) {
+                printf("i: error: failed to write %s\n", path_buf);
+                return 1;
+            }
+        }
+
+        buf = string8_reserve(&arena, 4096 + (u64)modules.length * 64);
+        emit_all_header(&arena, &modules, &buf);
+        snprintf(path_buf, sizeof(path_buf), "%s/i_all.h", modules_dir);
+        if (!write_string8_to_file(path_buf, buf)) {
+            printf("i: error: failed to write %s\n", path_buf);
+            return 1;
+        }
+
+        printf("i: generated %d module(s) in %s\n", (int)modules.length, modules_dir);
+        profile_mark("emit modules", &profile_last, profile_start);
         return 0;
     }
 
