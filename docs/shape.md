@@ -236,14 +236,15 @@ exercised rather than that they are settled.
 any `T`; a body that assumes `T` supports `+` fails inside the instantiation
 rather than at the call.
 
-Reflection covers enum values and names, struct field names and count, and type
-names, and works under monomorphisation.
+Reflection is one kind-tagged `reflect` record per struct, union and enum, with a
+variant payload, checked field access, and a nested `info` link per field so a
+walk can recurse. It works under monomorphisation. See `reflection-issues.md`
+for what is settled and what is still open.
 
 **Needs.** Whether generics get bounds — and note that adding them is the single
 fastest way to become C++-shaped, so the honest answer may be a deliberate
-"no, error messages inside instantiations are the price." Whether reflection
-extends to field *types* and offsets, which is what a serialiser would want.
-Whether there is any compile-time evaluation beyond enum values and `sizeof`.
+"no, error messages inside instantiations are the price." Whether there is any
+compile-time evaluation beyond enum values, `sizeof` and `Enum<>.count`.
 
 ## 7. The C Backend Contract
 
@@ -281,6 +282,13 @@ Recorded so they do not get re-litigated:
 - **`if` requires a braced body**, which makes the dangling-else ambiguity
   unwritable. Already true; worth stating as intent rather than accident.
 - **`const` is enforced** on assignment.
+- **Reflection is one record, kind-tagged, with a variant payload.** Odin's
+  shape, which ports to I as-is; Zig's needs language-level tagged unions first.
+  This also settled nested type links and made a union its own kind rather than
+  a flag. Details and the remaining open question in `reflection-issues.md`.
+- **Reflected enum values are `i32`.** I permits negative members and they must
+  round-trip; `u32` would turn `-1` into `4294967295` and break every lookup by
+  value. Independent of how the enum underlying type (§2.6) resolves.
 
 ## Suggested Order
 

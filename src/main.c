@@ -1674,7 +1674,7 @@ static TypeExpr *parse_type(Parser *p) {
             array->line = first->line;
             array->col = first->col;
             array->array_count = token_to_string8(p->arena, first);
-            /* `Type<>.value_count` sizes an array by how many members its enum
+            /* `Type<>.count` sizes an array by how many members its enum
                declares, so a table indexed by an enum cannot fall out of step
                with it. Reflection is a runtime value, but the count is known at
                compile time, so it resolves to a literal below. */
@@ -4200,11 +4200,12 @@ static bool semantic_builtin_type_name(string8 name) {
            string8_equals_cstr(&name, "usize") ||
            string8_equals_cstr(&name, "b32") ||
            string8_equals_cstr(&name, "void") ||
-           string8_equals_cstr(&name, "i_reflect_type_kind") ||
-           string8_equals_cstr(&name, "i_reflect_field") ||
-           string8_equals_cstr(&name, "i_reflect_type") ||
-           string8_equals_cstr(&name, "i_reflect_enum_value") ||
-           string8_equals_cstr(&name, "i_reflect_enum") ||
+           string8_equals_cstr(&name, "reflect_type_kind") ||
+           string8_equals_cstr(&name, "reflect_kind") ||
+           string8_equals_cstr(&name, "reflect_field") ||
+           string8_equals_cstr(&name, "reflect_value") ||
+           string8_equals_cstr(&name, "reflect_variant") ||
+           string8_equals_cstr(&name, "reflect") ||
            string8_equals_cstr(&name, "BOOL") ||
            string8_equals_cstr(&name, "BOOLEAN") ||
            string8_equals_cstr(&name, "ATOM") ||
@@ -4275,11 +4276,12 @@ static bool semantic_intrinsic_type_name(string8 name) {
            string8_equals_cstr(&name, "usize") ||
            string8_equals_cstr(&name, "b32") ||
            string8_equals_cstr(&name, "void") ||
-           string8_equals_cstr(&name, "i_reflect_type_kind") ||
-           string8_equals_cstr(&name, "i_reflect_field") ||
-           string8_equals_cstr(&name, "i_reflect_type") ||
-           string8_equals_cstr(&name, "i_reflect_enum_value") ||
-           string8_equals_cstr(&name, "i_reflect_enum") ||
+           string8_equals_cstr(&name, "reflect_type_kind") ||
+           string8_equals_cstr(&name, "reflect_kind") ||
+           string8_equals_cstr(&name, "reflect_field") ||
+           string8_equals_cstr(&name, "reflect_value") ||
+           string8_equals_cstr(&name, "reflect_variant") ||
+           string8_equals_cstr(&name, "reflect") ||
            string8_equals_cstr(&name, "long") ||
            string8_equals_cstr(&name, "ulong") ||
            string8_equals_cstr(&name, "short") ||
@@ -6768,7 +6770,7 @@ static void type_scope_add_reflection_globals(memops_arena *arena, TypeScope *sc
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
         if (decl->is_external) continue;
         string8 reflect_name = concat_name2(arena, decl->name, "_", string8_from_cstr(arena, "reflect"));
-        type_scope_add(arena, scope, reflect_name, reflect_global_type(arena, "i_reflect_type"));
+        type_scope_add(arena, scope, reflect_name, reflect_global_type(arena, "reflect"));
         if (decl->is_generic) {
             Vec_string8 instances = Vec_string8_reserve(arena, 4);
             collect_generic_struct_instances(prog, decl, &instances, arena);
@@ -6778,7 +6780,7 @@ static void type_scope_add_reflection_globals(memops_arena *arena, TypeScope *sc
                 string8_append_cstr(arena, &concrete_name, "_");
                 string8_append_bytes(arena, &concrete_name, instances.data[j].data, instances.data[j].length);
                 string8_append_cstr(arena, &concrete_name, "_reflect");
-                type_scope_add(arena, scope, concrete_name, reflect_global_type(arena, "i_reflect_type"));
+                type_scope_add(arena, scope, concrete_name, reflect_global_type(arena, "reflect"));
             }
         }
     }
@@ -6787,7 +6789,7 @@ static void type_scope_add_reflection_globals(memops_arena *arena, TypeScope *sc
         EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
         if (decl->is_external) continue;
         string8 reflect_name = concat_name2(arena, decl->name, "_", string8_from_cstr(arena, "reflect"));
-        type_scope_add(arena, scope, reflect_name, reflect_global_type(arena, "i_reflect_enum"));
+        type_scope_add(arena, scope, reflect_name, reflect_global_type(arena, "reflect"));
     }
 }
 
@@ -6893,7 +6895,7 @@ static TypeExpr *reflect_builtin_field_type(TypeExpr *base_type, string8 field_n
     if (!base_type || base_type->kind != Type_Name) return null;
     string8 base_name = base_type->name;
 
-    if (string8_equals_cstr(&base_name, "i_reflect_field")) {
+    if (string8_equals_cstr(&base_name, "reflect_field")) {
         if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "char");
         if (string8_equals_cstr(&field_name, "type")) return type_ptr_to_const_name(arena, "char");
         if (string8_equals_cstr(&field_name, "attrs")) return type_ptr_to_const_name(arena, "char");
@@ -6907,30 +6909,32 @@ static TypeExpr *reflect_builtin_field_type(TypeExpr *base_type, string8 field_n
         if (string8_equals_cstr(&field_name, "elem_type")) return type_ptr_to_const_name(arena, "char");
         if (string8_equals_cstr(&field_name, "generic_arg_type")) return type_ptr_to_const_name(arena, "char");
         if (string8_equals_cstr(&field_name, "is_const")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "info")) return type_ptr_to(arena, type_name_expr_const(arena, "reflect"));
         return null;
     }
 
-    if (string8_equals_cstr(&base_name, "i_reflect_type")) {
-        if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "char");
-        if (string8_equals_cstr(&field_name, "size")) return type_name_expr(arena, "u64");
-        if (string8_equals_cstr(&field_name, "align")) return type_name_expr(arena, "u64");
-        if (string8_equals_cstr(&field_name, "field_count")) return type_name_expr(arena, "u64");
-        if (string8_equals_cstr(&field_name, "fields")) return type_ptr_to(arena, type_name_expr_const(arena, "i_reflect_field"));
-        return null;
-    }
-
-    if (string8_equals_cstr(&base_name, "i_reflect_enum_value")) {
+    if (string8_equals_cstr(&base_name, "reflect_value")) {
         if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "char");
         if (string8_equals_cstr(&field_name, "value")) return type_name_expr(arena, "i32");
         return null;
     }
 
-    if (string8_equals_cstr(&base_name, "i_reflect_enum")) {
+    /* The variant is a plain union, so both arms are always accessible and the
+       kind is what says which one is live. reflect_fields/reflect_values in
+       std/reflect.h are the checked way in. */
+    if (string8_equals_cstr(&base_name, "reflect_variant")) {
+        if (string8_equals_cstr(&field_name, "fields")) return type_ptr_to(arena, type_name_expr_const(arena, "reflect_field"));
+        if (string8_equals_cstr(&field_name, "values")) return type_ptr_to(arena, type_name_expr_const(arena, "reflect_value"));
+        return null;
+    }
+
+    if (string8_equals_cstr(&base_name, "reflect")) {
         if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "char");
         if (string8_equals_cstr(&field_name, "size")) return type_name_expr(arena, "u64");
         if (string8_equals_cstr(&field_name, "align")) return type_name_expr(arena, "u64");
-        if (string8_equals_cstr(&field_name, "value_count")) return type_name_expr(arena, "u64");
-        if (string8_equals_cstr(&field_name, "values")) return type_ptr_to(arena, type_name_expr_const(arena, "i_reflect_enum_value"));
+        if (string8_equals_cstr(&field_name, "kind")) return type_name_expr(arena, "i32");
+        if (string8_equals_cstr(&field_name, "count")) return type_name_expr(arena, "u64");
+        if (string8_equals_cstr(&field_name, "variant")) return type_name_expr_const(arena, "reflect_variant");
         return null;
     }
 
@@ -7166,7 +7170,7 @@ static void resolve_array_count_constants(memops_arena *arena, Program *prog) {
         }
         if (dot < 0) continue;
 
-        /* `Enum<>.value_count` is known once the enum is parsed, so it becomes a
+        /* `Enum<>.count` is known once the enum is parsed, so it becomes a
            literal here rather than a reflection lookup the C array size could
            not use. */
         if (dot >= 2 && type->array_count.data[dot - 2] == '<' && type->array_count.data[dot - 1] == '>') {
@@ -7177,8 +7181,8 @@ static void resolve_array_count_constants(memops_arena *arena, Program *prog) {
                 semantic_error_name("unknown enum in array count", reflect_enum_name, type->line, type->col);
                 continue;
             }
-            if (!string8_equals_cstr(&reflect_member, "value_count")) {
-                semantic_error_name("only 'value_count' can size an array", reflect_member, type->line, type->col);
+            if (!string8_equals_cstr(&reflect_member, "count")) {
+                semantic_error_name("only 'count' can size an array", reflect_member, type->line, type->col);
                 continue;
             }
             char count_buf[32];
@@ -11495,15 +11499,15 @@ static void emit_proc_proto_mono(memops_arena *arena, string8 *out, ProcDecl *de
 }
 
 static const char *reflect_type_kind_name(TypeExpr *type) {
-    if (!type) return "I_Reflect_Type_Name";
+    if (!type) return "Reflect_Type_Name";
     switch (type->kind) {
-        case Type_Name: return "I_Reflect_Type_Name";
-        case Type_Ptr: return "I_Reflect_Type_Ptr";
-        case Type_Generic: return "I_Reflect_Type_Generic";
-        case Type_Array: return "I_Reflect_Type_Array";
-        case Type_Proc: return "I_Reflect_Type_Proc";
+        case Type_Name: return "Reflect_Type_Name";
+        case Type_Ptr: return "Reflect_Type_Ptr";
+        case Type_Generic: return "Reflect_Type_Generic";
+        case Type_Array: return "Reflect_Type_Array";
+        case Type_Proc: return "Reflect_Type_Proc";
     }
-    return "I_Reflect_Type_Name";
+    return "Reflect_Type_Name";
 }
 
 static u64 reflect_pointer_depth(TypeExpr *type) {
@@ -11699,6 +11703,55 @@ static void emit_proc_monomorph_comment(
 /* Anonymous members are flattened into the owner's field list, because C lets
    offsetof reach their members directly. Bitfields have no address, so their
    offset/size/alignment are reported as zero rather than emitting invalid C. */
+/* The name whose reflect table describes this field's own type: the type itself
+   for a plain name, the element type through a pointer or array, and the
+   monomorphised name for a generic. Empty when there is nothing to link to. */
+static string8 reflect_info_target_name(memops_arena *arena, TypeExpr *type) {
+    string8 empty = {0};
+    if (!type) return empty;
+    while (type->kind == Type_Ptr || type->kind == Type_Array) {
+        if (!type->elem) return empty;
+        type = type->elem;
+    }
+    if (type->kind == Type_Name || type->kind == Type_Generic) {
+        return type_mangle(arena, type, (TypeSub){0});
+    }
+    return empty;
+}
+
+/* Emits `&Name_reflect` when that name has a table, `0` otherwise. Builtins,
+   external types and procs have none, so their fields link to null rather than
+   to a symbol that was never emitted. */
+static void emit_reflect_info_link(memops_arena *arena, string8 *out, Program *prog, TypeExpr *type) {
+    string8 target = reflect_info_target_name(arena, type);
+    if (prog && target.length > 0) {
+        for (i32 i = 0; i < prog->structs.length; i++) {
+            StructDecl *decl = (StructDecl *)prog->structs.data[i];
+            if (decl->is_external) continue;
+            /* A generic's table exists per instantiation, under the mangled name,
+               so match that rather than the template name. */
+            if (decl->is_generic) continue;
+            if (string8_equals(&decl->name, &target)) {
+                emit_cstr(arena, out, "&");
+                emit_string8(arena, out, target);
+                emit_cstr(arena, out, "_reflect");
+                return;
+            }
+        }
+        for (i32 i = 0; i < prog->enums.length; i++) {
+            EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
+            if (decl->is_external) continue;
+            if (string8_equals(&decl->name, &target)) {
+                emit_cstr(arena, out, "&");
+                emit_string8(arena, out, target);
+                emit_cstr(arena, out, "_reflect");
+                return;
+            }
+        }
+    }
+    emit_cstr(arena, out, "0");
+}
+
 static i32 reflect_field_count(StructDecl *decl) {
     i32 count = 0;
     for (i32 i = 0; i < decl->fields.length; i++) {
@@ -11711,6 +11764,7 @@ static i32 reflect_field_count(StructDecl *decl) {
 static void emit_struct_reflection_fields(
     memops_arena *arena,
     string8 *out,
+    Program *prog,
     StructDecl *decl,
     string8 concrete_name,
     TypeSub sub
@@ -11718,7 +11772,7 @@ static void emit_struct_reflection_fields(
     for (i32 i = 0; i < decl->fields.length; i++) {
         Field *f = (Field *)decl->fields.data[i];
         if (f->anon) {
-            emit_struct_reflection_fields(arena, out, f->anon, concrete_name, sub);
+            emit_struct_reflection_fields(arena, out, prog, f->anon, concrete_name, sub);
             continue;
         }
         TypeExpr *field_type = sub.has ? substitute_type_param(arena, f->type, sub.param, sub.arg) : f->type;
@@ -11762,24 +11816,30 @@ static void emit_struct_reflection_fields(
         emit_reflect_generic_arg_type(arena, out, field_type);
         emit_cstr(arena, out, ", ");
         emit_cstr(arena, out, reflect_type_has_const(field_type) ? "1" : "0");
+        emit_cstr(arena, out, ", ");
+        emit_reflect_info_link(arena, out, prog, field_type);
         emit_cstr(arena, out, "},\n");
     }
 }
 
+/* A union reports as its own kind rather than as a struct with a flag, so a
+   consumer that only handles structs cannot silently walk overlapping members
+   as though they were adjacent; §3 of docs/reflection-issues.md. */
 static void emit_struct_reflection(
     memops_arena *arena,
     string8 *out,
+    Program *prog,
     StructDecl *decl,
     string8 concrete_name,
     TypeSub sub
 ) {
     emit_generated_line_directive(arena, out);
-    emit_cstr(arena, out, "static const i_reflect_field i_reflect_fields_");
+    emit_cstr(arena, out, "static const reflect_field reflect_fields_");
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "[] = {\n");
-    emit_struct_reflection_fields(arena, out, decl, concrete_name, sub);
+    emit_struct_reflection_fields(arena, out, prog, decl, concrete_name, sub);
     emit_cstr(arena, out, "};\n");
-    emit_cstr(arena, out, "const i_reflect_type ");
+    emit_cstr(arena, out, "const reflect ");
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "_reflect = {");
     emit_string8_as_c_string(arena, out, concrete_name);
@@ -11789,17 +11849,54 @@ static void emit_struct_reflection(
     emit_cstr(arena, out, "(u64)__alignof__(");
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "), ");
+    emit_cstr(arena, out, decl->is_union ? "Reflect_Union" : "Reflect_Struct");
+    emit_cstr(arena, out, ", ");
     char count_buf[32];
     snprintf(count_buf, sizeof(count_buf), "%llu", (unsigned long long)reflect_field_count(decl));
     emit_cstr(arena, out, count_buf);
-    emit_cstr(arena, out, ", i_reflect_fields_");
+    emit_cstr(arena, out, ", {.fields = reflect_fields_");
     emit_string8(arena, out, concrete_name);
-    emit_cstr(arena, out, "};\n\n");
+    emit_cstr(arena, out, "}};\n\n");
+}
+
+/* Nested `info` links point at other types' tables, and a table can be defined
+   later in the file than the one that links to it, so every table is declared up
+   front. The single-translation-unit path has no header to carry these. */
+static void emit_reflect_table_fwd_decls(memops_arena *arena, Program *prog, string8 *out) {
+    emit_generated_line_directive(arena, out);
+    for (i32 i = 0; i < prog->enums.length; i++) {
+        EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
+        if (decl->is_external) continue;
+        emit_cstr(arena, out, "extern const reflect ");
+        emit_string8(arena, out, decl->name);
+        emit_cstr(arena, out, "_reflect;\n");
+    }
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (decl->is_generic || decl->is_external) continue;
+        emit_cstr(arena, out, "extern const reflect ");
+        emit_string8(arena, out, decl->name);
+        emit_cstr(arena, out, "_reflect;\n");
+    }
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (!decl->is_generic || decl->is_external) continue;
+        Vec_string8 instances = Vec_string8_reserve(arena, 4);
+        collect_generic_struct_instances(prog, decl, &instances, arena);
+        for (i32 j = 0; j < instances.length; j++) {
+            emit_cstr(arena, out, "extern const reflect ");
+            emit_string8(arena, out, decl->name);
+            emit_cstr(arena, out, "_");
+            emit_string8(arena, out, instances.data[j]);
+            emit_cstr(arena, out, "_reflect;\n");
+        }
+    }
+    emit_cstr(arena, out, "\n");
 }
 
 static void emit_struct_reflection_extern(memops_arena *arena, string8 *out, string8 concrete_name) {
     emit_generated_line_directive(arena, out);
-    emit_cstr(arena, out, "extern const i_reflect_type ");
+    emit_cstr(arena, out, "extern const reflect ");
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "_reflect;\n");
     emit_cstr(arena, out, "#define ");
@@ -11812,7 +11909,7 @@ static void emit_struct_reflection_extern(memops_arena *arena, string8 *out, str
 static void emit_enum_reflection(memops_arena *arena, string8 *out, EnumDecl *decl) {
     if (decl->is_external) return;
     emit_generated_line_directive(arena, out);
-    emit_cstr(arena, out, "static const i_reflect_enum_value i_reflect_enum_values_");
+    emit_cstr(arena, out, "static const reflect_value reflect_values_");
     emit_string8(arena, out, decl->name);
     emit_cstr(arena, out, "[] = {\n");
     for (i32 i = 0; i < decl->items.length; i++) {
@@ -11826,7 +11923,7 @@ static void emit_enum_reflection(memops_arena *arena, string8 *out, EnumDecl *de
         emit_cstr(arena, out, "},\n");
     }
     emit_cstr(arena, out, "};\n");
-    emit_cstr(arena, out, "const i_reflect_enum ");
+    emit_cstr(arena, out, "const reflect ");
     emit_string8(arena, out, decl->name);
     emit_cstr(arena, out, "_reflect = {");
     emit_string8_as_c_string(arena, out, decl->name);
@@ -11835,18 +11932,18 @@ static void emit_enum_reflection(memops_arena *arena, string8 *out, EnumDecl *de
     emit_cstr(arena, out, "), ");
     emit_cstr(arena, out, "(u64)__alignof__(");
     emit_string8(arena, out, decl->name);
-    emit_cstr(arena, out, "), ");
+    emit_cstr(arena, out, "), Reflect_Enum, ");
     char count_buf[32];
     snprintf(count_buf, sizeof(count_buf), "%llu", (unsigned long long)decl->items.length);
     emit_cstr(arena, out, count_buf);
-    emit_cstr(arena, out, ", i_reflect_enum_values_");
+    emit_cstr(arena, out, ", {.values = reflect_values_");
     emit_string8(arena, out, decl->name);
-    emit_cstr(arena, out, "};\n\n");
+    emit_cstr(arena, out, "}};\n\n");
 }
 
 static void emit_enum_reflection_extern(memops_arena *arena, string8 *out, EnumDecl *decl) {
     emit_generated_line_directive(arena, out);
-    emit_cstr(arena, out, "extern const i_reflect_enum ");
+    emit_cstr(arena, out, "extern const reflect ");
     emit_string8(arena, out, decl->name);
     emit_cstr(arena, out, "_reflect;\n");
     emit_cstr(arena, out, "#define ");
@@ -11947,6 +12044,8 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
 
     emit_concrete_struct_defs_sorted(arena, out, prog);
 
+    emit_reflect_table_fwd_decls(arena, prog, out);
+
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
         if (!decl->is_generic || decl->is_external) continue;
@@ -11965,7 +12064,7 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
             sub.has = true;
             sub.param = decl->type_param;
             sub.arg = arg;
-            emit_struct_reflection(arena, out, decl, concrete_name, sub);
+            emit_struct_reflection(arena, out, prog, decl, concrete_name, sub);
         }
     }
 
@@ -11976,7 +12075,7 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
         if (!decl->is_generic && !decl->is_external) {
-            emit_struct_reflection(arena, out, decl, decl->name, (TypeSub){0});
+            emit_struct_reflection(arena, out, prog, decl, decl->name, (TypeSub){0});
         }
     }
 
@@ -12252,7 +12351,7 @@ static void emit_module_source(memops_arena *arena, Program *prog, string8 modul
         StructDecl *d = (StructDecl *)prog->structs.data[i];
         if (d->is_generic || d->is_external) continue;
         if (decl_in_module(d->source_path, module)) {
-            emit_struct_reflection(arena, out, d, d->name, (TypeSub){0});
+            emit_struct_reflection(arena, out, prog, d, d->name, (TypeSub){0});
         }
     }
     emit_cstr(arena, out, "\n");
@@ -12306,7 +12405,7 @@ static void emit_monomorph_struct_reflection(memops_arena *arena, Program *prog,
             sub.has = true;
             sub.param = decl->type_param;
             sub.arg = arg;
-            emit_struct_reflection(arena, out, decl, concrete_name, sub);
+            emit_struct_reflection(arena, out, prog, decl, concrete_name, sub);
         }
     }
 }

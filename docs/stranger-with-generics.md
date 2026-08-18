@@ -139,16 +139,17 @@ Monomorphised reflect tables can use `static` linkage, which means duplicate
 copies across translation units are harmless. This holds because **reflect
 addresses are read through, never compared**.
 
-Verified against a real codebase: 61 uses of `Type<>.&` across four modules, all
+Verified against a real codebase: 62 uses of `Type<>.&` across four modules, all
 of them passing the address to a reader such as
 
-    gin_reflect_enum_name: proc(meta: *const i_reflect_enum, value: i64)->*const char = {
-        if (meta == null) {
+    gin_reflect_enum_name: proc(meta: *const reflect, value: i64)->*const char = {
+        values: *const reflect_value = reflect_values(meta);
+        if (values == null) {
             return "unknown";
         }
-        for (i: u64 = 0; i < meta[0].value_count; i += 1) {
-            if (meta[0].values[i].value == value) {
-                return meta[0].values[i].name;
+        for (i: u64 = 0; i < meta[0].count; i += 1) {
+            if (values[i].value == value) {
+                return values[i].name;
             }
         }
         return "unknown";

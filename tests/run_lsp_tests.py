@@ -2012,8 +2012,9 @@ main:proc()->i32 = {
     )
     if (
         not any(item.name == "name" and item.detail == "Payload<>.name: *const char" for item in reflect_field_items)
-        or not any(item.name == "field_count" and item.detail == "Payload<>.field_count: u64" for item in reflect_field_items)
-        or not any(item.name == "fields" and item.detail == "Payload<>.fields: *const i_reflect_field" for item in reflect_field_items)
+        or not any(item.name == "count" and item.detail == "Payload<>.count: u64" for item in reflect_field_items)
+        or not any(item.name == "kind" and item.detail == "Payload<>.kind: i32" for item in reflect_field_items)
+        or not any(item.name == "variant" and item.detail == "Payload<>.variant: const reflect_variant" for item in reflect_field_items)
         or any(item.name == "value" for item in reflect_field_items)
     ):
         print("lsp: expected Payload<>. completion to return reflection metadata fields only")
@@ -2028,11 +2029,12 @@ main:proc()->i32 = {
         reflect_enum_col,
     )
     if (
-        not any(item.name == "value_count" and item.detail == "Kind<>.value_count: u64" for item in reflect_enum_items)
-        or not any(item.name == "values" and item.detail == "Kind<>.values: *const i_reflect_enum_value" for item in reflect_enum_items)
-        or any(item.name == "field_count" for item in reflect_enum_items)
+        not any(item.name == "count" and item.detail == "Kind<>.count: u64" for item in reflect_enum_items)
+        or not any(item.name == "kind" and item.detail == "Kind<>.kind: i32" for item in reflect_enum_items)
+        or not any(item.name == "variant" and item.detail == "Kind<>.variant: const reflect_variant" for item in reflect_enum_items)
+        or {item.name for item in reflect_enum_items} != {item.name for item in reflect_field_items}
     ):
-        print("lsp: expected Kind<>. completion to return enum reflection metadata fields only")
+        print("lsp: expected Kind<>. completion to offer the same merged reflect members a struct does")
         print(reflect_enum_items)
         return 1
     reflect_completion_server = CaptureServer()
@@ -2052,8 +2054,8 @@ main:proc()->i32 = {
     reflect_completion_items = reflect_completion_response.get("result", {}).get("items", [])
     if (
         reflect_completion_response.get("id") != 126
-        or not any(item.get("label") == "field_count" for item in reflect_completion_items)
-        or not any(item.get("label") == "fields" for item in reflect_completion_items)
+        or not any(item.get("label") == "count" for item in reflect_completion_items)
+        or not any(item.get("label") == "variant" for item in reflect_completion_items)
         or any(item.get("label") == "value" for item in reflect_completion_items)
     ):
         print("lsp: expected textDocument/completion after Payload<>. to return reflect metadata fields")

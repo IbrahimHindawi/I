@@ -23,8 +23,8 @@ main: proc(argc: i32, argv: **char)-> i32 = {
     p: payload = {};
     name: *const char = payload<>.name;
     printfmt("name {}\n", name);
-    for (i: i32 = 0; i < payload<>.field_count; i += 1) {
-        printfmt("field[{}] = {}\n", i, payload<>.fields[i].name);
+    for (i: i32 = 0; i < payload<>.count; i += 1) {
+        printfmt("field[{}] = {}\n", i, payload<>.variant.fields[i].name);
     }
 
     len: i32 = 16;

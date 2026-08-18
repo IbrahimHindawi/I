@@ -96,20 +96,20 @@ main:proc()->i32={
         a.data[3],
         array_i32_reflect.name,
         array_i32_reflect.align,
-        array_i32_reflect.field_count,
-        array_i32_reflect.fields[0].name,
-        array_i32_reflect.fields[0].type,
-        array_i32_reflect.fields[0].pointer_depth,
-        array_i32_reflect.fields[0].kind,
-        array_i32_reflect.fields[2].name,
-        array_i32_reflect.fields[2].type,
-        array_i32_reflect.fields[2].pointer_depth,
-        array_i32_reflect.fields[2].kind,
-        Bag_reflect.fields[0].kind,
-        Bag_reflect.fields[0].base_type,
-        Bag_reflect.fields[0].generic_arg_type,
-        Bag_reflect.fields[1].elem_type,
-        Bag_reflect.fields[2].elem_type);
+        array_i32_reflect.count,
+        array_i32_reflect.variant.fields[0].name,
+        array_i32_reflect.variant.fields[0].type,
+        array_i32_reflect.variant.fields[0].pointer_depth,
+        array_i32_reflect.variant.fields[0].kind,
+        array_i32_reflect.variant.fields[2].name,
+        array_i32_reflect.variant.fields[2].type,
+        array_i32_reflect.variant.fields[2].pointer_depth,
+        array_i32_reflect.variant.fields[2].kind,
+        Bag_reflect.variant.fields[0].kind,
+        Bag_reflect.variant.fields[0].base_type,
+        Bag_reflect.variant.fields[0].generic_arg_type,
+        Bag_reflect.variant.fields[1].elem_type,
+        Bag_reflect.variant.fields[2].elem_type);
     return 0;
 }
 ''',
@@ -192,7 +192,7 @@ main: proc()->i32 = {
     i: i32 = 1;
     printfmt("a {} {} {} {}\n", 3, count, 1.5, label);
     printfmt("{}\n", p);
-    printfmt("field[{}] = {}\n", i, Payload<>.fields[i].name);
+    printfmt("field[{}] = {}\n", i, Payload<>.variant.fields[i].name);
     print<i32>(9);
     print_cstr("\n");
     printf("{} stays raw\n");
@@ -200,7 +200,7 @@ main: proc()->i32 = {
 }
 ''',
         expected_stdout="a 3 4 1.500000 hi\nPayload{x: 7, y: 2.500000}\nfield[1] = y\n9\n{} stays raw\n",
-        generated_contains=("print_i32(3);", "print_u64(count);", "print_f32(1.5);", "print_ptr_const_char(label);", "print_Payload(p);", "print_ptr_const_char(Payload_reflect.fields[i].name);", "printf(\"{} stays raw\\n\");"),
+        generated_contains=("print_i32(3);", "print_u64(count);", "print_f32(1.5);", "print_ptr_const_char(label);", "print_Payload(p);", "print_ptr_const_char(Payload_reflect.variant.fields[i].name);", "printf(\"{} stays raw\\n\");"),
     ),
     Case(
         name="reflection_print_runtime",
@@ -208,46 +208,7 @@ main: proc()->i32 = {
 cinclude "stdio.h"
 import "C:/devel/i/src/std/containers.i"
 
-i_reflect_field:struct = {
-    name:*const char;
-    type:*const char;
-    attrs:*const char;
-    offset:u64;
-    size:u64;
-    align:u64;
-    kind:i32;
-    array_count:u64;
-    pointer_depth:u64;
-    base_type:*const char;
-    elem_type:*const char;
-    generic_arg_type:*const char;
-    is_const:u64;
-    external;
-}
-
-i_reflect_type:struct = {
-    name:*const char;
-    size:u64;
-    align:u64;
-    field_count:u64;
-    fields:*const i_reflect_field;
-    external;
-}
-
-i_reflect_enum_value:struct = {
-    name:*const char;
-    value:i32;
-    external;
-}
-
-i_reflect_enum:struct = {
-    name:*const char;
-    size:u64;
-    align:u64;
-    value_count:u64;
-    values:*const i_reflect_enum_value;
-    external;
-}
+import "C:/devel/i/src/std/reflect.i"
 
 Kind:enum = {
     Idle = 1,
@@ -259,14 +220,14 @@ Payload:struct = {
     kind:Kind;
 }
 
-reflect_type_name:proc(type:*const i_reflect_type)->*const char = {
+reflect_type_name:proc(type:*const reflect)->*const char = {
     return type[0].name;
 }
 
-reflect_enum_name:proc(type:*const i_reflect_enum, value:i32)->*const char = {
-    for (i:u64 = 0; i < type[0].value_count; i += 1) {
-        if (type[0].values[i].value == value) {
-            return type[0].values[i].name;
+reflect_enum_name:proc(type:*const reflect, value:i32)->*const char = {
+    for (i:u64 = 0; i < type[0].count; i += 1) {
+        if (type[0].variant.values[i].value == value) {
+            return type[0].variant.values[i].name;
         }
     }
     return "unknown";
@@ -293,7 +254,7 @@ main:proc()->i32 = {
     Vec<Payload>append(&arena, &vec, payload);
 
     printfmt("{} {} {} {} {} {} {}\n",
-        Payload<>.fields[1].name,
+        Payload<>.variant.fields[1].name,
         Option<Kind>unwrap(opt),
         Option<Kind>is_none(missing),
         Result<Payload>unwrap(ok_payload),
@@ -304,7 +265,7 @@ main:proc()->i32 = {
 }
 ''',
         expected_stdout="kind Run true Payload(9, Run) true 7 Payload(9, Run)\n",
-        generated_contains=("&(Kind_reflect)", "&(Payload_reflect)", "print_Kind", "print_Payload", "Payload_reflect.fields[1].name", "Option_Kind_reflect", "Result_Payload_reflect", "Vec_Payload_reflect", "Option_Kind_some", "Result_Payload_ok", "Vec_Payload_append"),
+        generated_contains=("&(Kind_reflect)", "&(Payload_reflect)", "print_Kind", "print_Payload", "Payload_reflect.variant.fields[1].name", "Option_Kind_reflect", "Result_Payload_reflect", "Vec_Payload_reflect", "Option_Kind_some", "Result_Payload_ok", "Vec_Payload_append"),
     ),
     Case(
         name="generic_dependency_closure",
@@ -363,11 +324,11 @@ main:proc()->i32 = {
     printfmt("{} {} {}\n", a, b, Result<Payload>unwrap(holder.res));
     printf("%s %llu %s %s %s %s\n",
         Holder_Payload_reflect.name,
-        Holder_Payload_reflect.field_count,
-        Holder_Payload_reflect.fields[0].name,
-        Holder_Payload_reflect.fields[1].name,
-        Holder_Payload_reflect.fields[2].name,
-        Holder_Payload_reflect.fields[3].name);
+        Holder_Payload_reflect.count,
+        Holder_Payload_reflect.variant.fields[0].name,
+        Holder_Payload_reflect.variant.fields[1].name,
+        Holder_Payload_reflect.variant.fields[2].name,
+        Holder_Payload_reflect.variant.fields[3].name);
     return 0;
 }
 ''',
@@ -490,9 +451,9 @@ main:proc()->i32 = {
         Pair_Payload_reflect.name,
         Wrap_Payload_reflect.name,
         Option_Pair_Payload_reflect.name,
-        Wrap_Payload_reflect.fields[0].type,
-        Wrap_Payload_reflect.fields[1].type,
-        Wrap_Payload_reflect.fields[1].generic_arg_type);
+        Wrap_Payload_reflect.variant.fields[0].type,
+        Wrap_Payload_reflect.variant.fields[1].type,
+        Wrap_Payload_reflect.variant.fields[1].generic_arg_type);
     return 0;
 }
 ''',
@@ -669,76 +630,28 @@ main:proc()->i32 = {
 cinclude "stdio.h"
 #define I_TEST_HP 77
 
-i_reflect_field:struct = {
-    name:*const char;
-    type:*const char;
-    attrs:*const char;
-    offset:u64;
-    size:u64;
-    align:u64;
-    kind:i32;
-    array_count:u64;
-    pointer_depth:u64;
-    base_type:*const char;
-    elem_type:*const char;
-    generic_arg_type:*const char;
-    is_const:u64;
-    external;
-}
+import "C:/devel/i/src/std/reflect.i"
 
-i_reflect_type:struct = {
-    name:*const char;
-    size:u64;
-    align:u64;
-    field_count:u64;
-    fields:*const i_reflect_field;
-    external;
-}
-
-i_reflect_enum_value:struct = {
-    name:*const char;
-    value:i32;
-    external;
-}
-
-i_reflect_enum:struct = {
-    name:*const char;
-    size:u64;
-    align:u64;
-    value_count:u64;
-    values:*const i_reflect_enum_value;
-    external;
-}
-
-i_reflect_type_kind_name:proc(kind:i32)->*const char = { external; }
-i_reflect_field_is_pointer:proc(field:*const i_reflect_field)->i32 = { external; }
-i_reflect_field_is_array:proc(field:*const i_reflect_field)->i32 = { external; }
-i_reflect_field_is_generic:proc(field:*const i_reflect_field)->i32 = { external; }
-i_reflect_count_fields_with_kind:proc(type:*const i_reflect_type, kind:i32)->u64 = { external; }
-i_reflect_find_field_with_kind:proc(type:*const i_reflect_type, kind:i32)->*const i_reflect_field = { external; }
-i_reflect_next_field_with_kind:proc(type:*const i_reflect_type, kind:i32, after:*const i_reflect_field)->*const i_reflect_field = { external; }
-i_reflect_find_field:proc(type:*const i_reflect_type, name:*const char)->*const i_reflect_field = { external; }
-i_reflect_field_index:proc(type:*const i_reflect_type, field:*const i_reflect_field, fallback:u64)->u64 = { external; }
-i_reflect_find_field_index:proc(type:*const i_reflect_type, name:*const char, fallback:u64)->u64 = { external; }
-i_reflect_field_at:proc(type:*const i_reflect_type, index:u64)->*const i_reflect_field = { external; }
-i_reflect_find_field_by_offset:proc(type:*const i_reflect_type, offset:u64)->*const i_reflect_field = { external; }
-i_reflect_field_end_offset:proc(field:*const i_reflect_field)->u64 = { external; }
-i_reflect_find_field_containing_offset:proc(type:*const i_reflect_type, offset:u64)->*const i_reflect_field = { external; }
-i_reflect_field_ptr:proc(base:*void, field:*const i_reflect_field)->*void = { external; }
-i_reflect_field_const_ptr:proc(base:*const void, field:*const i_reflect_field)->*const void = { external; }
-i_reflect_field_copy:proc(dst_base:*void, src_base:*const void, field:*const i_reflect_field)->i32 = { external; }
-i_reflect_field_zero:proc(base:*void, field:*const i_reflect_field)->i32 = { external; }
-i_reflect_field_copy_by_name:proc(dst_base:*void, src_base:*const void, type:*const i_reflect_type, name:*const char)->i32 = { external; }
-i_reflect_field_zero_by_name:proc(base:*void, type:*const i_reflect_type, name:*const char)->i32 = { external; }
-i_reflect_field_has_attr:proc(field:*const i_reflect_field, attr:*const char)->i32 = { external; }
-i_reflect_count_fields_with_attr:proc(type:*const i_reflect_type, attr:*const char)->u64 = { external; }
-i_reflect_find_field_with_attr:proc(type:*const i_reflect_type, attr:*const char)->*const i_reflect_field = { external; }
-i_reflect_next_field_with_attr:proc(type:*const i_reflect_type, attr:*const char, after:*const i_reflect_field)->*const i_reflect_field = { external; }
-i_reflect_find_enum_value_by_name:proc(type:*const i_reflect_enum, name:*const char)->*const i_reflect_enum_value = { external; }
-i_reflect_find_enum_value_by_value:proc(type:*const i_reflect_enum, value:i32)->*const i_reflect_enum_value = { external; }
-i_reflect_enum_value_at:proc(type:*const i_reflect_enum, index:u64)->*const i_reflect_enum_value = { external; }
-i_reflect_enum_name_from_value:proc(type:*const i_reflect_enum, value:i32)->*const char = { external; }
-i_reflect_enum_value_from_name:proc(type:*const i_reflect_enum, name:*const char, fallback:i32)->i32 = { external; }
+reflect_field_is_pointer:proc(field:*const reflect_field)->i32 = { external; }
+reflect_field_is_array:proc(field:*const reflect_field)->i32 = { external; }
+reflect_field_is_generic:proc(field:*const reflect_field)->i32 = { external; }
+reflect_count_fields_with_kind:proc(type:*const reflect, kind:i32)->u64 = { external; }
+reflect_find_field_with_kind:proc(type:*const reflect, kind:i32)->*const reflect_field = { external; }
+reflect_next_field_with_kind:proc(type:*const reflect, kind:i32, after:*const reflect_field)->*const reflect_field = { external; }
+reflect_field_index:proc(type:*const reflect, field:*const reflect_field, fallback:u64)->u64 = { external; }
+reflect_find_field_by_offset:proc(type:*const reflect, offset:u64)->*const reflect_field = { external; }
+reflect_field_end_offset:proc(field:*const reflect_field)->u64 = { external; }
+reflect_find_field_containing_offset:proc(type:*const reflect, offset:u64)->*const reflect_field = { external; }
+reflect_field_ptr:proc(base:*void, field:*const reflect_field)->*void = { external; }
+reflect_field_const_ptr:proc(base:*const void, field:*const reflect_field)->*const void = { external; }
+reflect_field_copy:proc(dst_base:*void, src_base:*const void, field:*const reflect_field)->i32 = { external; }
+reflect_field_zero:proc(base:*void, field:*const reflect_field)->i32 = { external; }
+reflect_field_copy_by_name:proc(dst_base:*void, src_base:*const void, type:*const reflect, name:*const char)->i32 = { external; }
+reflect_field_zero_by_name:proc(base:*void, type:*const reflect, name:*const char)->i32 = { external; }
+reflect_field_has_attr:proc(field:*const reflect_field, attr:*const char)->i32 = { external; }
+reflect_count_fields_with_attr:proc(type:*const reflect, attr:*const char)->u64 = { external; }
+reflect_find_field_with_attr:proc(type:*const reflect, attr:*const char)->*const reflect_field = { external; }
+reflect_next_field_with_attr:proc(type:*const reflect, attr:*const char, after:*const reflect_field)->*const reflect_field = { external; }
 
 Color:enum = {
     Red = 1,
@@ -765,58 +678,58 @@ main:proc()->i32={
     p.hp = I_TEST_HP;
     p.label = "hero";
     p.score = 123;
-    hp_field:*const i_reflect_field = i_reflect_find_field(&Player_reflect, "hp");
-    hp_value_ptr:*i32 = cast(i_reflect_field_ptr(&p, hp_field), *i32);
+    hp_field:*const reflect_field = reflect_find_field(&Player_reflect, "hp");
+    hp_value_ptr:*i32 = cast(reflect_field_ptr(&p, hp_field), *i32);
     hp_value_ptr[0] += 1;
-    hp_offset_field:*const i_reflect_field = i_reflect_find_field_by_offset(&Player_reflect, Player_reflect.fields[1].offset);
-    hp_containing_field:*const i_reflect_field = i_reflect_find_field_containing_offset(&Player_reflect, Player_reflect.fields[1].offset + 1);
-    hp_index_field:*const i_reflect_field = i_reflect_field_at(&Player_reflect, 1);
-    missing_index_field:*const i_reflect_field = i_reflect_field_at(&Player_reflect, Player_reflect.field_count);
-    editor_field:*const i_reflect_field = i_reflect_find_field_with_attr(&Player_reflect, "editor");
-    missing_attr_field:*const i_reflect_field = i_reflect_find_field_with_attr(&Player_reflect, "missing");
-    first_editor_field:*const i_reflect_field = i_reflect_next_field_with_attr(&Player_reflect, "editor", null);
-    second_editor_field:*const i_reflect_field = i_reflect_next_field_with_attr(&Player_reflect, "editor", first_editor_field);
-    no_more_editor_field:*const i_reflect_field = i_reflect_next_field_with_attr(&Player_reflect, "editor", second_editor_field);
-    green_value:*const i_reflect_enum_value = i_reflect_find_enum_value_by_name(&Color_reflect, "Green");
-    blue_value:*const i_reflect_enum_value = i_reflect_find_enum_value_by_value(&Color_reflect, Color_Blue);
-    blue_index_value:*const i_reflect_enum_value = i_reflect_enum_value_at(&Color_reflect, 2);
-    missing_index_value:*const i_reflect_enum_value = i_reflect_enum_value_at(&Color_reflect, Color_reflect.value_count);
-    green_name:*const char = i_reflect_enum_name_from_value(&Color_reflect, Color_Green);
-    missing_name:*const char = i_reflect_enum_name_from_value(&Color_reflect, 99);
-    generic_kind_field:*const i_reflect_field = i_reflect_find_field_with_kind(&Player_reflect, 2);
-    missing_kind_field:*const i_reflect_field = i_reflect_find_field_with_kind(&Player_reflect, 4);
-    first_name_kind_field:*const i_reflect_field = i_reflect_next_field_with_kind(&Player_reflect, 0, null);
-    second_name_kind_field:*const i_reflect_field = i_reflect_next_field_with_kind(&Player_reflect, 0, first_name_kind_field);
-    third_name_kind_field:*const i_reflect_field = i_reflect_next_field_with_kind(&Player_reflect, 0, second_name_kind_field);
-    no_more_name_kind_field:*const i_reflect_field = i_reflect_next_field_with_kind(&Player_reflect, 0, third_name_kind_field);
+    hp_offset_field:*const reflect_field = reflect_find_field_by_offset(&Player_reflect, Player_reflect.variant.fields[1].offset);
+    hp_containing_field:*const reflect_field = reflect_find_field_containing_offset(&Player_reflect, Player_reflect.variant.fields[1].offset + 1);
+    hp_index_field:*const reflect_field = reflect_field_at(&Player_reflect, 1);
+    missing_index_field:*const reflect_field = reflect_field_at(&Player_reflect, Player_reflect.count);
+    editor_field:*const reflect_field = reflect_find_field_with_attr(&Player_reflect, "editor");
+    missing_attr_field:*const reflect_field = reflect_find_field_with_attr(&Player_reflect, "missing");
+    first_editor_field:*const reflect_field = reflect_next_field_with_attr(&Player_reflect, "editor", null);
+    second_editor_field:*const reflect_field = reflect_next_field_with_attr(&Player_reflect, "editor", first_editor_field);
+    no_more_editor_field:*const reflect_field = reflect_next_field_with_attr(&Player_reflect, "editor", second_editor_field);
+    green_value:*const reflect_value = reflect_find_value_by_name(&Color_reflect, "Green");
+    blue_value:*const reflect_value = reflect_find_value_by_value(&Color_reflect, Color_Blue);
+    blue_index_value:*const reflect_value = reflect_value_at(&Color_reflect, 2);
+    missing_index_value:*const reflect_value = reflect_value_at(&Color_reflect, Color_reflect.count);
+    green_name:*const char = reflect_name_from_value(&Color_reflect, Color_Green);
+    missing_name:*const char = reflect_name_from_value(&Color_reflect, 99);
+    generic_kind_field:*const reflect_field = reflect_find_field_with_kind(&Player_reflect, 2);
+    missing_kind_field:*const reflect_field = reflect_find_field_with_kind(&Player_reflect, 4);
+    first_name_kind_field:*const reflect_field = reflect_next_field_with_kind(&Player_reflect, 0, null);
+    second_name_kind_field:*const reflect_field = reflect_next_field_with_kind(&Player_reflect, 0, first_name_kind_field);
+    third_name_kind_field:*const reflect_field = reflect_next_field_with_kind(&Player_reflect, 0, second_name_kind_field);
+    no_more_name_kind_field:*const reflect_field = reflect_next_field_with_kind(&Player_reflect, 0, third_name_kind_field);
     q:Player = {};
-    copy_ok:i32 = i_reflect_field_copy(&q, &p, hp_field);
+    copy_ok:i32 = reflect_field_copy(&q, &p, hp_field);
     copied_hp:i32 = q.hp;
-    zero_ok:i32 = i_reflect_field_zero(&q, hp_field);
+    zero_ok:i32 = reflect_field_zero(&q, hp_field);
     zeroed_hp:i32 = q.hp;
-    copy_missing:i32 = i_reflect_field_copy(null, &p, hp_field);
-    copy_score_ok:i32 = i_reflect_field_copy_by_name(&q, &p, &Player_reflect, "score");
+    copy_missing:i32 = reflect_field_copy(null, &p, hp_field);
+    copy_score_ok:i32 = reflect_field_copy_by_name(&q, &p, &Player_reflect, "score");
     copied_score:i32 = q.score;
-    zero_score_ok:i32 = i_reflect_field_zero_by_name(&q, &Player_reflect, "score");
+    zero_score_ok:i32 = reflect_field_zero_by_name(&q, &Player_reflect, "score");
     zeroed_score:i32 = q.score;
-    copy_missing_name:i32 = i_reflect_field_copy_by_name(&q, &p, &Player_reflect, "missing");
+    copy_missing_name:i32 = reflect_field_copy_by_name(&q, &p, &Player_reflect, "missing");
     printf("%s %llu %llu %llu %s %d %s %d %s %d %s %llu %s %s %s %llu %d %d %s %s %s %d %s %d %d %d %llu %llu %llu %s %d %s %s %d %s %s %s %s %d %d %d %d %d %d %llu %llu %llu %llu %llu %s %d %s %s %s %d %llu %s %d %d %d %d %llu %llu %s %d %s %d %d %d %d %d %d %d %d %d %d %d\n",
         Color_reflect.name,
         Color_reflect.size,
         Color_reflect.align,
-        Color_reflect.value_count,
-        Color_reflect.values[0].name,
-        Color_reflect.values[0].value,
-        Color_reflect.values[1].name,
-        Color_reflect.values[1].value,
-        Color_reflect.values[2].name,
-        Color_reflect.values[2].value,
+        Color_reflect.count,
+        Color_reflect.variant.values[0].name,
+        Color_reflect.variant.values[0].value,
+        Color_reflect.variant.values[1].name,
+        Color_reflect.variant.values[1].value,
+        Color_reflect.variant.values[2].name,
+        Color_reflect.variant.values[2].value,
         Player_reflect.name,
-        Player_reflect.field_count,
-        Player_reflect.fields[0].name,
-        Player_reflect.fields[1].type,
-        Player_reflect.fields[1].attrs,
-        Player_reflect.fields[2].is_const,
+        Player_reflect.count,
+        Player_reflect.variant.fields[0].name,
+        Player_reflect.variant.fields[1].type,
+        Player_reflect.variant.fields[1].attrs,
+        Player_reflect.variant.fields[2].is_const,
         p.kind,
         p.hp,
         hp_field[0].name,
@@ -824,46 +737,46 @@ main:proc()->i32={
         green_value[0].name,
         green_value[0].value,
         blue_value[0].name,
-        i_reflect_field_has_attr(hp_field, "editor"),
-        i_reflect_field_has_attr(hp_field, "serialize"),
-        i_reflect_field_has_attr(hp_field, "serial"),
-        i_reflect_count_fields_with_attr(&Player_reflect, "editor"),
-        i_reflect_count_fields_with_attr(&Player_reflect, "serialize"),
-        i_reflect_count_fields_with_attr(&Player_reflect, "missing"),
+        reflect_field_has_attr(hp_field, "editor"),
+        reflect_field_has_attr(hp_field, "serialize"),
+        reflect_field_has_attr(hp_field, "serial"),
+        reflect_count_fields_with_attr(&Player_reflect, "editor"),
+        reflect_count_fields_with_attr(&Player_reflect, "serialize"),
+        reflect_count_fields_with_attr(&Player_reflect, "missing"),
         editor_field[0].name,
         missing_attr_field == null,
         first_editor_field[0].name,
         second_editor_field[0].name,
         no_more_editor_field == null,
-        i_reflect_type_kind_name(Player_reflect.fields[1].kind),
-        i_reflect_type_kind_name(Player_reflect.fields[2].kind),
-        i_reflect_type_kind_name(999),
+        reflect_type_kind_name(Player_reflect.variant.fields[1].kind),
+        reflect_type_kind_name(Player_reflect.variant.fields[2].kind),
+        reflect_type_kind_name(999),
         green_name,
-        i_reflect_enum_value_from_name(&Color_reflect, "Blue", -1),
-        i_reflect_enum_value_from_name(&Color_reflect, "Missing", -1) + (missing_name == null),
-        i_reflect_field_is_pointer(&Player_reflect.fields[2]),
-        i_reflect_field_is_array(&Player_reflect.fields[4]),
-        i_reflect_field_is_generic(&Player_reflect.fields[5]),
-        i_reflect_field_is_pointer(&Player_reflect.fields[1]),
-        i_reflect_count_fields_with_kind(&Player_reflect, 0),
-        i_reflect_count_fields_with_kind(&Player_reflect, 1),
-        i_reflect_count_fields_with_kind(&Player_reflect, 2),
-        i_reflect_count_fields_with_kind(&Player_reflect, 3),
-        i_reflect_count_fields_with_kind(&Player_reflect, 4),
+        reflect_value_from_name(&Color_reflect, "Blue", -1),
+        reflect_value_from_name(&Color_reflect, "Missing", -1) + (missing_name == null),
+        reflect_field_is_pointer(&Player_reflect.variant.fields[2]),
+        reflect_field_is_array(&Player_reflect.variant.fields[4]),
+        reflect_field_is_generic(&Player_reflect.variant.fields[5]),
+        reflect_field_is_pointer(&Player_reflect.variant.fields[1]),
+        reflect_count_fields_with_kind(&Player_reflect, 0),
+        reflect_count_fields_with_kind(&Player_reflect, 1),
+        reflect_count_fields_with_kind(&Player_reflect, 2),
+        reflect_count_fields_with_kind(&Player_reflect, 3),
+        reflect_count_fields_with_kind(&Player_reflect, 4),
         generic_kind_field[0].name,
         missing_kind_field == null,
         first_name_kind_field[0].name,
         second_name_kind_field[0].name,
         third_name_kind_field[0].name,
         no_more_name_kind_field == null,
-        i_reflect_field_end_offset(hp_field),
+        reflect_field_end_offset(hp_field),
         hp_containing_field[0].name,
-        i_reflect_find_field_containing_offset(&Player_reflect, Player_reflect.size) == null,
+        reflect_find_field_containing_offset(&Player_reflect, Player_reflect.size) == null,
         hp_value_ptr[0],
-        i_reflect_field_const_ptr(&p, hp_field) != null,
-        i_reflect_field_ptr(null, hp_field) == null,
-        i_reflect_field_index(&Player_reflect, hp_field, 999),
-        i_reflect_find_field_index(&Player_reflect, "score", 999),
+        reflect_field_const_ptr(&p, hp_field) != null,
+        reflect_field_ptr(null, hp_field) == null,
+        reflect_field_index(&Player_reflect, hp_field, 999),
+        reflect_find_field_index(&Player_reflect, "score", 999),
         hp_index_field[0].name,
         missing_index_field == null,
         blue_index_value[0].name,
@@ -882,8 +795,8 @@ main:proc()->i32={
 }
 ''',
         expected_stdout="Color 4 4 3 Red 1 Green 2 Blue 3 Player 6 kind i32 editor,serialize 1 2 78 hp hp Green 2 Blue 1 1 0 2 1 0 hp 1 hp score 1 name ptr unknown Green 3 0 1 1 1 0 3 1 1 1 0 bag 1 kind hp score 1 8 hp 1 78 1 1 1 3 hp 1 Blue 1 1 78 1 0 0 1 123 1 0 0\n",
-        generated_contains=("#define I_TEST_HP 77", "typedef enum Color", "Player_reflect", "i_reflect_type_kind_name", "i_reflect_field_is_pointer", "i_reflect_field_is_array", "i_reflect_field_is_generic", "i_reflect_count_fields_with_kind", "i_reflect_find_field_with_kind", "i_reflect_next_field_with_kind", "i_reflect_find_field", "i_reflect_field_index", "i_reflect_find_field_index", "i_reflect_field_at", "i_reflect_find_field_by_offset", "i_reflect_field_end_offset", "i_reflect_find_field_containing_offset", "i_reflect_field_ptr", "i_reflect_field_const_ptr", "i_reflect_field_copy", "i_reflect_field_zero", "i_reflect_field_copy_by_name", "i_reflect_field_zero_by_name", "i_reflect_field_has_attr", "i_reflect_count_fields_with_attr", "i_reflect_find_field_with_attr", "i_reflect_next_field_with_attr", "i_reflect_enum_value_at", "i_reflect_enum_name_from_value", "i_reflect_enum_value_from_name", "editor,serialize", "editor,path\\\\\\\\tag", "is_const"),
-        header_contains=("extern const i_reflect_type Player_reflect;", "typedef enum Color"),
+        generated_contains=("#define I_TEST_HP 77", "typedef enum Color", "Player_reflect", "reflect_type_kind_name", "reflect_field_is_pointer", "reflect_field_is_array", "reflect_field_is_generic", "reflect_count_fields_with_kind", "reflect_find_field_with_kind", "reflect_next_field_with_kind", "reflect_find_field", "reflect_field_index", "reflect_find_field_index", "reflect_field_at", "reflect_find_field_by_offset", "reflect_field_end_offset", "reflect_find_field_containing_offset", "reflect_field_ptr", "reflect_field_const_ptr", "reflect_field_copy", "reflect_field_zero", "reflect_field_copy_by_name", "reflect_field_zero_by_name", "reflect_field_has_attr", "reflect_count_fields_with_attr", "reflect_find_field_with_attr", "reflect_next_field_with_attr", "reflect_value_at", "reflect_name_from_value", "reflect_value_from_name", "editor,serialize", "editor,path\\\\\\\\tag", "is_const"),
+        header_contains=("extern const reflect Player_reflect;", "typedef enum Color"),
     ),
     Case(
         name="reflect_angle_syntax",
@@ -896,12 +809,12 @@ Payload:struct = {
 }
 
 main:proc()->i32 = {
-    printf("%s %llu %s\n", Payload<>.name, Payload<>.field_count, Payload<>.fields[1].name);
+    printf("%s %llu %s\n", Payload<>.name, Payload<>.count, Payload<>.variant.fields[1].name);
     return 0;
 }
 ''',
         expected_stdout="Payload 2 y\n",
-        generated_contains=("Payload_reflect.name", "Payload_reflect.field_count", "Payload_reflect.fields[1].name"),
+        generated_contains=("Payload_reflect.name", "Payload_reflect.count", "Payload_reflect.variant.fields[1].name"),
     ),
     Case(
         name="boring_c_surface",
@@ -963,14 +876,14 @@ main:proc()->i32={
     parent_index:long = nodes[2].parent - nodes;
     printf("%d %llu %llu %llu %llu %d %llu %llu %d %ld %ld %d\n",
         total + TWICE(4),
-        Packet_reflect.field_count,
+        Packet_reflect.count,
         Packet_reflect.align,
-        Packet_reflect.fields[0].size,
-        Packet_reflect.fields[0].array_count,
-        Packet_reflect.fields[0].kind,
-        Packet_reflect.fields[0].align,
-        Node_reflect.fields[1].pointer_depth,
-        Node_reflect.fields[1].kind,
+        Packet_reflect.variant.fields[0].size,
+        Packet_reflect.variant.fields[0].array_count,
+        Packet_reflect.variant.fields[0].kind,
+        Packet_reflect.variant.fields[0].align,
+        Node_reflect.variant.fields[1].pointer_depth,
+        Node_reflect.variant.fields[1].kind,
         node_index,
         parent_index,
         nodes[2].parent[0].value);
@@ -979,7 +892,7 @@ main:proc()->i32={
 ''',
         expected_stdout="18 2 4 16 4 3 4 1 1 2 0 11\n",
         generated_contains=("i32 values[4];", "while (", "switch (", "WINCALL platform_add", "TWICE(4)", "#line 1 ", "&(nodes[2]) - nodes", "pointer_depth", "array_count"),
-        header_contains=("extern const i_reflect_type Packet_reflect;", "i32 values[4];", "WINCALL platform_add"),
+        header_contains=("extern const reflect Packet_reflect;", "i32 values[4];", "WINCALL platform_add"),
     ),
     Case(
         name="gin_c_surface",
@@ -1020,7 +933,7 @@ main:proc()->i32 = {
         total += i == 1 ? cb(v.i, 2) : choose(1, 2, 3);
         i += 1;
     } while (i < 3);
-    printf("%d %llu %s %s %s\n", total, Value_reflect.field_count, Value_reflect.fields[0].name, Value_reflect.fields[1].name, label);
+    printf("%d %llu %s %s %s\n", total, Value_reflect.count, Value_reflect.variant.fields[0].name, Value_reflect.variant.fields[1].name, label);
     return 0;
 }
 ''',
@@ -1349,7 +1262,7 @@ main:proc()->i32 = {
     payload.values[1] = 4;
     payload.values[2] = 5;
     result:i32 = shared_sum(&payload);
-    printf("%d %s %llu %d\n", result, SharedPayload_reflect.fields[0].name, SharedKind_reflect.value_count, SharedKind_Add);
+    printf("%d %s %llu %d\n", result, SharedPayload_reflect.variant.fields[0].name, SharedKind_reflect.count, SharedKind_Add);
     return 0;
 }
 '''
@@ -3054,7 +2967,7 @@ main:proc()->i32 = {
     if "I_REFLECT_TYPES_DEFINED" in line_map_generated:
         print("generated_line_map: reflection runtime helpers should live in std/reflect.h, not generated source")
         return 1
-    generated_struct_reflect_marker = '#line 1 "<generated>"\nstatic const i_reflect_field i_reflect_fields_Box_i32'
+    generated_struct_reflect_marker = '#line 1 "<generated>"\nstatic const reflect_field reflect_fields_Box_i32'
     if generated_struct_reflect_marker not in line_map_generated:
         print("generated_line_map: expected struct reflection metadata to be marked as generated code")
         return 1
@@ -3076,7 +2989,7 @@ main:proc()->i32 = {
     if "I_REFLECT_TYPES_DEFINED" in line_map_header:
         print("generated_line_map: reflection runtime helpers should live in std/reflect.h, not generated header")
         return 1
-    generated_reflect_extern_marker = '#line 1 "<generated>"\nextern const i_reflect_type Box_i32_reflect;'
+    generated_reflect_extern_marker = '#line 1 "<generated>"\nextern const reflect Box_i32_reflect;'
     if generated_reflect_extern_marker not in line_map_header:
         print("generated_line_map: expected reflection externs to be marked as generated code")
         return 1
@@ -6235,7 +6148,7 @@ main:proc(p:*Payload)->i32 = {
 CMeta:struct = { external; }
 
 main:proc(meta:*const CMeta)->i32 = {
-    return meta[0].field_count;
+    return meta[0].count;
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     type_external_field = run([str(I_EXE), str(type_external_field_i), str(type_external_field_c)])
@@ -7521,8 +7434,8 @@ main:proc()->i32 = {
     reflect_count_c = TEST_DIR / "array_count_reflect.c"
     reflect_count_i.write_text(
         "Kind:enum = { A, B, C }\n"
-        "g_table:[Kind<>.value_count]i32 = {};\n"
-        "g_grid:[Kind<>.value_count][2]i32 = {};\n"
+        "g_table:[Kind<>.count]i32 = {};\n"
+        "g_grid:[Kind<>.count][2]i32 = {};\n"
         "main:proc()->i32 = { return g_table[0] + g_grid[0][0]; }\n",
         encoding="utf-8", newline="\n",
     )
@@ -7574,12 +7487,12 @@ main:proc()->i32 = {
         return 1
     print("ok float_exponent")
 
-    # Only value_count makes sense as a size, and the enum still has to exist.
+    # Only the member count makes sense as a size, and the enum still has to exist.
     for src, label in (
-        ("Kind:enum = { A }\ng_t:[Nope<>.value_count]i32 = {};\nmain:proc()->i32 = { return 0; }\n",
+        ("Kind:enum = { A }\ng_t:[Nope<>.count]i32 = {};\nmain:proc()->i32 = { return 0; }\n",
          "unknown enum"),
         ("Kind:enum = { A }\ng_t:[Kind<>.name]i32 = {};\nmain:proc()->i32 = { return 0; }\n",
-         "only 'value_count'"),
+         "only 'count'"),
     ):
         bad_reflect_i = TEST_DIR / "array_count_reflect_bad.i"
         bad_reflect_i.write_text(src, encoding="utf-8", newline="\n")

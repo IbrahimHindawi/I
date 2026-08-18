@@ -5,146 +5,172 @@ Problems with reflection as it stands. Separate from the module-system work in
 blocked on, how modules are lowered.
 
 Reflection is one of I's two distinguishing features and the reason the resource
-layer in a real engine is better than its C original: 131 uses of
-`<>.value_count`, 61 of `<>.&`, and a metadata generator a third smaller than
-the C one it replaced. So these are notes on sharpening something that works,
-not a case against it.
+layer in a real engine is better than its C original: 153 uses of `<>.count`, 62
+of `<>.&`, and a metadata generator a third smaller than the C one it replaced.
+So these are notes on sharpening something that works, not a case against it.
 
-## What Works
+## Settled
 
-Worth stating first, so none of it gets broken while fixing the rest.
+Recorded so they do not get re-litigated. Every item here has a discriminating,
+mutation-checked test — the mutation is named in each entry, and reverting the
+fix makes the named test fail.
 
-- The header/source split is already correct: `extern const i_reflect_type
-  Point_reflect;` in the header, the definition in the `.c`.
-- It works through monomorphisation — `Array_i32_reflect` is generated
-  correctly for each instantiation.
-- Field records are richly decomposed: `kind` (`Name`/`Ptr`/`Generic`/`Array`/
-  `Proc`), `offset`, `size`, `align`, `pointer_depth`, `array_count`,
-  `base_type`, `elem_type`, `generic_arg_type`, `is_const`.
-- It costs nothing at runtime. The tables are `static const` data.
-- `std/reflect.h` ships useful helpers: `i_reflect_find_field`,
-  `i_reflect_find_field_by_offset`, `i_reflect_find_field_with_kind`.
+### One record, kind-tagged, variant payload
 
-## 1. Every Reflection Access Is Unchecked
+`i_reflect_type` and `i_reflect_enum` are gone. One `reflect` record describes
+every reflected type; `kind` says which, and `variant` holds the payload only
+that kind has. The whole family dropped its `i_` prefix.
 
-The reflect types are declared `external` on the I side:
+```
+reflect_variant: union = {
+    fields: *const reflect_field;   // Struct, Union
+    values: *const reflect_value;   // Enum
+}
 
-    i_reflect_field: struct = { external; }
-    i_reflect_type: struct = { external; }
-    i_reflect_enum_value: struct = { external; }
-    i_reflect_enum: struct = { external; }
+reflect: struct = {
+    name: *const char;
+    size: u64;
+    align: u64;
+    kind: i32;      // reflect_kind_struct | _union | _enum
+    count: u64;     // fields for a struct or union, values for an enum
+    variant: reflect_variant;
+}
+```
 
-An `external` struct accepts **any** field name with no verification — the
-access passes straight through to C. So `meta[0].value_count` compiles because
-C will resolve it later, not because I checked that the field exists.
+Every language surveyed had converged on this: Go, C#, Java, Zig, Odin, C++26,
+Rust. Of the two closest, **Odin's** shape is the one that ports — a common
+header plus a `variant` union plus a kind discriminator, expressible in I today.
+**Zig's** `union(enum)` is a language-level tagged union you `switch` on; I has
+plain C unions only, and an inline `variant: union = {...}` does not even parse,
+so adopting Zig's shape would mean building tagged unions into the language
+first. That is a separate decision, not a prerequisite for this one.
 
-That means every reflection accessor in every program rides the soundness hole
-recorded in `shape.md` §3. A typo in a field name is not a diagnostic; it is a C
-error pointing at generated code, or worse, a silent match against a different
-field that happens to exist.
+**One deliberate deviation from Odin:** `count` is hoisted into the header rather
+than living in the variant. Odin keeps it in the variant. Hoisting turned the
+single largest migration cost — 151 uses of `value_count` against 0 of
+`field_count` — into a one-word rename instead of a restructure.
 
-This is the most consequential item here, because it applies to a core language
-feature rather than to an interop corner.
+### Nested type links (was §2)
 
-**Resolution.** Either give `external` structs a declared, checked field list —
-the fix already proposed in `shape.md` — or make the reflect types known to the
-compiler directly, since it generates them and knows their shape exactly.
+`reflect_field` gained `info: *const reflect`, the record for the field's own
+type. It resolves through a plain name, a pointer, and an array; it is null for
+builtins, external types and procs; and it links a self-referential type back to
+itself. This is what makes a recursive walk — a serialiser, a tree inspector —
+writable at all. Before it, a walk stopped at the mangled type-name string with
+no way from `"Inner"` to `Inner`'s record.
 
-## 2. Reflection Is Only One Level Deep
+Because a table can be defined later in a file than one linking to it, every
+table is now forward-declared. In module mode the headers already carried these,
+so cross-module links work unchanged: njinn emits 94 of them.
 
-A field's type is recorded as a **mangled string**, not a link:
+*Mutation: suppress every link (`info` always `0`) — `017-generics-and-reflection`
+fails on `recursive_field_sum`.*
 
-    Outer: struct = { inner: Inner; ptr: *Inner; arr: [4]i32; }
+### A union is its own kind (was §3)
 
-    Outer<>.fields[0].type  ->  "Inner"
-    Outer<>.fields[1].type  ->  "ptr_Inner"
-    Outer<>.fields[2].type  ->  "array_4_i32"
+Struct and union are distinct `kind` values rather than one kind plus a flag. A
+consumer that only handles structs therefore cannot silently walk a union's
+overlapping members as though they were adjacent — the case that produced output
+that was wrong rather than absent.
 
-There is no way to get from `"Inner"` to `Inner`'s reflect record. The header
-`std/reflect.h` has helpers to find a *field within a known type*, but
-**nothing maps a type name to its record** — no registry, no
-`i_reflect_find_type`.
+*Mutation: report unions as `Reflect_Struct` — `017-generics-and-reflection`
+fails on `kind_tags`.*
 
-So reflection can walk one struct's fields and cannot recurse into them. That
-blocks the single most common thing reflection is wanted for: a generic
-serialiser, a debug inspector that expands nested structs, a UI that edits a
-struct tree. In a real engine this is exactly the wall you hit after the first
-afternoon.
+### Reflection access is checked (was §1)
 
-**Resolution.** Add a pointer to the nested `i_reflect_type` in
-`i_reflect_field` where the field is a struct or enum, or emit a program-wide
-registry the runtime can search by name. The first is cheaper to consume and
-costs a pointer per field; the second is more flexible and costs a linear scan.
+`std/reflect.i` declares the fields alongside `external`, which opts the types
+back into checking. `meta[0].value_kount` is now a type error at the access site
+rather than a C error in generated code, or a silent match against a different
+field. This also made the migration compiler-guided: every stale `value_count`
+reported its own file and line.
 
-## 3. A Union Is Indistinguishable From A Struct
+### Enum values stay `i32` (was §5)
 
-Unions reflect, and report like structs:
+I permits negative enum members and reflection round-trips them correctly today.
+A `u32` field would turn `None = -1` into `4294967295`, after which every lookup
+by value misses a member that plainly exists — the silent wrong-value class this
+project's torture suite exists to catch. The reverse risk does not balance it:
+`u32` only buys values above 2³¹, which nothing has, and an unadorned C enum
+could not hold one anyway.
 
-    U: union = { i: i32; f: f32; }
-    U<>.field_count   ->  2
+This decision does not depend on how `shape.md` §2.6 resolves the enum
+*underlying type*, because `i32` holds every value a C enum can legally have.
 
-`i_reflect_type` has no kind flag, so nothing tells a consumer that these fields
-**overlap**. A serialiser walking `U` would write both members as though they
-were adjacent, producing output that is silently wrong rather than failing.
+*Covered by `017-generics-and-reflection`: `Slot { Empty = -1 }` prints `-1`.*
 
-Every field would report `offset == 0`, which is the only available hint, and
-inferring "union" from repeated zero offsets is guesswork — a struct whose first
-field is at offset zero looks the same at index 0.
+## 1. The Merge Traded A Type Error For A Runtime Check
 
-**Resolution.** A kind flag on `i_reflect_type` distinguishing struct from union.
-One field, and it closes a silent-wrong-output hole.
+This is the cost of the collapse and it should be written down rather than
+discovered.
 
-## 4. Tables Are Emitted Unconditionally
+Before, `*const i_reflect_enum` and `*const i_reflect_type` were different types,
+so handing a struct's table to an enum consumer was a compile error. Now both are
+`*const reflect` and the type system permits it. Reading `variant.values` on a
+struct reinterprets the fields pointer.
 
-Every struct and enum gets a reflect table whether or not anything reflects it:
+The mitigation is in `std/reflect.h`: `reflect_fields()` and `reflect_values()`
+return the arm only when `kind` matches, and null otherwise. njinn was migrated
+to route every arm read through them, so a struct handed to
+`gin_reflect_enum_name` reports `"unknown"` instead of garbage.
+
+*Mutation: read the arm unchecked in `gin_reflect_enum_name` —
+`resops_reflect_selftest` fails with `returned '', want 'unknown'`.*
+
+**Open question.** Whether the compiler should enforce this rather than relying on
+consumers using the right helper. A `reflect` whose `kind` is known statically —
+which it always is at a `Type<>` site — could in principle reject
+`Point<>.variant.values` outright. That would recover the compile-time error
+without giving up the single record. Not implemented; worth deciding before much
+more code is written against the variant.
+
+## 2. Tables Are Emitted Unconditionally
+
+Every struct, union and enum gets a table whether or not anything reflects it:
 
     Unused: struct = { z: i32; }   // never reflected
     // Unused_reflect is emitted anyway
 
-In the njinn engine that is **152 tables, about 304 lines of the 28,301
-generated** — roughly 1%. Not a crisis, and it is `const` data a linker can
-often drop. But it is unconditional, with no way to opt a type out.
+In the njinn engine that is roughly 1% of generated lines. Not a crisis, and it
+is `const` data a linker can often drop. But it is unconditional, with no way to
+opt a type out — and the nested `info` links now make the set of live tables
+harder to compute, since a table can be reachable only through another type's
+field.
 
-**Resolution.** Three options, in increasing effort: leave it and document that
-reflection data is always present; emit only for types actually reflected, which
-needs a whole-program use analysis the compiler is already positioned to do; or
-add an opt-in marker on the type. The middle option is the most likely to be
-worth it, since the analysis pass is the same one the module work would need.
+**Resolution.** Leave it and document that reflection data is always present;
+emit only for types actually reflected, which needs a whole-program use analysis
+including link reachability; or add an opt-in marker on the type. The middle
+option is the most likely to be worth it, since the analysis pass is the same one
+the module work would need.
 
-## 5. Enum Values Are `i32`, Consumers Take `i64`
+## 3. Two Spellings For The Accessor
 
-    i_reflect_enum_value: { const char *name; i32 value; }
-
-Every consumer signature widens:
-
-    gin_reflect_enum_name: proc(meta: *const i_reflect_enum, value: i64)->*const char
-
-so each call site carries `cast(action, i64)`. Harmless, but it means an enum
-value outside `i32` range cannot round-trip through reflection — which connects
-directly to the unresolved enum underlying type in `shape.md` §2.6. Whatever is
-decided there should decide this too.
-
-## 6. Two Spellings For The Accessor
-
-`Type<>.value_count` reads a field directly; `Type<>.&` produces the address to
-pass along. Both are in use and the relationship between them is not obvious
-from the syntax — the first looks like member access on a value, the second like
-taking the address of something that was never named.
+`Type<>.count` reads a field directly; `Type<>.&` produces the address to pass
+along. Both are in use and the relationship between them is not obvious from the
+syntax — the first looks like member access on a value, the second like taking
+the address of something that was never named.
 
 Cosmetic, but this is the surface a student meets first, so it is worth deciding
 whether the asymmetry is intended.
 
+## 4. `reflect` Occupies A Common Word In Every Program's C Namespace
+
+The generated C defines `struct reflect`, `reflect_field`, `reflect_value` and
+`reflect_variant` in every translation unit, since tables are emitted
+unconditionally. `reflect` is a plausible identifier for third-party C to use.
+
+Nothing has collided yet. If it does, the fix is to keep the C-side symbols
+prefixed and map the I-side spelling onto them, which is a change to one emitter
+and one header rather than to any user code.
+
 ## Suggested Order
 
-1. **§3, the union flag.** One field, closes a silent-wrong-output path.
-2. **§2, nested type links.** This is what unblocks reflection actually being
-   used for the thing it exists for.
-3. **§1, checked access.** Larger, and tied to the `external` decision in
-   `shape.md`; but it is the one that makes reflection trustworthy rather than
-   merely functional.
-4. **§5, the integer width** — decide alongside the enum underlying type.
-5. **§4 and §6** whenever convenient.
+1. **§1's open question** — whether static `kind` knowledge should make the wrong
+   arm a compile error. This is the one place the merge is currently weaker than
+   what it replaced.
+2. **§2, unconditional tables** — the whole-program analysis overlaps the module
+   work.
+3. **§3 and §4** whenever convenient.
 
 Each of these should get a discriminating test in the execute suite before it is
 called done, per `compiler-hardening.md`. `017-generics-and-reflection.i` is the
-place they belong.
+place they belong, and every item under "Settled" above already has one.

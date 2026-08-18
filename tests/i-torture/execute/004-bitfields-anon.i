@@ -38,7 +38,7 @@ main: proc()->i32 = {
     printf("%u\n", p.as_u32);
 
     // reflection flattens anonymous members and skips bitfield offsets
-    printf("%llu\n", Packet<>.field_count);
-    printf("%s %s %s\n", Packet<>.fields[0].name, Packet<>.fields[3].name, Packet<>.fields[5].name);
+    printf("%llu\n", Packet<>.count);
+    printf("%s %s %s\n", Packet<>.variant.fields[0].name, Packet<>.variant.fields[3].name, Packet<>.variant.fields[5].name);
     return 0;
 }

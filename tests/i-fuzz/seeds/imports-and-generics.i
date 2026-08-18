@@ -44,9 +44,9 @@ main: proc()->i32 = {
     chain: *List<Payload> = List<Payload>create(arena.&);
     List<Payload>append(arena.&, chain, { .id = 1, .weight = 0.5 });
 
-    printfmt("{} has {} fields\n", Payload<>.name, Payload<>.field_count);
-    for (i: i32 = 0; i < Payload<>.field_count; i += 1) {
-        printfmt("  {}\n", Payload<>.fields[i].name);
+    printfmt("{} has {} fields\n", Payload<>.name, Payload<>.count);
+    for (i: i32 = 0; i < Payload<>.count; i += 1) {
+        printfmt("  {}\n", Payload<>.variant.fields[i].name);
     }
     return 0;
 }
