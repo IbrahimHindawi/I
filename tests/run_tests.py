@@ -6225,6 +6225,12 @@ main:proc(p:*Payload)->i32 = {
 
     type_external_field_i = TEST_DIR / "type_external_field_access.i"
     type_external_field_c = TEST_DIR / "type_external_field_access.c"
+    # This used to assert the opposite -- that a field-less external struct
+    # stayed "C-tolerant" and accepted any field name. That tolerance was an
+    # unchecked hole: it is how every reflection accessor in a real program came
+    # to read fields nothing had verified. Declaring the fields alongside
+    # `external` now opts the type into checking, and leaving them off means the
+    # type is opaque and cannot be field-accessed at all.
     type_external_field_i.write_text(r'''
 CMeta:struct = { external; }
 
@@ -6233,9 +6239,31 @@ main:proc(meta:*const CMeta)->i32 = {
 }
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     type_external_field = run([str(I_EXE), str(type_external_field_i), str(type_external_field_c)])
-    if type_external_field.returncode != 0:
-        print("type_external_field_access: expected empty external struct field access to remain C-tolerant")
+    if (
+        type_external_field.returncode == 0
+        or "is external and declares no fields" not in type_external_field.stdout
+        or "list the fields alongside" not in type_external_field.stdout
+    ):
+        print("type_external_field_access: a field-less external struct should reject field access")
         print(type_external_field.stdout)
+        return 1
+
+    # Declaring the fields makes the same access legal, and still leaves the
+    # definition to C.
+    type_external_field_i.write_text(r'''
+CMeta:struct = {
+    external;
+    field_count:i32;
+}
+
+main:proc(meta:*const CMeta)->i32 = {
+    return meta[0].field_count;
+}
+'''.strip() + "\n", encoding="utf-8", newline="\n")
+    type_external_declared = run([str(I_EXE), str(type_external_field_i), str(type_external_field_c)])
+    if type_external_declared.returncode != 0:
+        print("type_external_field_access: a declared field on an external struct should be accepted")
+        print(type_external_declared.stdout)
         return 1
     print("ok type_external_field_access")
 
@@ -7745,6 +7773,104 @@ main:proc()->i32 = {
         print(collide.stdout)
         return 1
     print("ok mangle_collision")
+
+    # `external` marks a type as defined in C. It used to also mean "accept any
+    # field name", because the compiler had nothing to check against -- so
+    # handle[0].anything compiled and was handed to the C compiler. Every
+    # reflection accessor in a real program was riding that path.
+    #
+    # Now: declaring fields alongside `external` opts the type into checking,
+    # and a type with no declared fields rejects field access outright. A
+    # genuinely opaque handle is unaffected, because it is never field-accessed.
+    ext_i = TEST_DIR / "external_fields.i"
+
+    # opaque, never field-accessed: still fine
+    ext_i.write_text(
+        "Device: struct = { external; }\n"
+        "use: proc(d: *Device)->*Device = { return d; }\n"
+        "main: proc()->i32 = { return 0; }\n",
+        encoding="utf-8", newline="\n",
+    )
+    opaque_ok = run([str(I_EXE), "check", str(ext_i)])
+    if opaque_ok.returncode != 0:
+        print("external_fields: an opaque handle that is never field-accessed should check clean")
+        print(opaque_ok.stdout)
+        return 1
+
+    # opaque, field-accessed: rejected, with a note pointing at the declaration
+    ext_i.write_text(
+        "Device: struct = { external; }\n"
+        "main: proc()->i32 = {\n"
+        "    d: *Device = null;\n"
+        "    return d[0].whatever;\n"
+        "}\n",
+        encoding="utf-8", newline="\n",
+    )
+    opaque_bad = run([str(I_EXE), "check", str(ext_i)])
+    if opaque_bad.returncode == 0:
+        print("external_fields: field access on a field-less external type should be rejected")
+        print(opaque_bad.stdout)
+        return 1
+    if "declares no fields" not in opaque_bad.stdout:
+        print("external_fields: expected the 'declares no fields' diagnostic")
+        print(opaque_bad.stdout)
+        return 1
+
+    # declared fields: the good one passes, the typo is caught
+    ext_i.write_text(
+        "Known: struct = {\n"
+        "    external;\n"
+        "    x: i32;\n"
+        "    y: i32;\n"
+        "}\n"
+        "main: proc()->i32 = {\n"
+        "    k: *Known = null;\n"
+        "    return k[0].x;\n"
+        "}\n",
+        encoding="utf-8", newline="\n",
+    )
+    declared_ok = run([str(I_EXE), "check", str(ext_i)])
+    if declared_ok.returncode != 0:
+        print("external_fields: a declared field on an external type should check clean")
+        print(declared_ok.stdout)
+        return 1
+
+    ext_i.write_text(
+        "Known: struct = {\n"
+        "    external;\n"
+        "    x: i32;\n"
+        "}\n"
+        "main: proc()->i32 = {\n"
+        "    k: *Known = null;\n"
+        "    return k[0].nonexistent;\n"
+        "}\n",
+        encoding="utf-8", newline="\n",
+    )
+    declared_bad = run([str(I_EXE), "check", str(ext_i)])
+    if declared_bad.returncode == 0 or "has no field" not in declared_bad.stdout:
+        print("external_fields: an undeclared field on an external type should be rejected")
+        print(declared_bad.stdout)
+        return 1
+
+    # The definition still belongs to C: declaring fields must not emit one.
+    ext_c = TEST_DIR / "external_fields.c"
+    ext_i.write_text(
+        "Known: struct = {\n"
+        "    external;\n"
+        "    x: i32;\n"
+        "}\n"
+        "main: proc()->i32 = { return 0; }\n",
+        encoding="utf-8", newline="\n",
+    )
+    emitted = run([str(I_EXE), "compile", str(ext_i), "-o", str(ext_c), "--no-header"])
+    if emitted.returncode != 0:
+        print("external_fields: expected a clean compile")
+        print(emitted.stdout)
+        return 1
+    if "structdef(Known)" in ext_c.read_text(encoding="utf-8"):
+        print("external_fields: an external type's definition must stay in C")
+        return 1
+    print("ok external_fields")
 
     # Per-module output. Two modules that both instantiate the same generic must
     # link: the instantiation is emitted once, into the shared monomorph unit,

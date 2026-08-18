@@ -6990,6 +6990,61 @@ static bool type_is_declared_aggregate(Program *prog, TypeExpr *type) {
     return false;
 }
 
+/* An external struct that declares no fields. The compiler has nothing to check
+   a field access against, so before this existed `handle[0].anything` compiled
+   and was handed straight to C -- every reflection accessor in a real program
+   was riding that path. Declaring the fields alongside `external` opts the type
+   back into checking; leaving them off is still fine for a genuinely opaque
+   handle, which is never field-accessed anyway. */
+static StructDecl *lookup_opaque_external_struct(Program *prog, TypeExpr *type) {
+    if (!type) {
+        return null;
+    }
+    type = resolve_alias_type(prog, type);
+    if (type->kind != Type_Name) {
+        return null;
+    }
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (decl->is_generic || !decl->is_external || decl->fields.length > 0) {
+            continue;
+        }
+        if (string8_equals(&decl->name, &type->name)) {
+            return decl;
+        }
+    }
+    return null;
+}
+
+static void type_error_opaque_field_access(StructDecl *decl, string8 field_name, i32 line, i32 col) {
+    if (g_diag_json) {
+        char message[1024];
+        snprintf(
+            message,
+            sizeof(message),
+            "cannot read field '%.*s': type '%.*s' is external and declares no fields",
+            (int)field_name.length, field_name.data,
+            (int)decl->name.length, decl->name.data
+        );
+        diag_json_error(diag_current_path(), line, col, "type", message);
+        diag_record_error();
+        return;
+    }
+    printf(
+        "%s:%d:%d: type error: cannot read field '%.*s': type '%.*s' is external and declares no fields\n",
+        g_diag_source_path ? g_diag_source_path : g_source_path,
+        line, col,
+        (int)field_name.length, field_name.data,
+        (int)decl->name.length, decl->name.data
+    );
+    printf(
+        "%s:%d:%d: note: list the fields alongside `external;` so they can be checked\n",
+        g_diag_source_path ? g_diag_source_path : g_source_path,
+        decl->line, decl->col
+    );
+    diag_finish_at(line, col);
+}
+
 static StructDecl *lookup_aggregate_decl(Program *prog, TypeExpr *type, TypeSub *sub) {
     if (sub) *sub = (TypeSub){0};
     if (!type) return null;
@@ -9924,6 +9979,11 @@ static void type_check_expr(Expr *e, TypeScope *scope, Program *prog, memops_are
         TypeExpr *resolved = resolve_alias_type(prog, base);
         if (!field && resolved && (resolved->kind == Type_Ptr || type_is_declared_aggregate(prog, resolved))) {
             type_error_field_access(prog, e->base, base, e->name, e->line, e->col, arena);
+        } else if (!field && resolved) {
+            StructDecl *opaque = lookup_opaque_external_struct(prog, resolved);
+            if (opaque) {
+                type_error_opaque_field_access(opaque, e->name, e->line, e->col);
+            }
         }
         return;
     }
