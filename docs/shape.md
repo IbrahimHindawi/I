@@ -159,6 +159,28 @@ restriction may not be deliberate.
 **Options.** Keep it and document the rule; allow it, matching the family; or
 keep it and forbid shadowing globals too, for consistency.
 
+**A concrete hole in the permitted case.** Shadowing a *proc* with a local is
+accepted, and the failure surfaces as a C error in generated code rather than a
+diagnostic:
+
+    helper: proc(v: i32)->i32 = { return v * 2; }
+
+    main: proc()->i32 = {
+        helper: i32 = 7;
+        n: i32 = helper(3);   // `i: checked` passes
+        return helper + n;
+    }
+
+    // then, from the generated C:
+    // error: called object type 'i32' is not a function or function pointer
+
+This is the `compiler-hardening.md` failure shape exactly: the checker says yes,
+the backend says no, and the message points at generated code. Whichever way
+§3.1 is decided, this case wants a diagnostic of its own — either "a local
+may not shadow a proc", or, if shadowing is allowed, an error at the *call*
+saying the name now refers to a local. Found while auditing the reflect runtime's
+`i_` prefix; it has nothing to do with reflection and reproduces with any proc.
+
 ### 3.2 C keywords as identifiers
 
 **Today.** Rejected with a diagnostic, added this week — `typedef: i32 = 1`
@@ -175,6 +197,36 @@ is a fair question from a student.
 **If the restriction stays,** it currently covers only local variables and proc
 parameters. Globals, proc names, struct and union names, field names, enum
 members and type aliases are unchecked.
+
+### 3.4 A call to an undeclared name is not an error
+
+**Today.** Not checked. The name resolves to nothing, and only the C compiler
+objects:
+
+    main: proc()->i32 = {
+        return totally_not_declared_anywhere(3);   // `i: checked` passes
+    }
+
+    // error: call to undeclared function 'totally_not_declared_anywhere';
+    // ISO C99 and later do not support implicit function declarations
+
+This is the most basic resolution check a compiler does, and it is absent. It is
+also the third instance of the same shape found in one sitting — alongside
+§3.1's proc shadowing and, before it was fixed, every reflection field access.
+The pattern is consistent: where I declines to resolve a name, the error
+reappears in generated code with a message pointing at C.
+
+Presumably it exists so a C function can be called without declaring it. That is
+not a bargain real code takes: njinn declares every external explicitly
+(`printf: proc(fmt: *const char, ...)->i32 = { external; }`), so the hole buys
+nothing and costs the diagnostic. It is the same trade `external` structs used to
+make before they were given a field list.
+
+**Options.** Resolve calls and error on an unknown name, which is the obvious
+one; or keep implicit calls and require a flag to allow them, so the permissive
+mode is opt-in rather than the default. Either way the fix is worth more than it
+costs — this is the cheapest possible class of bug to catch and it is currently
+escaping to the backend.
 
 ### 3.3 Visibility
 
@@ -285,7 +337,11 @@ Recorded so they do not get re-litigated:
 - **Reflection is one record, kind-tagged, with a variant payload.** Odin's
   shape, which ports to I as-is; Zig's needs language-level tagged unions first.
   This also settled nested type links and made a union its own kind rather than
-  a flag. Details and the remaining open question in `reflection-issues.md`.
+  a flag. Details in `reflection-issues.md`, which has nothing open.
+- **The reflect runtime's C names carry an `i_` prefix**, while I source keeps
+  the short spelling. Tables are emitted unconditionally, so `reflect` would
+  otherwise squat on a common word in every program's C namespace. Not `__i_`:
+  C reserves the double underscore to the implementation.
 - **Reflected enum values are `i32`.** I permits negative members and they must
   round-trip; `u32` would turn `-1` into `4294967295` and break every lookup by
   value. Independent of how the enum underlying type (§2.6) resolves.

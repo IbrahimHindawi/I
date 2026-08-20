@@ -4965,6 +4965,101 @@ static void emit_type_qualifiers(memops_arena *arena, string8 *out, TypeExpr *ty
     if (type->is_volatile) emit_cstr(arena, out, "volatile ");
 }
 
+/* The reflect runtime's C names all carry an `i_` prefix, because reflection
+   tables are emitted unconditionally and so this header's contents land in the C
+   global namespace of every I program. `reflect` unprefixed is a plausible
+   identifier for third-party C to claim -- it is a GLSL builtin, and any
+   vector-math library an engine links is fair game.
+
+   I source keeps the short spelling; this is where the two meet. It covers the
+   record types, which C owns because the emitted tables are C initialisers of
+   them, and the helpers and constants from std/reflect.i, which are ordinary I
+   declarations that would otherwise land in C under their short names.
+
+   The mapping is a closed list rather than a "starts with reflect" rule on
+   purpose: a blanket rule would silently rewrite a user's own
+   `reflect_normal: proc = { external; }` into `i_reflect_normal` and break the
+   link against the C function they meant to bind. tests/run_tests.py asserts
+   this list still covers std/reflect.h and std/reflect.i, so it cannot drift.
+
+   The prefix is `i_`, not `__i_`: C reserves every identifier beginning with two
+   underscores, or an underscore followed by an uppercase letter, to the
+   implementation for any use. */
+static const char *g_reflect_runtime_names[] = {
+    "reflect",
+    "reflect_attr_is_sep",
+    "reflect_count_fields_with_attr",
+    "reflect_count_fields_with_kind",
+    "reflect_cstr_equal",
+    "reflect_field",
+    "reflect_field_at",
+    "reflect_field_const_ptr",
+    "reflect_field_copy",
+    "reflect_field_copy_by_name",
+    "reflect_field_count",
+    "reflect_field_end_offset",
+    "reflect_field_has_attr",
+    "reflect_field_index",
+    "reflect_field_info",
+    "reflect_field_is_array",
+    "reflect_field_is_generic",
+    "reflect_field_is_pointer",
+    "reflect_field_kind_array",
+    "reflect_field_kind_generic",
+    "reflect_field_kind_name",
+    "reflect_field_kind_proc",
+    "reflect_field_kind_ptr",
+    "reflect_field_ptr",
+    "reflect_field_zero",
+    "reflect_field_zero_by_name",
+    "reflect_fields",
+    "reflect_find_field",
+    "reflect_find_field_by_offset",
+    "reflect_find_field_containing_offset",
+    "reflect_find_field_index",
+    "reflect_find_field_info",
+    "reflect_find_field_with_attr",
+    "reflect_find_field_with_kind",
+    "reflect_find_value_by_name",
+    "reflect_find_value_by_value",
+    "reflect_is_enum",
+    "reflect_is_struct",
+    "reflect_is_union",
+    "reflect_kind",
+    "reflect_kind_enum",
+    "reflect_kind_name",
+    "reflect_kind_struct",
+    "reflect_kind_union",
+    "reflect_name_from_value",
+    "reflect_next_field_with_attr",
+    "reflect_next_field_with_kind",
+    "reflect_type_kind",
+    "reflect_type_kind_name",
+    "reflect_value",
+    "reflect_value_at",
+    "reflect_value_count",
+    "reflect_value_from_name",
+    "reflect_values",
+    "reflect_variant",
+};
+
+static bool is_reflect_runtime_name(string8 name) {
+    for (u64 i = 0; i < sizeof(g_reflect_runtime_names) / sizeof(g_reflect_runtime_names[0]); i++) {
+        if (string8_equals_cstr(&name, g_reflect_runtime_names[i])) return true;
+    }
+    return false;
+}
+
+/* The C spelling of an I-side name. Everything not owned by the reflect runtime
+   passes through untouched, so a user's identifiers are never rewritten. */
+static string8 reflect_runtime_c_name(memops_arena *arena, string8 name) {
+    if (!is_reflect_runtime_name(name)) return name;
+    string8 out = string8_reserve(arena, name.length + 2);
+    string8_append_cstr(arena, &out, "i_");
+    string8_append_bytes(arena, &out, name.data, name.length);
+    return out;
+}
+
 static void emit_type(memops_arena *arena, string8 *out, TypeExpr *type, TypeSub sub) {
     if (type->kind == Type_Name) {
         if (sub.has && string8_equals_name(type->name, sub.param)) {
@@ -4973,7 +5068,7 @@ static void emit_type(memops_arena *arena, string8 *out, TypeExpr *type, TypeSub
             return;
         }
         emit_type_qualifiers(arena, out, type);
-        emit_string8(arena, out, type->name);
+        emit_string8(arena, out, reflect_runtime_c_name(arena, type->name));
         return;
     }
     if (type->kind == Type_Ptr) {
@@ -7047,6 +7142,151 @@ static void type_error_opaque_field_access(StructDecl *decl, string8 field_name,
         decl->line, decl->col
     );
     diag_finish_at(line, col);
+}
+
+/* `Point<>` parses to a plain name, `Point_reflect`, so a chain like
+   `Point<>.variant.values` roots at that name. Walking back to it recovers which
+   type the reflect table belongs to. Anything else -- a parameter, an index, a
+   call -- roots at something with no static kind, and is left alone. */
+static string8 reflect_owner_name_from_expr(Expr *base) {
+    string8 none = {0};
+    while (base && base->kind == Expr_Field) {
+        base = base->base;
+    }
+    if (!base || base->kind != Expr_Name) return none;
+    if (!string8_ends_with_cstr(base->name, "_reflect")) return none;
+    string8 owner = base->name;
+    owner.length -= 8; /* strlen("_reflect") */
+    if (owner.length == 0) return none;
+    return owner;
+}
+
+/* Which variant arm is live for the type that owns this table, or null when the
+   compiler cannot say. A monomorphised name like `Boxed_i32_reflect` has no
+   StructDecl under that name, so it lands here as unknown and is not diagnosed:
+   the check only fires where the kind is positively known. */
+static const char *reflect_live_arm_for_owner(Program *prog, string8 owner) {
+    if (owner.length == 0) return null;
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (decl->is_generic || decl->is_external) continue;
+        if (string8_equals(&decl->name, &owner)) {
+            return decl->is_union ? "union" : "struct";
+        }
+    }
+    for (i32 i = 0; i < prog->enums.length; i++) {
+        EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
+        if (decl->is_external) continue;
+        if (string8_equals(&decl->name, &owner)) return "enum";
+    }
+    return null;
+}
+
+static void type_error_reflect_variant_arm(
+    string8 owner,
+    const char *owner_kind,
+    string8 arm,
+    const char *live_arm,
+    const char *helper,
+    i32 line,
+    i32 col
+) {
+    const char *article = owner_kind[0] == 'e' ? "an" : "a";
+    if (g_diag_json) {
+        char message[1024];
+        char note[1024];
+        snprintf(
+            message,
+            sizeof(message),
+            "'%.*s' is %s %s, so its reflect variant holds '%s', not '%.*s'",
+            (int)owner.length, owner.data, article, owner_kind, live_arm,
+            (int)arm.length, arm.data
+        );
+        /* The editor sees the same fix the terminal does. Without this the
+           message says what is wrong but not what to write instead. */
+        snprintf(
+            note,
+            sizeof(note),
+            "reading the other arm reinterprets the pointer; use '%.*s<>.variant.%s', "
+            "or %s from std/reflect.h where the kind is only known at run time",
+            (int)owner.length, owner.data, live_arm, helper
+        );
+        diag_json_error_with_note(
+            diag_current_path(), line, col, "type", message,
+            diag_current_path(), line, col, note
+        );
+        diag_record_error();
+        return;
+    }
+    printf(
+        "%s:%d:%d: type error: '%.*s' is %s %s, so its reflect variant holds '%s', not '%.*s'\n",
+        g_diag_source_path ? g_diag_source_path : g_source_path,
+        line, col,
+        (int)owner.length, owner.data, article, owner_kind, live_arm,
+        (int)arm.length, arm.data
+    );
+    printf(
+        "%s:%d:%d: note: reading the other arm reinterprets the pointer; use '%.*s<>.variant.%s'\n",
+        g_diag_source_path ? g_diag_source_path : g_source_path,
+        line, col,
+        (int)owner.length, owner.data, live_arm
+    );
+    printf(
+        "%s:%d:%d: note: where the kind is only known at run time, use %s from std/reflect.h\n",
+        g_diag_source_path ? g_diag_source_path : g_source_path,
+        line, col, helper
+    );
+    diag_finish_at(line, col);
+}
+
+/* The two reflect records collapsed into one, which cost a type error: a struct
+   table and an enum table are both `reflect` now, so nothing stopped
+   `Point<>.variant.values`. That does not fail loudly -- both arms begin with a
+   `const char *name`, so it reinterprets the fields pointer and yields a
+   plausible wrong string. This puts the diagnostic back wherever the kind is
+   statically known, which is every `Type<>` site. */
+static bool type_is_reflect_runtime_record(Program *prog, TypeExpr *type) {
+    if (!type) return false;
+    type = resolve_alias_type(prog, type);
+    if (type->kind != Type_Name) return false;
+    return string8_equals_cstr(&type->name, "reflect") ||
+           string8_equals_cstr(&type->name, "reflect_field") ||
+           string8_equals_cstr(&type->name, "reflect_value") ||
+           string8_equals_cstr(&type->name, "reflect_variant");
+}
+
+static void check_reflect_variant_arm(
+    Program *prog,
+    Expr *e,
+    TypeExpr *base_type,
+    memops_arena *arena
+) {
+    if (!base_type) return;
+    base_type = resolve_alias_type(prog, base_type);
+    if (base_type->kind != Type_Name) return;
+    if (!string8_equals_cstr(&base_type->name, "reflect_variant")) return;
+
+    bool wants_fields = string8_equals_cstr(&e->name, "fields");
+    bool wants_values = string8_equals_cstr(&e->name, "values");
+    if (!wants_fields && !wants_values) return;
+
+    string8 owner = reflect_owner_name_from_expr(e->base);
+    const char *owner_kind = reflect_live_arm_for_owner(prog, owner);
+    if (!owner_kind) return;
+
+    bool is_enum = owner_kind[0] == 'e';
+    if (is_enum == wants_values) return;
+
+    type_error_reflect_variant_arm(
+        owner,
+        owner_kind,
+        e->name,
+        is_enum ? "values" : "fields",
+        is_enum ? "reflect_values()" : "reflect_fields()",
+        e->line,
+        e->col
+    );
+    (void)arena;
 }
 
 static StructDecl *lookup_aggregate_decl(Program *prog, TypeExpr *type, TypeSub *sub) {
@@ -9981,7 +10221,10 @@ static void type_check_expr(Expr *e, TypeScope *scope, Program *prog, memops_are
         TypeExpr *base = infer_expr_type(e->base, scope, prog, arena);
         TypeExpr *field = lookup_field_type(prog, base, e->name, arena);
         TypeExpr *resolved = resolve_alias_type(prog, base);
-        if (!field && resolved && (resolved->kind == Type_Ptr || type_is_declared_aggregate(prog, resolved))) {
+        check_reflect_variant_arm(prog, e, base, arena);
+        if (!field && resolved && (resolved->kind == Type_Ptr ||
+                                   type_is_declared_aggregate(prog, resolved) ||
+                                   type_is_reflect_runtime_record(prog, resolved))) {
             type_error_field_access(prog, e->base, base, e->name, e->line, e->col, arena);
         } else if (!field && resolved) {
             StructDecl *opaque = lookup_opaque_external_struct(prog, resolved);
@@ -10440,6 +10683,53 @@ static void printfmt_append_print_cstr(memops_arena *arena, Vec_voidptr *out, St
     ptr_array_append(arena, out, printfmt_expr_stmt(arena, call, source));
 }
 
+/* The printf conversion that matches what std/Print.i's print<T> would emit for
+   this type, or null when there is no single spec that does.
+
+   `bool` and `b32` return null on purpose: print<bool> writes "true"/"false",
+   which no conversion produces, so folding them would change what the program
+   prints. Anything else without an entry -- a user's own print<Payload> -- lands
+   here too and keeps the per-argument call. */
+static const char *printfmt_spec_for_type(Program *prog, TypeExpr *type) {
+    if (!type) return null;
+    type = resolve_alias_type(prog, type);
+    if (type->kind == Type_Ptr) {
+        TypeExpr *elem = type->elem ? resolve_alias_type(prog, type->elem) : null;
+        if (elem && elem->kind == Type_Name && string8_equals_cstr(&elem->name, "char")) {
+            return "%s";
+        }
+        return null;
+    }
+    if (type->kind != Type_Name) return null;
+    string8 n = type->name;
+    if (string8_equals_cstr(&n, "i8")) return "%d";
+    if (string8_equals_cstr(&n, "i16")) return "%d";
+    if (string8_equals_cstr(&n, "i32")) return "%d";
+    if (string8_equals_cstr(&n, "i64")) return "%lld";
+    if (string8_equals_cstr(&n, "u8")) return "%u";
+    if (string8_equals_cstr(&n, "u16")) return "%u";
+    if (string8_equals_cstr(&n, "u32")) return "%u";
+    if (string8_equals_cstr(&n, "u64")) return "%llu";
+    if (string8_equals_cstr(&n, "usize")) return "%zu";
+    if (string8_equals_cstr(&n, "f32")) return "%f";
+    if (string8_equals_cstr(&n, "f64")) return "%f";
+    if (string8_equals_cstr(&n, "char")) return "%c";
+    return null;
+}
+
+static bool printfmt_spec_is_cstr(const char *spec) {
+    return spec && spec[0] == '%' && spec[1] == 's' && spec[2] == 0;
+}
+
+/* A `%` in the author's text is literal, so it has to be doubled on the way into
+   a real printf format. */
+static void printfmt_append_escaped(memops_arena *arena, string8 *out, u8 *data, u64 length) {
+    for (u64 i = 0; i < length; i++) {
+        if (data[i] == '%') string8_append_byte(arena, out, '%');
+        string8_append_byte(arena, out, data[i]);
+    }
+}
+
 static void printfmt_append_print_arg(memops_arena *arena, Vec_voidptr *out, Stmt *source, Expr *arg, i32 arg_index, TypeScope *scope, Program *prog) {
     TypeExpr *type = infer_expr_type(arg, scope, prog, arena);
     if (!type) {
@@ -10497,6 +10787,95 @@ static void rewrite_printfmt_in_expr(Expr *e, const char *path) {
     }
 }
 
+/* Collapse the whole printfmt into one printf.
+
+   The per-piece expansion below is correct but emits a call per literal run and
+   per argument -- nine calls for a four-placeholder line -- and each one re-enters
+   the C formatter and takes the stream lock. Measured at 1.65x the cost of the
+   equivalent hand-written printf. Since the format is a literal and every
+   argument's type is already known here, the conversions can be worked out now
+   and the whole thing emitted as a single call.
+
+   Returns false when any argument has no matching conversion, in which case the
+   caller falls back and nothing is lost. */
+static bool printfmt_try_single_call(
+    memops_arena *arena,
+    Vec_voidptr *out,
+    Stmt *stmt,
+    Expr *call,
+    Expr *fmt,
+    string8 lit,
+    TypeScope *scope,
+    Program *prog
+) {
+    i32 value_count = call->args.length - 1;
+    for (i32 i = 0; i < value_count; i++) {
+        Expr *arg = (Expr *)call->args.data[i + 1];
+        TypeExpr *type = infer_expr_type(arg, scope, prog, arena);
+        if (!printfmt_spec_for_type(prog, type)) return false;
+    }
+
+    string8 built = string8_reserve(arena, lit.length + (u64)value_count * 4 + 4);
+    string8_append_byte(arena, &built, '"');
+
+    Expr *printf_call = printfmt_call_expr(arena, "printf", fmt->line, fmt->col);
+    Expr *fmt_arg = expr_new(arena, Expr_String);
+    fmt_arg->line = fmt->line;
+    fmt_arg->col = fmt->col;
+    ptr_array_append(arena, &printf_call->args, fmt_arg);
+
+    u64 chunk_start = 1;
+    i32 arg_index = 0;
+    for (u64 i = 1; i + 1 < lit.length; i++) {
+        if (lit.data[i] == '{' && (i + 1) < (lit.length - 1) && lit.data[i + 1] == '}') {
+            printfmt_append_escaped(arena, &built, lit.data + chunk_start, i - chunk_start);
+
+            Expr *arg = (Expr *)call->args.data[arg_index + 1];
+            TypeExpr *type = infer_expr_type(arg, scope, prog, arena);
+            const char *spec = printfmt_spec_for_type(prog, type);
+            string8_append_cstr(arena, &built, spec);
+
+            /* print_cstr prints "(null)" for a null pointer; printf with %s would
+               be undefined. The guard keeps the behaviour without costing a call. */
+            if (printfmt_spec_is_cstr(spec)) {
+                Expr *guard = expr_new(arena, Expr_Ternary);
+                Expr *cmp = expr_new(arena, Expr_Binary);
+                Expr *nul = expr_new(arena, Expr_Name);
+                Expr *fallback = expr_new(arena, Expr_String);
+                nul->name = string8_from_cstr(arena, "null");
+                nul->line = arg->line;
+                nul->col = arg->col;
+                cmp->op = Token_BangEqual;
+                cmp->left = arg;
+                cmp->right = nul;
+                cmp->line = arg->line;
+                cmp->col = arg->col;
+                fallback->string_lit = string8_from_cstr(arena, "\"(null)\"");
+                fallback->line = arg->line;
+                fallback->col = arg->col;
+                guard->left = cmp;
+                guard->right = arg;
+                guard->third = fallback;
+                guard->line = arg->line;
+                guard->col = arg->col;
+                ptr_array_append(arena, &printf_call->args, guard);
+            } else {
+                ptr_array_append(arena, &printf_call->args, arg);
+            }
+
+            arg_index++;
+            i++;
+            chunk_start = i + 1;
+        }
+    }
+    printfmt_append_escaped(arena, &built, lit.data + chunk_start, (lit.length - 1) - chunk_start);
+    string8_append_byte(arena, &built, '"');
+    fmt_arg->string_lit = built;
+
+    ptr_array_append(arena, out, printfmt_expr_stmt(arena, printf_call, stmt));
+    return true;
+}
+
 static void rewrite_printfmt_call_stmt(Stmt *stmt, TypeScope *scope, Program *prog, memops_arena *arena, Vec_voidptr *out) {
     /* Expanding a printfmt replaces statements and can introduce generic print
        calls, so anything cached about instantiation has to be recomputed. */
@@ -10524,6 +10903,10 @@ static void rewrite_printfmt_call_stmt(Stmt *stmt, TypeScope *scope, Program *pr
         snprintf(message, sizeof(message), "printfmt placeholder count (%d) does not match arg count (%d)", placeholder_count, value_count);
         printfmt_error_at(stmt->source_path, fmt->line, fmt->col, message);
         return; // expanding would read past the supplied arguments
+    }
+
+    if (printfmt_try_single_call(arena, out, stmt, call, fmt, lit, scope, prog)) {
+        return;
     }
 
     u64 chunk_start = 1;
@@ -10682,6 +11065,9 @@ static void emit_decl_array_suffix(memops_arena *arena, string8 *out, TypeExpr *
 }
 
 static void emit_decl(memops_arena *arena, string8 *out, TypeExpr *type, string8 name, TypeSub sub) {
+    /* The reflect runtime's I-side constants are declared here as well as read,
+       so the declaration has to agree with the reads. */
+    name = reflect_runtime_c_name(arena, name);
     TypeExpr *proc_type = null;
     if (type && type->kind == Type_Proc) {
         proc_type = type;
@@ -10896,7 +11282,7 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
             emit_cstr(arena, out, "0");
             return;
         }
-        emit_string8(arena, out, e->name);
+        emit_string8(arena, out, reflect_runtime_c_name(arena, e->name));
         return;
     }
     if (e->kind == Expr_Cast) {
@@ -10970,7 +11356,7 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
             string8 mangle = type_mangle(arena, sub.arg, (TypeSub){0});
             emit_string8(arena, out, mangle);
         } else {
-            emit_string8(arena, out, e->name);
+            emit_string8(arena, out, reflect_runtime_c_name(arena, e->name));
         }
 
         emit_cstr(arena, out, "(");
@@ -11424,7 +11810,7 @@ static void emit_proc_decl(memops_arena *arena, string8 *out, ProcDecl *decl) {
         emit_string8(arena, out, decl->callconv);
         emit_cstr(arena, out, " ");
     }
-    emit_string8(arena, out, decl->name);
+    emit_string8(arena, out, reflect_runtime_c_name(arena, decl->name));
     emit_cstr(arena, out, "(");
     emit_proc_params(arena, out, decl, (TypeSub){0});
     emit_cstr(arena, out, ") {\n");
@@ -11445,7 +11831,7 @@ static void emit_proc_proto(memops_arena *arena, string8 *out, ProcDecl *decl) {
         emit_string8(arena, out, decl->callconv);
         emit_cstr(arena, out, " ");
     }
-    emit_string8(arena, out, decl->name);
+    emit_string8(arena, out, reflect_runtime_c_name(arena, decl->name));
     emit_cstr(arena, out, "(");
     emit_proc_params(arena, out, decl, (TypeSub){0});
     emit_cstr(arena, out, ");\n");
@@ -11499,15 +11885,15 @@ static void emit_proc_proto_mono(memops_arena *arena, string8 *out, ProcDecl *de
 }
 
 static const char *reflect_type_kind_name(TypeExpr *type) {
-    if (!type) return "Reflect_Type_Name";
+    if (!type) return "I_Reflect_Type_Name";
     switch (type->kind) {
-        case Type_Name: return "Reflect_Type_Name";
-        case Type_Ptr: return "Reflect_Type_Ptr";
-        case Type_Generic: return "Reflect_Type_Generic";
-        case Type_Array: return "Reflect_Type_Array";
-        case Type_Proc: return "Reflect_Type_Proc";
+        case Type_Name: return "I_Reflect_Type_Name";
+        case Type_Ptr: return "I_Reflect_Type_Ptr";
+        case Type_Generic: return "I_Reflect_Type_Generic";
+        case Type_Array: return "I_Reflect_Type_Array";
+        case Type_Proc: return "I_Reflect_Type_Proc";
     }
-    return "Reflect_Type_Name";
+    return "I_Reflect_Type_Name";
 }
 
 static u64 reflect_pointer_depth(TypeExpr *type) {
@@ -11834,12 +12220,12 @@ static void emit_struct_reflection(
     TypeSub sub
 ) {
     emit_generated_line_directive(arena, out);
-    emit_cstr(arena, out, "static const reflect_field reflect_fields_");
+    emit_cstr(arena, out, "static const i_reflect_field i_reflect_fields_");
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "[] = {\n");
     emit_struct_reflection_fields(arena, out, prog, decl, concrete_name, sub);
     emit_cstr(arena, out, "};\n");
-    emit_cstr(arena, out, "const reflect ");
+    emit_cstr(arena, out, "const i_reflect ");
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "_reflect = {");
     emit_string8_as_c_string(arena, out, concrete_name);
@@ -11849,12 +12235,12 @@ static void emit_struct_reflection(
     emit_cstr(arena, out, "(u64)__alignof__(");
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "), ");
-    emit_cstr(arena, out, decl->is_union ? "Reflect_Union" : "Reflect_Struct");
+    emit_cstr(arena, out, decl->is_union ? "I_Reflect_Union" : "I_Reflect_Struct");
     emit_cstr(arena, out, ", ");
     char count_buf[32];
     snprintf(count_buf, sizeof(count_buf), "%llu", (unsigned long long)reflect_field_count(decl));
     emit_cstr(arena, out, count_buf);
-    emit_cstr(arena, out, ", {.fields = reflect_fields_");
+    emit_cstr(arena, out, ", {.fields = i_reflect_fields_");
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "}};\n\n");
 }
@@ -11867,14 +12253,14 @@ static void emit_reflect_table_fwd_decls(memops_arena *arena, Program *prog, str
     for (i32 i = 0; i < prog->enums.length; i++) {
         EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
         if (decl->is_external) continue;
-        emit_cstr(arena, out, "extern const reflect ");
+        emit_cstr(arena, out, "extern const i_reflect ");
         emit_string8(arena, out, decl->name);
         emit_cstr(arena, out, "_reflect;\n");
     }
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
         if (decl->is_generic || decl->is_external) continue;
-        emit_cstr(arena, out, "extern const reflect ");
+        emit_cstr(arena, out, "extern const i_reflect ");
         emit_string8(arena, out, decl->name);
         emit_cstr(arena, out, "_reflect;\n");
     }
@@ -11884,7 +12270,7 @@ static void emit_reflect_table_fwd_decls(memops_arena *arena, Program *prog, str
         Vec_string8 instances = Vec_string8_reserve(arena, 4);
         collect_generic_struct_instances(prog, decl, &instances, arena);
         for (i32 j = 0; j < instances.length; j++) {
-            emit_cstr(arena, out, "extern const reflect ");
+            emit_cstr(arena, out, "extern const i_reflect ");
             emit_string8(arena, out, decl->name);
             emit_cstr(arena, out, "_");
             emit_string8(arena, out, instances.data[j]);
@@ -11896,7 +12282,7 @@ static void emit_reflect_table_fwd_decls(memops_arena *arena, Program *prog, str
 
 static void emit_struct_reflection_extern(memops_arena *arena, string8 *out, string8 concrete_name) {
     emit_generated_line_directive(arena, out);
-    emit_cstr(arena, out, "extern const reflect ");
+    emit_cstr(arena, out, "extern const i_reflect ");
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "_reflect;\n");
     emit_cstr(arena, out, "#define ");
@@ -11909,7 +12295,7 @@ static void emit_struct_reflection_extern(memops_arena *arena, string8 *out, str
 static void emit_enum_reflection(memops_arena *arena, string8 *out, EnumDecl *decl) {
     if (decl->is_external) return;
     emit_generated_line_directive(arena, out);
-    emit_cstr(arena, out, "static const reflect_value reflect_values_");
+    emit_cstr(arena, out, "static const i_reflect_value i_reflect_values_");
     emit_string8(arena, out, decl->name);
     emit_cstr(arena, out, "[] = {\n");
     for (i32 i = 0; i < decl->items.length; i++) {
@@ -11923,7 +12309,7 @@ static void emit_enum_reflection(memops_arena *arena, string8 *out, EnumDecl *de
         emit_cstr(arena, out, "},\n");
     }
     emit_cstr(arena, out, "};\n");
-    emit_cstr(arena, out, "const reflect ");
+    emit_cstr(arena, out, "const i_reflect ");
     emit_string8(arena, out, decl->name);
     emit_cstr(arena, out, "_reflect = {");
     emit_string8_as_c_string(arena, out, decl->name);
@@ -11932,18 +12318,18 @@ static void emit_enum_reflection(memops_arena *arena, string8 *out, EnumDecl *de
     emit_cstr(arena, out, "), ");
     emit_cstr(arena, out, "(u64)__alignof__(");
     emit_string8(arena, out, decl->name);
-    emit_cstr(arena, out, "), Reflect_Enum, ");
+    emit_cstr(arena, out, "), I_Reflect_Enum, ");
     char count_buf[32];
     snprintf(count_buf, sizeof(count_buf), "%llu", (unsigned long long)decl->items.length);
     emit_cstr(arena, out, count_buf);
-    emit_cstr(arena, out, ", {.values = reflect_values_");
+    emit_cstr(arena, out, ", {.values = i_reflect_values_");
     emit_string8(arena, out, decl->name);
     emit_cstr(arena, out, "}};\n\n");
 }
 
 static void emit_enum_reflection_extern(memops_arena *arena, string8 *out, EnumDecl *decl) {
     emit_generated_line_directive(arena, out);
-    emit_cstr(arena, out, "extern const reflect ");
+    emit_cstr(arena, out, "extern const i_reflect ");
     emit_string8(arena, out, decl->name);
     emit_cstr(arena, out, "_reflect;\n");
     emit_cstr(arena, out, "#define ");

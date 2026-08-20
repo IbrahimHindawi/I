@@ -44,6 +44,7 @@ class Case:
     expected_stdout: str
     extra_files: tuple[tuple[str, str], ...] = ()
     generated_contains: tuple[str, ...] = ()
+    generated_missing: tuple[str, ...] = ()
     header_contains: tuple[str, ...] = ()
 
 
@@ -200,7 +201,20 @@ main: proc()->i32 = {
 }
 ''',
         expected_stdout="a 3 4 1.500000 hi\nPayload{x: 7, y: 2.500000}\nfield[1] = y\n9\n{} stays raw\n",
-        generated_contains=("print_i32(3);", "print_u64(count);", "print_f32(1.5);", "print_ptr_const_char(label);", "print_Payload(p);", "print_ptr_const_char(Payload_reflect.variant.fields[i].name);", "printf(\"{} stays raw\\n\");"),
+        # A line whose arguments all have a printf conversion collapses to one
+        # call: nine calls became one, and the null guard keeps print_cstr's
+        # "(null)" behaviour that a bare %s would have made undefined.
+        generated_contains=(
+            "printf(\"a %d %llu %f %s\\n\", 3, count, 1.5, ((label != 0) ? label : \"(null)\"));",
+            "printf(\"field[%d] = %s\\n\", i, ((Payload_reflect.variant.fields[i].name != 0) ? Payload_reflect.variant.fields[i].name : \"(null)\"));",
+            # print<Payload> has no conversion, so that line keeps the per-piece
+            # expansion -- a user's own printer must still be reachable.
+            "print_Payload(p);",
+            # A real printf is not a printfmt and is left alone.
+            "printf(\"{} stays raw\\n\");",
+        ),
+        # The folded line must not also emit the per-piece calls it replaced.
+        generated_missing=("print_u64(count);", "print_ptr_const_char(label);"),
     ),
     Case(
         name="reflection_print_runtime",
@@ -410,7 +424,8 @@ main: proc(argc: i32, argv: **char)-> i32 = {
         expected_stdout="2\n2\n4.000000\n8128.000000\n",
         generated_contains=(
             "#include <reflect.h>",
-            "print_i32(add_i32(1, 1));",
+            # printfmt over an all-scalar line lowers to one printf call.
+            "printf(\"%d\\n\", add_i32(1, 1));",
             "payload y = add_payload(((payload){.x = 2}), ((payload){.x = 2}));",
             "payload result = sum_payload(payloads.data, payloads.length);",
         ),
@@ -632,26 +647,6 @@ cinclude "stdio.h"
 
 import "C:/devel/i/src/std/reflect.i"
 
-reflect_field_is_pointer:proc(field:*const reflect_field)->i32 = { external; }
-reflect_field_is_array:proc(field:*const reflect_field)->i32 = { external; }
-reflect_field_is_generic:proc(field:*const reflect_field)->i32 = { external; }
-reflect_count_fields_with_kind:proc(type:*const reflect, kind:i32)->u64 = { external; }
-reflect_find_field_with_kind:proc(type:*const reflect, kind:i32)->*const reflect_field = { external; }
-reflect_next_field_with_kind:proc(type:*const reflect, kind:i32, after:*const reflect_field)->*const reflect_field = { external; }
-reflect_field_index:proc(type:*const reflect, field:*const reflect_field, fallback:u64)->u64 = { external; }
-reflect_find_field_by_offset:proc(type:*const reflect, offset:u64)->*const reflect_field = { external; }
-reflect_field_end_offset:proc(field:*const reflect_field)->u64 = { external; }
-reflect_find_field_containing_offset:proc(type:*const reflect, offset:u64)->*const reflect_field = { external; }
-reflect_field_ptr:proc(base:*void, field:*const reflect_field)->*void = { external; }
-reflect_field_const_ptr:proc(base:*const void, field:*const reflect_field)->*const void = { external; }
-reflect_field_copy:proc(dst_base:*void, src_base:*const void, field:*const reflect_field)->i32 = { external; }
-reflect_field_zero:proc(base:*void, field:*const reflect_field)->i32 = { external; }
-reflect_field_copy_by_name:proc(dst_base:*void, src_base:*const void, type:*const reflect, name:*const char)->i32 = { external; }
-reflect_field_zero_by_name:proc(base:*void, type:*const reflect, name:*const char)->i32 = { external; }
-reflect_field_has_attr:proc(field:*const reflect_field, attr:*const char)->i32 = { external; }
-reflect_count_fields_with_attr:proc(type:*const reflect, attr:*const char)->u64 = { external; }
-reflect_find_field_with_attr:proc(type:*const reflect, attr:*const char)->*const reflect_field = { external; }
-reflect_next_field_with_attr:proc(type:*const reflect, attr:*const char, after:*const reflect_field)->*const reflect_field = { external; }
 
 Color:enum = {
     Red = 1,
@@ -796,7 +791,7 @@ main:proc()->i32={
 ''',
         expected_stdout="Color 4 4 3 Red 1 Green 2 Blue 3 Player 6 kind i32 editor,serialize 1 2 78 hp hp Green 2 Blue 1 1 0 2 1 0 hp 1 hp score 1 name ptr unknown Green 3 0 1 1 1 0 3 1 1 1 0 bag 1 kind hp score 1 8 hp 1 78 1 1 1 3 hp 1 Blue 1 1 78 1 0 0 1 123 1 0 0\n",
         generated_contains=("#define I_TEST_HP 77", "typedef enum Color", "Player_reflect", "reflect_type_kind_name", "reflect_field_is_pointer", "reflect_field_is_array", "reflect_field_is_generic", "reflect_count_fields_with_kind", "reflect_find_field_with_kind", "reflect_next_field_with_kind", "reflect_find_field", "reflect_field_index", "reflect_find_field_index", "reflect_field_at", "reflect_find_field_by_offset", "reflect_field_end_offset", "reflect_find_field_containing_offset", "reflect_field_ptr", "reflect_field_const_ptr", "reflect_field_copy", "reflect_field_zero", "reflect_field_copy_by_name", "reflect_field_zero_by_name", "reflect_field_has_attr", "reflect_count_fields_with_attr", "reflect_find_field_with_attr", "reflect_next_field_with_attr", "reflect_value_at", "reflect_name_from_value", "reflect_value_from_name", "editor,serialize", "editor,path\\\\\\\\tag", "is_const"),
-        header_contains=("extern const reflect Player_reflect;", "typedef enum Color"),
+        header_contains=("extern const i_reflect Player_reflect;", "typedef enum Color"),
     ),
     Case(
         name="reflect_angle_syntax",
@@ -892,7 +887,7 @@ main:proc()->i32={
 ''',
         expected_stdout="18 2 4 16 4 3 4 1 1 2 0 11\n",
         generated_contains=("i32 values[4];", "while (", "switch (", "WINCALL platform_add", "TWICE(4)", "#line 1 ", "&(nodes[2]) - nodes", "pointer_depth", "array_count"),
-        header_contains=("extern const reflect Packet_reflect;", "i32 values[4];", "WINCALL platform_add"),
+        header_contains=("extern const i_reflect Packet_reflect;", "i32 values[4];", "WINCALL platform_add"),
     ),
     Case(
         name="gin_c_surface",
@@ -1300,6 +1295,10 @@ def main() -> int:
         for needle in case.generated_contains:
             if needle not in generated:
                 print(f"{case.name}: generated C missing {needle!r}")
+                return 1
+        for needle in case.generated_missing:
+            if needle in generated:
+                print(f"{case.name}: generated C should no longer contain {needle!r}")
                 return 1
         if not h_path.exists():
             print(f"{case.name}: generated header missing")
@@ -2967,7 +2966,7 @@ main:proc()->i32 = {
     if "I_REFLECT_TYPES_DEFINED" in line_map_generated:
         print("generated_line_map: reflection runtime helpers should live in std/reflect.h, not generated source")
         return 1
-    generated_struct_reflect_marker = '#line 1 "<generated>"\nstatic const reflect_field reflect_fields_Box_i32'
+    generated_struct_reflect_marker = '#line 1 "<generated>"\nstatic const i_reflect_field i_reflect_fields_Box_i32'
     if generated_struct_reflect_marker not in line_map_generated:
         print("generated_line_map: expected struct reflection metadata to be marked as generated code")
         return 1
@@ -2989,7 +2988,7 @@ main:proc()->i32 = {
     if "I_REFLECT_TYPES_DEFINED" in line_map_header:
         print("generated_line_map: reflection runtime helpers should live in std/reflect.h, not generated header")
         return 1
-    generated_reflect_extern_marker = '#line 1 "<generated>"\nextern const reflect Box_i32_reflect;'
+    generated_reflect_extern_marker = '#line 1 "<generated>"\nextern const i_reflect Box_i32_reflect;'
     if generated_reflect_extern_marker not in line_map_header:
         print("generated_line_map: expected reflection externs to be marked as generated code")
         return 1
@@ -6179,6 +6178,154 @@ main:proc(meta:*const CMeta)->i32 = {
         print(type_external_declared.stdout)
         return 1
     print("ok type_external_field_access")
+
+    # Collapsing the two reflect records into one cost a type error: a struct's
+    # table and an enum's table are both `reflect` now, so nothing stopped
+    # `Point<>.variant.values`. That does not fail loudly -- both arms start with
+    # a `const char *name`, so it reinterprets the fields pointer and yields a
+    # plausible wrong string (`Point<>.variant.values[0].name` printed "x").
+    # `Type<>` names its owner, so the kind is statically known at every such
+    # site and the diagnostic is recoverable without giving up the single record.
+    variant_arm_i = TEST_DIR / "type_reflect_variant_arm.i"
+    variant_arm_c = TEST_DIR / "type_reflect_variant_arm.c"
+    reflect_import = 'import "%s"' % (ROOT / "src" / "std" / "reflect.i").as_posix()
+    for decl, owner, wrong, right in (
+        ("Point:struct = { x:i32; y:i32; }", "Point", "values", "fields"),
+        ("Word:union = { i:i32; f:f32; }", "Word", "values", "fields"),
+        ("Color:enum = { Red, Green }", "Color", "fields", "values"),
+    ):
+        variant_arm_i.write_text(
+            "%s\n%s\nmain:proc()->i32 = { return cast(%s<>.variant.%s[0].name != null, i32); }\n"
+            % (reflect_import, decl, owner, wrong),
+            encoding="utf-8", newline="\n")
+        variant_arm = run([str(I_EXE), "check", str(variant_arm_i)])
+        if (
+            variant_arm.returncode == 0
+            or "holds '%s', not '%s'" % (right, wrong) not in variant_arm.stdout
+            or "reinterprets the pointer" not in variant_arm.stdout
+        ):
+            print("type_reflect_variant_arm: %s should reject the %s arm" % (owner, wrong))
+            print(variant_arm.stdout)
+            return 1
+
+    # The live arm stays legal, and so does a `*const reflect` parameter, whose
+    # kind is only known at run time -- that is what reflect_fields() and
+    # reflect_values() in std/reflect.h are for. Over-firing here would make the
+    # merged record unusable for the very code it was merged to simplify.
+    variant_arm_i.write_text(
+        reflect_import + """
+Point:struct = { x:i32; y:i32; }
+Color:enum = { Red, Green }
+walk:proc(meta:*const reflect)->u64 = {
+    if (meta[0].kind == reflect_kind_enum) { return meta[0].variant.values[0].name != null ? 1 : 0; }
+    return meta[0].variant.fields[0].offset;
+}
+main:proc()->i32 = {
+    return cast(walk(Point<>.&) + walk(Color<>.&) + Point<>.variant.fields[0].offset, i32);
+}
+""",
+        encoding="utf-8", newline="\n")
+    variant_arm_ok = run([str(I_EXE), str(variant_arm_i), str(variant_arm_c)])
+    if variant_arm_ok.returncode != 0:
+        print("type_reflect_variant_arm: the live arm and a runtime-kind parameter should both be accepted")
+        print(variant_arm_ok.stdout)
+        return 1
+    print("ok type_reflect_variant_arm")
+
+    # Reflection access used to be checked only when the program imported
+    # std/reflect.i, because the diagnostic fired for declared types only. But
+    # `Type<>` needs no import, so ordinary code went unchecked and a stale field
+    # name passed straight to C. The reflect record's field set is compiler
+    # knowledge, so the check must not depend on the user declaring it.
+    reflect_noimport_i = TEST_DIR / "type_reflect_no_import.i"
+    reflect_noimport_i.write_text(
+        "Plain:struct = { a:i32; }\n"
+        "main:proc()->i32 = { return cast(Plain<>.field_count, i32); }\n",
+        encoding="utf-8", newline="\n")
+    reflect_noimport = run([str(I_EXE), "check", str(reflect_noimport_i)])
+    if (
+        reflect_noimport.returncode == 0
+        or "has no field 'field_count'" not in reflect_noimport.stdout
+    ):
+        print("type_reflect_no_import: a stale reflect field must be caught without importing std/reflect.i")
+        print(reflect_noimport.stdout)
+        return 1
+    # The live spelling still compiles, so the check is not simply refusing every
+    # reflect access when the import is absent.
+    reflect_noimport_i.write_text(
+        "Plain:struct = { a:i32; }\n"
+        "main:proc()->i32 = { return cast(Plain<>.count, i32); }\n",
+        encoding="utf-8", newline="\n")
+    reflect_noimport_ok = run([str(I_EXE), "check", str(reflect_noimport_i)])
+    if reflect_noimport_ok.returncode != 0:
+        print("type_reflect_no_import: the live field should still check without the import")
+        print(reflect_noimport_ok.stdout)
+        return 1
+    print("ok type_reflect_no_import")
+
+
+    # The reflect runtime's C names carry an `i_` prefix so they do not squat on
+    # the C global namespace of every program -- `reflect` unprefixed is a GLSL
+    # builtin and a plausible name in any vector-math library an engine links.
+    # I source keeps the short spelling, and src/main.c holds the closed list
+    # that maps between them. A closed list rather than a "starts with reflect"
+    # rule, because a blanket rule would rewrite a user's own external binding
+    # and break its link -- but a closed list can fall behind the headers, so it
+    # is re-derived here and compared.
+    reflect_h = (ROOT / "src" / "std" / "reflect.h").read_text(encoding="utf-8")
+    reflect_i = (ROOT / "src" / "std" / "reflect.i").read_text(encoding="utf-8")
+    main_c = (ROOT / "src" / "main.c").read_text(encoding="utf-8")
+
+    # C owns only the record layouts now -- the emitted tables are C initialisers
+    # of them. Everything else the runtime puts in the C namespace is declared in
+    # std/reflect.i: the helpers, which are ordinary I procs, and the constants.
+    expected_names = set()
+    expected_names |= set(re.findall(r"\}\s*i_(reflect\w*);", reflect_h))
+    expected_names |= set(re.findall(r"^struct i_(reflect\w*) \{", reflect_h, re.M))
+    expected_names |= set(re.findall(r"^(reflect_\w+):\s*proc", reflect_i, re.M))
+    expected_names |= set(re.findall(r"^(reflect_\w+):\s*(?:const\s+)?i32\s*=", reflect_i, re.M))
+
+    table_match = re.search(
+        r"static const char \*g_reflect_runtime_names\[\] = \{(.*?)\};", main_c, re.S
+    )
+    if not table_match:
+        print("reflect_runtime_names: the mapping table is missing from src/main.c")
+        return 1
+    table_names = set(re.findall(r'"([^"]+)"', table_match.group(1)))
+
+    missing = sorted(expected_names - table_names)
+    extra = sorted(table_names - expected_names)
+    if missing or extra:
+        print("reflect_runtime_names: the C-name mapping has drifted from std/reflect.{h,i}")
+        if missing:
+            print("  declared but not mapped (would emit an unprefixed C name):", missing)
+        if extra:
+            print("  mapped but not declared (would rewrite a name nothing defines):", extra)
+        return 1
+
+    # std/reflect.h must not grow helpers again: they belong in std/reflect.i,
+    # where they are type-checked and readable in the language that uses them.
+    header_helpers = re.findall(r"I_REFLECT_INLINE", reflect_h)
+    if header_helpers:
+        print("reflect_runtime_names: std/reflect.h should hold record layouts only,")
+        print("  but it still defines %d inline helper(s)" % len(header_helpers))
+        return 1
+
+    # And the prefix must be the C-legal one. Two leading underscores, or an
+    # underscore followed by an uppercase letter, are reserved to the
+    # implementation for any use.
+    if "__i_reflect" in reflect_h or "_Reflect" in reflect_h.replace("I_Reflect", ""):
+        print("reflect_runtime_names: the prefix must be `i_`, not a reserved `__`/`_U` form")
+        return 1
+    print("ok reflect_runtime_names (%d mapped)" % len(table_names))
+
+    # Collapsing the two reflect records into one cost a type error: a struct's
+    # table and an enum's table are both `reflect` now, so nothing stopped
+    # `Point<>.variant.values`. That does not fail loudly -- both arms start with
+    # a `const char *name`, so it reinterprets the fields pointer and returns a
+    # plausible wrong string (`Point<>.variant.values[0].name` printed "x").
+    # `Type<>` names its owner, so the kind is statically known at every such
+    # site and the diagnostic is recoverable without giving up the single record.
 
     type_init_field_i = TEST_DIR / "type_initializer_field.i"
     type_init_field_c = TEST_DIR / "type_initializer_field.c"

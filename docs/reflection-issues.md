@@ -19,7 +19,9 @@ fix makes the named test fail.
 
 `i_reflect_type` and `i_reflect_enum` are gone. One `reflect` record describes
 every reflected type; `kind` says which, and `variant` holds the payload only
-that kind has. The whole family dropped its `i_` prefix.
+that kind has. In I the family is spelled without a prefix; in the emitted
+C it keeps one, for the namespace reasons under "The C names carry an `i_`
+prefix" below.
 
 ```
 reflect_variant: union = {
@@ -84,6 +86,17 @@ rather than a C error in generated code, or a silent match against a different
 field. This also made the migration compiler-guided: every stale `value_count`
 reported its own file and line.
 
+That was only conditionally true at first, and the condition was the wrong way
+round: the diagnostic fired only for a type the program had *declared*, so it
+required importing `std/reflect.i` — while `Type<>` needs no import at all. Code
+that never imported it, which is the ordinary case, went unchecked. Found when
+the i-learn lessons kept compiling against field names that no longer exist. The
+reflect record's field set is compiler knowledge, not something the user
+supplies, so the check no longer depends on the declaration being in scope.
+
+*Mutation: drop `type_is_reflect_runtime_record` from the field-access branch —
+`type_reflect_no_import` fails.*
+
 ### Enum values stay `i32` (was §5)
 
 I permits negative enum members and reflection round-trips them correctly today.
@@ -98,79 +111,137 @@ This decision does not depend on how `shape.md` §2.6 resolves the enum
 
 *Covered by `017-generics-and-reflection`: `Slot { Empty = -1 }` prints `-1`.*
 
-## 1. The Merge Traded A Type Error For A Runtime Check
+### The wrong variant arm is a diagnostic again
 
-This is the cost of the collapse and it should be written down rather than
-discovered.
+Collapsing the records cost a type error. Before, `*const i_reflect_enum` and
+`*const i_reflect_type` were different types, so handing a struct's table to an
+enum consumer could not be written. Afterwards both were `*const reflect`, and
+`Point<>.variant.values` compiled — and did not fail loudly, because both arms
+begin with a `const char *name`: it reinterpreted the fields pointer and printed
+`"x"`, a plausible wrong answer.
 
-Before, `*const i_reflect_enum` and `*const i_reflect_type` were different types,
-so handing a struct's table to an enum consumer was a compile error. Now both are
-`*const reflect` and the type system permits it. Reading `variant.values` on a
-struct reinterprets the fields pointer.
+That is closed in three places:
 
-The mitigation is in `std/reflect.h`: `reflect_fields()` and `reflect_values()`
-return the arm only when `kind` matches, and null otherwise. njinn was migrated
-to route every arm read through them, so a struct handed to
-`gin_reflect_enum_name` reports `"unknown"` instead of garbage.
+- **Statically**, wherever the kind is known. `Type<>` names its owner, so the
+  compiler resolves that owner's kind and rejects the arm which is not live. It
+  stays silent where it cannot tell — a monomorphised table with no decl under
+  that name, or any base that is not a `Type<>` chain — so it fires only when
+  it is certain.
+- **At run time**, for a `*const reflect` that was passed in and carries no
+  static kind. `reflect_fields()` and `reflect_values()` in `std/reflect.h`
+  return the arm only when `kind` matches, null otherwise. njinn routes every
+  arm read through them.
+- **In the editor**, completion after `Type<>.variant.` offers only the live arm,
+  so the error is hard to reach by accident rather than merely recoverable once
+  hit. The diagnostic also carries its fix as a note over JSON, not only in the
+  terminal.
 
-*Mutation: read the arm unchecked in `gin_reflect_enum_name` —
-`resops_reflect_selftest` fails with `returned '', want 'unknown'`.*
+*Mutations: drop the static check — `type_reflect_variant_arm` fails; read the
+arm unchecked in `gin_reflect_enum_name` — `resops_reflect_selftest` fails with
+`returned '', want 'unknown'`; offer both arms in completion — `lsp_semantics`
+fails.*
 
-**Open question.** Whether the compiler should enforce this rather than relying on
-consumers using the right helper. A `reflect` whose `kind` is known statically —
-which it always is at a `Type<>` site — could in principle reject
-`Point<>.variant.values` outright. That would recover the compile-time error
-without giving up the single record. Not implemented; worth deciding before much
-more code is written against the variant.
+### Reflection data is always emitted — nothing is elided
 
-## 2. Tables Are Emitted Unconditionally
+Every struct, union and enum gets a table whether or not anything reflects it.
+Measured in njinn: **155 tables over 1,737 of 29,542 generated lines (5.9%)**, and
+about **558 bytes of binary per table**, so roughly 200 KB in total.
 
-Every struct, union and enum gets a table whether or not anything reflects it:
+Two beliefs about this turned out to be wrong and are worth recording so they are
+not repeated. The C compiler cannot eliminate an unused table: `const i_reflect
+Point_reflect` has external linkage, so any single translation unit must assume
+another references it. And the linker does not pick up the slack either —
+measured, an unreferenced table is still in the binary at `-O0` **and** `-O2`.
 
-    Unused: struct = { z: i32; }   // never reflected
-    // Unused_reflect is emitted anyway
+Kept anyway, and not because it is free. The alternative is whole-program use
+analysis, and reachability now runs through the nested `info` links, so a table
+can be live only because another type's field points at it. Getting that wrong
+means reflection silently missing at run time, which is the exact failure class
+this project exists to prevent. Trading a correctness risk for 200 KB in a
+program that ships textures and audio is a bad trade.
 
-In the njinn engine that is roughly 1% of generated lines. Not a crisis, and it
-is `const` data a linker can often drop. But it is unconditional, with no way to
-opt a type out — and the nested `info` links now make the set of live tables
-harder to compute, since a table can be reachable only through another type's
-field.
+If size ever does matter there is a cheap escape that needs no compiler work:
+`-fdata-sections` plus `/OPT:REF` lets the linker collect them. A build-flag
+change, not a language change.
 
-**Resolution.** Leave it and document that reflection data is always present;
-emit only for types actually reflected, which needs a whole-program use analysis
-including link reachability; or add an opt-in marker on the type. The middle
-option is the most likely to be worth it, since the analysis pass is the same one
-the module work would need.
+### The accessor pair is not an asymmetry — retracted
 
-## 3. Two Spellings For The Accessor
+An earlier entry here claimed `Type<>.count` and `Type<>.&` were two
+inconsistent spellings and a wart for newcomers. That was wrong, and it came from
+pattern-matching "two spellings" without checking they were the language's
+ordinary two.
 
-`Type<>.count` reads a field directly; `Type<>.&` produces the address to pass
-along. Both are in use and the relationship between them is not obvious from the
-syntax — the first looks like member access on a value, the second like taking
-the address of something that was never named.
+`.&` is I's universal address-of postfix — `g_fx.&`, `desc.&`, `mapped.&` are
+everywhere in real code. `.count` is universal member access. `Type<>` yields a
+value, and both accessors then behave exactly as they do on any other value.
+There is nothing special to learn.
 
-Cosmetic, but this is the surface a student meets first, so it is worth deciding
-whether the asymmetry is intended.
+The one genuine novelty is `<>` itself, and once it is known everything
+downstream follows the normal rules. No change made, and none wanted.
 
-## 4. `reflect` Occupies A Common Word In Every Program's C Namespace
+### The C names carry an `i_` prefix
 
-The generated C defines `struct reflect`, `reflect_field`, `reflect_value` and
-`reflect_variant` in every translation unit, since tables are emitted
-unconditionally. `reflect` is a plausible identifier for third-party C to use.
+Reflection tables are emitted unconditionally, so `std/reflect.h` puts its
+contents into the C global namespace of every I program. `reflect` unprefixed is
+a plausible identifier for third-party C to claim — it is a GLSL builtin, and
+any vector-math library an engine links is fair game. Nothing collided in
+njinn's whole vendor set (cgltf, stb, miniaudio, jsmn, cglm, D3D11), but doing
+this before third parties depend on the spelling is far cheaper than after.
 
-Nothing has collided yet. If it does, the fix is to keep the C-side symbols
-prefixed and map the I-side spelling onto them, which is a change to one emitter
-and one header rather than to any user code.
+So the C side is `i_reflect`, `i_reflect_field`, `i_reflect_fields()`,
+`I_Reflect_Struct`, and so on, while **I source keeps the short spelling**. The
+compiler maps between them when it emits.
 
-## Suggested Order
+Not `__i_`. C reserves every identifier beginning with two underscores, or an
+underscore followed by an uppercase letter, to the implementation for any use.
+Buying namespace hygiene with undefined behaviour would contradict the one
+correctness claim the backend actually makes.
 
-1. **§1's open question** — whether static `kind` knowledge should make the wrong
-   arm a compile error. This is the one place the merge is currently weaker than
-   what it replaced.
-2. **§2, unconditional tables** — the whole-program analysis overlaps the module
-   work.
-3. **§3 and §4** whenever convenient.
+The mapping is a **closed list of 55 names**, not a "starts with `reflect`" rule.
+A blanket rule would silently rewrite a user's own
+`reflect_normal: proc = { external; }` into `i_reflect_normal` and break the link
+against the C function they meant to bind — the language must never rename
+someone's external bindings based on a prefix. A closed list can fall behind the
+headers instead, so `reflect_runtime_names` re-derives it from `std/reflect.h`
+and `std/reflect.i` on every run and fails on any difference in either
+direction.
 
-Each of these should get a discriminating test in the execute suite before it is
-called done, per `compiler-hardening.md`. `017-generics-and-reflection.i` is the
-place they belong, and every item under "Settled" above already has one.
+*Mutation: drop one name from the table — `reflect_runtime_names` fails with
+"declared but not mapped".*
+
+### The helpers are written in I, not bound from C
+
+`std/reflect.h` used to define 41 `static inline` helpers, and `std/reflect.i`
+mirrored a subset of them as `external` declarations. They are all pure logic
+— null checks, kind compares, loops over the arrays the compiler emitted, one
+small attribute tokeniser — so a C header was the wrong home for them. They are
+now ordinary I procs in `std/reflect.i`, and the header holds record layouts
+only.
+
+Three things this bought. The hand-written `external` declarations are gone, and
+with them the chance of a signature drifting from its definition with nothing to
+catch it. The helpers are type-checked. And a reader who wants to know what
+`reflect_fields` does can open the file and see it, in the language that uses it
+— which matters most for i-learn, where the lesson is about reflection being
+ordinary data and the tool that reads it was hidden in C.
+
+C still owns the record layouts, and has to: the compiler emits its tables as C
+initialisers of those types, so a definition on the I side would collide with the
+header's.
+
+*Covered by `enum_reflect_preprocessor`, which asserts on the results of all 41
+helpers and passes unchanged against the I implementations; and by
+`reflect_runtime_names`, which now also fails if the header grows a helper back.*
+
+## Nothing Open
+
+Every item this document opened has been settled. The natural next questions, if
+reflection is picked up again, are the ones it never raised: whether reflect
+tables should be reachable by name at run time (there is still no
+`i_reflect_find_type`, so a walk can recurse through `info` but cannot look a
+type up from a string), and whether `<>` should extend to anything beyond
+structs, unions and enums.
+
+Each would need a discriminating test in the execute suite before being called
+done, per `compiler-hardening.md`. `017-generics-and-reflection.i` is where they
+belong, and every item under "Settled" above already has one.

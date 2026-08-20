@@ -269,6 +269,10 @@ main:proc()->i32 = {{
     payload_type_field:i32 = Payload.;
     payload_reflect_field:*const char = Payload<>.;
     kind_reflect_field:u64 = Kind<>.;
+    payload_variant_arm:u64 = Payload<>.variant.;
+    kind_variant_arm:u64 = Kind<>.variant.;
+    payload_variant_member:u64 = Payload<>.variant.fields[0].;
+    kind_variant_member:u64 = Kind<>.variant.values[0].;
     call_struct_field:i32 = consume_payload({{ . }});
     payload_array:Array<Payload> = Array<Payload>r;
     payload_array_empty:Array<Payload> = Array<Payload>;
@@ -2037,6 +2041,111 @@ main:proc()->i32 = {
         print("lsp: expected Kind<>. completion to offer the same merged reflect members a struct does")
         print(reflect_enum_items)
         return 1
+    # `variant` is a union and the compiler rejects the arm that is not live for
+    # the owner's kind, so completion must offer only that arm. Suggesting both
+    # would propose something that cannot compile.
+    def reflect_completion_names(marker: str) -> list[str]:
+        marker_line = next(i for i, line in enumerate(completion_context_lines) if marker in line)
+        marker_col = completion_context_lines[marker_line].rindex(".") + 1
+        return [
+            item.name
+            for item in lsp.reflect_field_completions_at(
+                workspace, completion_context_doc, marker_line, marker_col
+            )
+        ]
+
+    struct_arm = reflect_completion_names("payload_variant_arm")
+    enum_arm = reflect_completion_names("kind_variant_arm")
+    if struct_arm != ["fields"] or enum_arm != ["values"]:
+        print("lsp: expected <>.variant. to offer only the arm live for the owner's kind")
+        print(f"struct offered {struct_arm}, enum offered {enum_arm}")
+        return 1
+
+    # Through the arm, the member list is the field or value record itself --
+    # including `info`, the nested link a recursive walk needs.
+    struct_member = reflect_completion_names("payload_variant_member")
+    enum_member = reflect_completion_names("kind_variant_member")
+    if (
+        "offset" not in struct_member
+        or "info" not in struct_member
+        or "value" in struct_member
+        or enum_member != ["name", "value"]
+    ):
+        print("lsp: expected <>.variant.fields[0]. and .values[0]. to offer their record members")
+        print(f"fields offered {struct_member}, values offered {enum_member}")
+        return 1
+
+    # The keyword and builtin-type sets are a hand-maintained mirror of the
+    # compiler's, and they had drifted: b32 and usize are builtins, goto, static,
+    # volatile and label are keywords, and the reflect records are compiler-known
+    # types. All of them highlighted as plain identifiers.
+    token_kinds = {
+        "reflect": "type",
+        "reflect_field": "type",
+        "reflect_value": "type",
+        "b32": "type",
+        "usize": "type",
+        "i32": "type",
+        "goto": "keyword",
+        "label": "keyword",
+        "static": "keyword",
+        "volatile": "keyword",
+        "proc": "keyword",
+    }
+    for ident, want in token_kinds.items():
+        got = lsp.semantic_token_kind(
+            workspace, completion_context_doc, 0, ident, "    " + ident + " ", 4
+        )
+        if got != want:
+            print("lsp: %r classified as %r, expected %r" % (ident, got, want))
+            return 1
+    # An ordinary name must not be swept up by those sets.
+    if lsp.semantic_token_kind(
+        workspace, completion_context_doc, 0, "reflectory", "    reflectory ", 4
+    ) == "type":
+        print("lsp: an ordinary identifier was classified as a builtin type")
+        return 1
+    print("ok lsp_token_kinds")
+
+    # The standard library ships next to the compiler, not beside the file that
+    # imports it, and import resolution only ever tried the importing file's own
+    # directory. Every `import "std/..."` therefore reported a missing import and
+    # lost every symbol behind it -- njinn's pch.i alone imports std eight times.
+    std_import_i = TEST_DIR / "lsp_std_import.i"
+    std_import_i.write_text(
+        'import "std/reflect.i"\n'
+        "Point:struct = { x:i32; }\n"
+        "main:proc()->i32 = {\n"
+        "    f:*const reflect_field = reflect_fields(Point<>.&);\n"
+        "    return f != null ? 1 : 0;\n"
+        "}\n",
+        encoding="utf-8", newline="\n",
+    )
+    std_import_workspace = lsp.Workspace()
+    std_import_doc = std_import_workspace.open_path(std_import_i)
+    std_import_missing = [d.message for d in std_import_doc.diagnostics if "missing import" in d.message]
+    if std_import_missing:
+        print("lsp: a std import should resolve against the compiler's own std directory")
+        print(std_import_missing)
+        return 1
+    # Resolving the import is only useful if its symbols become reachable.
+    if not std_import_workspace.find_symbol("reflect_fields"):
+        print("lsp: symbols from a resolved std import should be indexed")
+        return 1
+    # An import that genuinely does not exist must still be reported, and the
+    # diagnostic must still name what the author wrote.
+    std_import_i.write_text(
+        'import "std/not_a_real_module.i"\nmain:proc()->i32 = { return 0; }\n',
+        encoding="utf-8", newline="\n",
+    )
+    missing_workspace = lsp.Workspace()
+    missing_doc = missing_workspace.open_path(std_import_i)
+    if not any("std/not_a_real_module.i" in d.message for d in missing_doc.diagnostics):
+        print("lsp: a genuinely missing import should still be diagnosed")
+        print([d.message for d in missing_doc.diagnostics])
+        return 1
+    print("ok lsp_std_import")
+
     reflect_completion_server = CaptureServer()
     reflect_completion_server.workspace = workspace
     reflect_completion_server.handle(
