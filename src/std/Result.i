@@ -1,5 +1,6 @@
 cinclude "stdio.h"
 cinclude "stdlib.h"
+import "cstd.i"
 
 Result: struct<T> = {
     ok: bool;

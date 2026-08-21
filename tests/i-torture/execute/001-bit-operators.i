@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 main: proc()->i32 = {
     x: u32 = 0b1010;

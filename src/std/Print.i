@@ -1,4 +1,5 @@
 cinclude "stdio.h"
+import "cstd.i"
 
 print_cstr: proc(text: *const char)->void = {
     if (text == null) {

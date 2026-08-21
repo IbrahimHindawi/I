@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 // InitList, CompoundInit and ZeroInit are three separate expression kinds, and
 // `= {}` is the idiom every declaration in a real program uses. A lowering that

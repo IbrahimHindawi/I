@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 // Conversions are where a lowering can be wrong without being obviously wrong:
 // the program runs, the number is plausible, and it is off by a factor of two

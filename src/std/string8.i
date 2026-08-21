@@ -4,7 +4,6 @@ cinclude "string.h"
 import "memops.i"
 import "Vec.i"
 
-FILE: struct = { external; }
 
 string8: struct = {
     data: *u8;

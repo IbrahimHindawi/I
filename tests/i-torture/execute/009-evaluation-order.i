@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 // Short-circuiting and how many times a subexpression runs are invisible in the
 // result of most expressions, so they need side effects to be observable at all.

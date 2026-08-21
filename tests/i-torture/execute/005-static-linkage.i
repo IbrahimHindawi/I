@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 module_seed: static i32 = 41;
 shared_total: i32 = 0;

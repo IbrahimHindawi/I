@@ -663,7 +663,8 @@ struct StructDecl {
     bool is_generic;
     bool is_union;
     bool is_external;
-    string8 type_param;
+    /* `struct<T>` is one entry; `struct<K, V>` is two. */
+    Vec_string8 type_params;
     Vec_voidptr fields; // Field*
     i32 line;
     i32 col;
@@ -696,10 +697,16 @@ struct ProcDecl {
     bool emit_external_proto;
     bool is_variadic;
     bool is_static;
-    string8 type_param;
+    /* `proc<T>` is one entry; `proc<T, U, V>` is three. A non-generic proc has
+       none. Structs are still single-parameter, so StructDecl keeps a bare
+       string8. */
+    Vec_string8 type_params;
     string8 constraint;
     string8 callconv;
     TypeExpr *angle_type;
+    /* Set instead of angle_type when the declaration wrote more than one, as in
+       `proc<T, U>`. Resolved to type_params in the semantic pass. */
+    Vec_voidptr angle_types; // TypeExpr*
     TypeExpr *generic_pattern;
     Vec_voidptr params; // Param*
     TypeExpr *ret_type;
@@ -1974,14 +1981,31 @@ static Expr *parse_primary(Parser *p) {
                 return parse_postfix(p, e);
             }
 
-            Vec_voidptr args = ptr_array_reserve(p->arena, 2);
-            if (!parser_match(p, Token_RParen)) {
-                do {
-                    Expr *arg = parse_expr(p);
-                    ptr_array_append(p->arena, &args, arg);
-                } while (parser_match(p, Token_Comma));
-                parser_expect(p, Token_RParen, "expected ')'");
+            Expr *operand = parse_expr(p);
+            if (parser_match(p, Token_Comma)) {
+                parser_error_token(
+                    p, parser_peek(p),
+                    string8_equals_cstr(&name, "sizeof")
+                        ? "sizeof takes exactly one operand"
+                        : "alignof takes exactly one operand");
+                /* Swallow the surplus operands so the closing paren is still
+                   found. Reporting and stopping here left the `)` unmatched and
+                   turned one mistake into three cascading parse errors. */
+                do { parse_expr(p); } while (parser_match(p, Token_Comma));
             }
+            parser_expect(p, Token_RParen, "expected ')'");
+            Expr *e = expr_new(
+                p->arena,
+                string8_equals_cstr(&name, "sizeof") ? Expr_SizeofType : Expr_AlignofType
+            );
+            e->inner = operand;
+            e->line = t->line;
+            e->col = t->col;
+            return parse_postfix(p, e);
+        }
+
+        if (false) {
+            Vec_voidptr args = ptr_array_reserve(p->arena, 2);
             Expr *call = expr_new(p->arena, Expr_Call);
             call->name = name;
             call->args = args;
@@ -2779,6 +2803,51 @@ static Stmt *parse_stmt(Parser *p) {
     return null;
 }
 
+/* One attribute slot per declaration: `struct[external]`, `proc[external,
+   WINCALL]`, `enum[external]`.
+
+   The slot already existed on procs, holding a single calling-convention
+   identifier (`platform_add: proc[WINCALL](...)`). This generalises it to a
+   comma-separated list and gives structs and enums the same one.
+
+   The bracket is where `external` belongs, because it says something about the
+   *declaration* -- do not emit it, C already has it -- while the braces are
+   where fields and statements go. Putting it inside the body made
+   `FILE: struct = { external; }` read as a struct with one strange member, and
+   left procs and structs marking the same concept two different ways.
+
+   The old spellings still parse, so the tree can migrate a file at a time.
+
+   The rule for what may live here: an attribute may change how a declaration is
+   lowered; it may not change what the declaration means in I. See
+   docs/attributes.md. */
+typedef struct DeclAttributes {
+    bool is_external;
+    bool emit_external_proto;
+    string8 callconv;
+} DeclAttributes;
+
+static DeclAttributes parse_decl_attributes(Parser *p) {
+    DeclAttributes attrs = {0};
+    if (!parser_match(p, Token_LBracket)) return attrs;
+    do {
+        Token *tok = parser_expect(p, Token_Identifier, "expected attribute name");
+        if (!tok) break;
+        if (string8slice_equals_cstr(tok->text, "external")) {
+            attrs.is_external = true;
+        } else if (string8slice_equals_cstr(tok->text, "external_emit")) {
+            attrs.is_external = true;
+            attrs.emit_external_proto = true;
+        } else {
+            /* Anything else is a calling convention, which is all this slot held
+               before it took a list, so `proc[WINCALL]` keeps working. */
+            attrs.callconv = token_to_string8(p->arena, tok);
+        }
+    } while (parser_match(p, Token_Comma));
+    parser_expect(p, Token_RBracket, "expected ']' after attributes");
+    return attrs;
+}
+
 /* Reads fields up to the closing '}'. Shared by named structs and the anonymous
    struct/union members that C headers use, so both accept the same field forms. */
 static void parse_struct_fields(Parser *p, StructDecl *decl) {
@@ -2852,11 +2921,18 @@ static StructDecl *parse_struct_decl(Parser *p, Token *name_tok, bool is_union) 
     decl->fields = ptr_array_reserve(p->arena, 8);
 
     if (parser_match(p, Token_LAngle)) {
-        Token *param_tok = parser_expect(p, Token_Identifier, "expected type param");
-        decl->type_param = token_to_string8(p->arena, param_tok);
+        decl->type_params = Vec_string8_reserve(p->arena, 2);
+        do {
+            Token *param_tok = parser_expect(p, Token_Identifier, "expected type param");
+            if (!param_tok) break;
+            Vec_string8_append(p->arena, &decl->type_params, token_to_string8(p->arena, param_tok));
+        } while (parser_match(p, Token_Comma));
         decl->is_generic = true;
         parser_expect_generic_close(p);
     }
+
+    DeclAttributes attrs = parse_decl_attributes(p);
+    if (attrs.is_external) decl->is_external = true;
 
     parser_expect(p, Token_Equal, is_union ? "expected '=' after union" : "expected '=' after struct");
     parser_expect(p, Token_LBrace, is_union ? "expected '{' in union" : "expected '{' in struct");
@@ -2985,6 +3061,9 @@ static EnumDecl *parse_enum_decl(Parser *p, Token *name_tok) {
     decl->col = name_tok->col;
     decl->items = ptr_array_reserve(p->arena, 8);
 
+    DeclAttributes enum_attrs = parse_decl_attributes(p);
+    if (enum_attrs.is_external) decl->is_external = true;
+
     parser_expect(p, Token_Equal, "expected '=' after enum");
     parser_expect(p, Token_LBrace, "expected '{' in enum");
     while (!parser_at_block_end(p)) {
@@ -3050,7 +3129,8 @@ static ProcDecl *parse_proc_decl(Parser *p, Token *name_tok) {
 
         if (generic_param_form) {
             Token *param_tok = parser_expect(p, Token_Identifier, "expected type param");
-            decl->type_param = token_to_string8(p->arena, param_tok);
+            decl->type_params = Vec_string8_reserve(p->arena, 1);
+            Vec_string8_append(p->arena, &decl->type_params, token_to_string8(p->arena, param_tok));
             decl->is_generic = true;
             if (parser_match(p, Token_Colon)) {
                 Token *constraint_tok = parser_expect(p, Token_Identifier, "expected constraint");
@@ -3058,15 +3138,25 @@ static ProcDecl *parse_proc_decl(Parser *p, Token *name_tok) {
             }
             parser_expect_generic_close(p);
         } else {
-            decl->angle_type = parse_type(p);
+            TypeExpr *first_angle = parse_type(p);
+            if (parser_peek(p)->kind == Token_Comma) {
+                decl->angle_types = ptr_array_reserve(p->arena, 4);
+                ptr_array_append(p->arena, &decl->angle_types, first_angle);
+                while (parser_match(p, Token_Comma)) {
+                    ptr_array_append(p->arena, &decl->angle_types, parse_type(p));
+                }
+            } else {
+                decl->angle_type = first_angle;
+            }
             parser_expect_generic_close(p);
         }
     }
 
-    if (parser_match(p, Token_LBracket)) {
-        Token *callconv_tok = parser_expect(p, Token_Identifier, "expected call convention name");
-        decl->callconv = token_to_string8(p->arena, callconv_tok);
-        parser_expect(p, Token_RBracket, "expected ']' after call convention");
+    DeclAttributes proc_attrs = parse_decl_attributes(p);
+    if (proc_attrs.callconv.data) decl->callconv = proc_attrs.callconv;
+    if (proc_attrs.is_external) {
+        decl->is_external = true;
+        decl->emit_external_proto = proc_attrs.emit_external_proto;
     }
 
     parser_expect(p, Token_LParen, "expected '(' after proc");
@@ -3536,6 +3626,23 @@ static void semantic_error_name_dup_path(
     return;
 }
 
+static bool preprocessor_define_is_function_like(string8 line) {
+    u64 i = 0;
+    while (i < line.length && (line.data[i] == ' ' || line.data[i] == '\t')) i++;
+    if (i >= line.length || line.data[i] != '#') return false;
+    i++;
+    while (i < line.length && (line.data[i] == ' ' || line.data[i] == '\t')) i++;
+    if (i + 6 > line.length || strncmp((const char *)(line.data + i), "define", 6) != 0) return false;
+    i += 6;
+    if (i < line.length && line.data[i] != ' ' && line.data[i] != '\t') return false;
+    while (i < line.length && (line.data[i] == ' ' || line.data[i] == '\t')) i++;
+    u64 start = i;
+    while (i < line.length && (is_alnum(line.data[i]) || line.data[i] == '_')) i++;
+    if (i == start) return false;
+    /* cpp's rule: the paren must touch the name. A space makes it object-like. */
+    return i < line.length && line.data[i] == '(';
+}
+
 static string8 preprocessor_define_name(memops_arena *arena, string8 line) {
     u64 i = 0;
     while (i < line.length && (line.data[i] == ' ' || line.data[i] == '\t')) i++;
@@ -3739,26 +3846,52 @@ static void semantic_add_program_symbols(Program *prog, Scope *base, Vec_string8
     }
 }
 
-static void semantic_check_expr(Expr *e, Scope *scope);
+static bool semantic_builtin_type_name(string8 name);
+static void semantic_check_expr(Expr *e, Scope *scope, Vec_string8 *known_types, Vec_string8 *generic_params);
 
-static void semantic_check_expr(Expr *e, Scope *scope) {
+static void semantic_check_expr(Expr *e, Scope *scope, Vec_string8 *known_types, Vec_string8 *generic_params) {
     if (!e) return;
     if (e->kind == Expr_Number) return;
     if (e->kind == Expr_String || e->kind == Expr_Char) return;
-    if (e->kind == Expr_SizeofType) return;
-    if (e->kind == Expr_AlignofType) return;
+    if (e->kind == Expr_SizeofType || e->kind == Expr_AlignofType) {
+        if (e->inner) {
+            semantic_check_expr(e->inner, scope, known_types, generic_params);
+            return;
+        }
+        /* A bare name is the ambiguous case: `sizeof(gin_vertex)` and
+           `sizeof(line)` are the same shape, and only the symbol tables can
+           separate them. Values are consulted first, so a local shadowing a type
+           name resolves the way C resolves it, and so that a variable in
+           SHOUTING_CASE is not mistaken for a foreign C type by the ALL_CAPS
+           heuristic in semantic_builtin_type_name. Compound operands keep the
+           old silence for now; the ambiguity only exists for a bare name. */
+        if (e->cast_type && e->cast_type->kind == Type_Name) {
+            string8 n = e->cast_type->name;
+            if (scope_has(&scope->locals, n) ||
+                scope_has(&scope->globals, n) ||
+                scope_has(&scope->procs, n)) {
+                return;
+            }
+            if (semantic_builtin_type_name(n)) return;
+            if (generic_params && scope_has(generic_params, n)) return;
+            if (known_types && scope_has(known_types, n)) return;
+            semantic_error_name(
+                "sizeof operand is neither a type nor a value", n, e->line, e->col);
+        }
+        return;
+    }
     if (e->kind == Expr_ZeroInit) return;
     if (e->kind == Expr_InitList) {
         for (i32 i = 0; i < e->args.length; i++) {
             if (e->designator_kinds.data[i] == InitDesignator_Index) {
-                semantic_check_expr((Expr *)e->designators.data[i], scope);
+                semantic_check_expr((Expr *)e->designators.data[i], scope, known_types, generic_params);
             }
-            semantic_check_expr((Expr *)e->args.data[i], scope);
+            semantic_check_expr((Expr *)e->args.data[i], scope, known_types, generic_params);
         }
         return;
     }
     if (e->kind == Expr_CompoundInit) {
-        semantic_check_expr(e->inner, scope);
+        semantic_check_expr(e->inner, scope, known_types, generic_params);
         return;
     }
     if (e->kind == Expr_Name) {
@@ -3769,78 +3902,65 @@ static void semantic_check_expr(Expr *e, Scope *scope) {
         semantic_error_name("use of undeclared identifier", e->name, e->line, e->col);
     }
     if (e->kind == Expr_Addr) {
-        semantic_check_expr(e->inner, scope);
+        semantic_check_expr(e->inner, scope, known_types, generic_params);
         return;
     }
     if (e->kind == Expr_Index) {
-        semantic_check_expr(e->base, scope);
-        semantic_check_expr(e->index_expr, scope);
+        semantic_check_expr(e->base, scope, known_types, generic_params);
+        semantic_check_expr(e->index_expr, scope, known_types, generic_params);
         return;
     }
     if (e->kind == Expr_Field) {
         if (e->base && e->base->kind == Expr_Name && scope_has(&scope->enum_types, e->base->name)) {
             return;
         }
-        semantic_check_expr(e->base, scope);
+        semantic_check_expr(e->base, scope, known_types, generic_params);
         return;
     }
     if (e->kind == Expr_Cast) {
-        semantic_check_expr(e->inner, scope);
+        semantic_check_expr(e->inner, scope, known_types, generic_params);
         return;
     }
     if (e->kind == Expr_Binary) {
-        semantic_check_expr(e->left, scope);
-        semantic_check_expr(e->right, scope);
+        semantic_check_expr(e->left, scope, known_types, generic_params);
+        semantic_check_expr(e->right, scope, known_types, generic_params);
         return;
     }
     if (e->kind == Expr_Ternary) {
-        semantic_check_expr(e->left, scope);
-        semantic_check_expr(e->right, scope);
-        semantic_check_expr(e->third, scope);
+        semantic_check_expr(e->left, scope, known_types, generic_params);
+        semantic_check_expr(e->right, scope, known_types, generic_params);
+        semantic_check_expr(e->third, scope, known_types, generic_params);
         return;
     }
     if (e->kind == Expr_Call) {
         /* An indirect call has no name to resolve; the callee is checked like any
            other expression. */
         if (e->base) {
-            semantic_check_expr(e->base, scope);
+            semantic_check_expr(e->base, scope, known_types, generic_params);
             for (i32 i = 0; i < e->args.length; i++) {
-                semantic_check_expr((Expr *)e->args.data[i], scope);
+                semantic_check_expr((Expr *)e->args.data[i], scope, known_types, generic_params);
             }
             return;
         }
         if (string8_equals_cstr(&e->name, "printf")) {
             for (i32 i = 0; i < e->args.length; i++) {
-                semantic_check_expr((Expr *)e->args.data[i], scope);
+                semantic_check_expr((Expr *)e->args.data[i], scope, known_types, generic_params);
             }
             return;
         }
-        if (string8_equals_cstr(&e->name, "sizeof")) {
-            if (e->args.length != 1) {
-                semantic_error("sizeof expects exactly 1 argument", e->line, e->col);
-            }
-            semantic_check_expr((Expr *)e->args.data[0], scope);
-            return;
-        }
-        if (string8_equals_cstr(&e->name, "alignof")) {
-            if (e->args.length != 1) {
-                semantic_error("alignof expects exactly 1 argument", e->line, e->col);
-            }
-            semantic_check_expr((Expr *)e->args.data[0], scope);
-            return;
-        }
-        // Imported C headers are not lowered into the I symbol table. Let
-        // unknown calls pass through so macro-heavy C APIs like va_start(),
-        // FAILED(), and COM helper wrappers can still be emitted unchanged.
+        // A `cinclude` does not lower anything into the I symbol table, and no
+        // longer needs to: every C function is declared in I before it can be
+        // called, so an unresolved name here is a mistake rather than interop.
+        // The call path reports it; see type_error_call_undeclared.
         for (i32 i = 0; i < e->args.length; i++) {
-            semantic_check_expr((Expr *)e->args.data[i], scope);
+            semantic_check_expr((Expr *)e->args.data[i], scope, known_types, generic_params);
         }
         return;
     }
 }
 
-static void semantic_check_type(Program *prog, TypeExpr *type, Vec_string8 *known_types, string8 generic_param, const char *source_path);
-static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_string8 *known_types, string8 generic_param, memops_arena *arena);
+static void semantic_check_type(Program *prog, TypeExpr *type, Vec_string8 *known_types, Vec_string8 *generic_params, const char *source_path);
+static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_string8 *known_types, Vec_string8 *generic_params, memops_arena *arena);
 static void semantic_error_control_flow(const char *keyword, const char *context, i32 line, i32 col);
 
 /* Identifiers that are not I keywords but are C keywords. I lowers to C, so a
@@ -3867,7 +3987,21 @@ static bool ident_is_c_reserved(string8 name) {
     return false;
 }
 
+/* `sizeof` and `alignof` are builtins, not identifiers. Declaring a proc named
+   `sizeof` used to pass `i: checked` and then emit `i32 sizeof(i32 n);`, which
+   clang rejects as a syntax error -- the last C-keyword hole left open by
+   ident_is_c_reserved. */
+static bool ident_is_i_builtin(string8 name) {
+    return string8_equals_cstr(&name, "sizeof") ||
+           string8_equals_cstr(&name, "alignof");
+}
+
 static void semantic_check_ident_available(string8 name, i32 line, i32 col) {
+    if (ident_is_i_builtin(name)) {
+        semantic_error_name(
+            "identifier is a builtin operator and cannot be used as a name",
+            name, line, col);
+    }
     if (ident_is_c_reserved(name)) {
         semantic_error_name(
             "identifier is reserved by the C backend and cannot be used as a name",
@@ -3875,10 +4009,10 @@ static void semantic_check_ident_available(string8 name, i32 line, i32 col) {
     }
 }
 
-static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_string8 *known_types, string8 generic_param, memops_arena *arena) {
+static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_string8 *known_types, Vec_string8 *generic_params, memops_arena *arena) {
     if (stmt->kind == Stmt_Var) {
-        semantic_check_type(prog, stmt->type, known_types, generic_param, stmt->source_path);
-        if (stmt->expr) semantic_check_expr(stmt->expr, scope);
+        semantic_check_type(prog, stmt->type, known_types, generic_params, stmt->source_path);
+        if (stmt->expr) semantic_check_expr(stmt->expr, scope, known_types, generic_params);
         semantic_check_ident_available(stmt->name, stmt->line, stmt->col);
         LocalDeclSite *prev = scope_find_local_site(scope, stmt->name);
         if (prev) {
@@ -3894,33 +4028,33 @@ static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_str
                 semantic_error_name("assignment to undeclared identifier", stmt->name, stmt->line, stmt->col);
             }
         }
-        semantic_check_expr(stmt->lhs, scope);
-        semantic_check_expr(stmt->expr, scope);
+        semantic_check_expr(stmt->lhs, scope, known_types, generic_params);
+        semantic_check_expr(stmt->expr, scope, known_types, generic_params);
         return;
     }
     if (stmt->kind == Stmt_Return || stmt->kind == Stmt_Expr) {
-        semantic_check_expr(stmt->expr, scope);
+        semantic_check_expr(stmt->expr, scope, known_types, generic_params);
         return;
     }
     if (stmt->kind == Stmt_For) {
         Scope loop_scope = *scope;
         loop_scope.loop_depth += 1;
         scope_copy_locals(arena, &loop_scope, scope, 16);
-        if (stmt->for_init) semantic_check_stmt(prog, stmt->for_init, &loop_scope, known_types, generic_param, arena);
-        if (stmt->for_cond) semantic_check_expr(stmt->for_cond, &loop_scope);
-        if (stmt->for_step) semantic_check_stmt(prog, stmt->for_step, &loop_scope, known_types, generic_param, arena);
+        if (stmt->for_init) semantic_check_stmt(prog, stmt->for_init, &loop_scope, known_types, generic_params, arena);
+        if (stmt->for_cond) semantic_check_expr(stmt->for_cond, &loop_scope, known_types, generic_params);
+        if (stmt->for_step) semantic_check_stmt(prog, stmt->for_step, &loop_scope, known_types, generic_params, arena);
         for (i32 i = 0; i < stmt->for_body.length; i++) {
-            semantic_check_stmt(prog, (Stmt *)stmt->for_body.data[i], &loop_scope, known_types, generic_param, arena);
+            semantic_check_stmt(prog, (Stmt *)stmt->for_body.data[i], &loop_scope, known_types, generic_params, arena);
         }
         return;
     }
     if (stmt->kind == Stmt_While) {
-        semantic_check_expr(stmt->while_cond, scope);
+        semantic_check_expr(stmt->while_cond, scope, known_types, generic_params);
         Scope loop_scope = *scope;
         loop_scope.loop_depth += 1;
         scope_copy_locals(arena, &loop_scope, scope, 16);
         for (i32 i = 0; i < stmt->while_body.length; i++) {
-            semantic_check_stmt(prog, (Stmt *)stmt->while_body.data[i], &loop_scope, known_types, generic_param, arena);
+            semantic_check_stmt(prog, (Stmt *)stmt->while_body.data[i], &loop_scope, known_types, generic_params, arena);
         }
         return;
     }
@@ -3929,9 +4063,9 @@ static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_str
         loop_scope.loop_depth += 1;
         scope_copy_locals(arena, &loop_scope, scope, 16);
         for (i32 i = 0; i < stmt->while_body.length; i++) {
-            semantic_check_stmt(prog, (Stmt *)stmt->while_body.data[i], &loop_scope, known_types, generic_param, arena);
+            semantic_check_stmt(prog, (Stmt *)stmt->while_body.data[i], &loop_scope, known_types, generic_params, arena);
         }
-        semantic_check_expr(stmt->while_cond, &loop_scope);
+        semantic_check_expr(stmt->while_cond, &loop_scope, known_types, generic_params);
         return;
     }
     if (stmt->kind == Stmt_Break || stmt->kind == Stmt_Continue) {
@@ -3944,43 +4078,43 @@ static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_str
         return;
     }
     if (stmt->kind == Stmt_Switch) {
-        semantic_check_expr(stmt->switch_expr, scope);
+        semantic_check_expr(stmt->switch_expr, scope, known_types, generic_params);
         for (i32 i = 0; i < stmt->switch_cases.length; i++) {
             SwitchCase *sc = (SwitchCase *)stmt->switch_cases.data[i];
-            semantic_check_expr(sc->expr, scope);
+            semantic_check_expr(sc->expr, scope, known_types, generic_params);
             Scope case_scope = *scope;
             case_scope.switch_depth += 1;
             scope_copy_locals(arena, &case_scope, scope, 16);
             for (i32 j = 0; j < sc->body.length; j++) {
-                semantic_check_stmt(prog, (Stmt *)sc->body.data[j], &case_scope, known_types, generic_param, arena);
+                semantic_check_stmt(prog, (Stmt *)sc->body.data[j], &case_scope, known_types, generic_params, arena);
             }
         }
         Scope default_scope = *scope;
         default_scope.switch_depth += 1;
         scope_copy_locals(arena, &default_scope, scope, 16);
         for (i32 i = 0; i < stmt->switch_default_body.length; i++) {
-            semantic_check_stmt(prog, (Stmt *)stmt->switch_default_body.data[i], &default_scope, known_types, generic_param, arena);
+            semantic_check_stmt(prog, (Stmt *)stmt->switch_default_body.data[i], &default_scope, known_types, generic_params, arena);
         }
         return;
     }
     if (stmt->kind == Stmt_If) {
-        semantic_check_expr(stmt->if_cond, scope);
+        semantic_check_expr(stmt->if_cond, scope, known_types, generic_params);
 
         Scope then_scope = *scope;
         scope_copy_locals(arena, &then_scope, scope, 16);
         for (i32 i = 0; i < stmt->if_then_body.length; i++) {
-            semantic_check_stmt(prog, (Stmt *)stmt->if_then_body.data[i], &then_scope, known_types, generic_param, arena);
+            semantic_check_stmt(prog, (Stmt *)stmt->if_then_body.data[i], &then_scope, known_types, generic_params, arena);
         }
 
         if (stmt->if_else_if) {
             Scope else_if_scope = *scope;
             scope_copy_locals(arena, &else_if_scope, scope, 16);
-            semantic_check_stmt(prog, stmt->if_else_if, &else_if_scope, known_types, generic_param, arena);
+            semantic_check_stmt(prog, stmt->if_else_if, &else_if_scope, known_types, generic_params, arena);
         } else {
             Scope else_scope = *scope;
             scope_copy_locals(arena, &else_scope, scope, 16);
             for (i32 i = 0; i < stmt->if_else_body.length; i++) {
-                semantic_check_stmt(prog, (Stmt *)stmt->if_else_body.data[i], &else_scope, known_types, generic_param, arena);
+                semantic_check_stmt(prog, (Stmt *)stmt->if_else_body.data[i], &else_scope, known_types, generic_params, arena);
             }
         }
         return;
@@ -3994,7 +4128,7 @@ static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_str
         Scope label_scope = *scope;
         scope_copy_locals(arena, &label_scope, scope, 16);
         for (i32 i = 0; i < stmt->while_body.length; i++) {
-            semantic_check_stmt(prog, (Stmt *)stmt->while_body.data[i], &label_scope, known_types, generic_param, arena);
+            semantic_check_stmt(prog, (Stmt *)stmt->while_body.data[i], &label_scope, known_types, generic_params, arena);
         }
         return;
     }
@@ -4069,17 +4203,23 @@ static void semantic_check_proc(Program *prog, ProcDecl *proc, Scope *base_scope
     }
     g_diag_import_chain = proc->import_chain;
 
+    /* Proc names went unchecked, so `sizeof: proc(n: i32)->i32` passed
+       `i: checked` and then emitted `i32 sizeof(i32 n);`, which clang rejects
+       as a syntax error -- a diagnostic about generated code the author never
+       wrote. Variables and parameters were already covered. */
+    semantic_check_ident_available(proc->name, proc->line, proc->col);
+
     Scope scope = *base_scope;
     scope.locals = Vec_string8_reserve(arena, 32);
     scope.local_sites = ptr_array_reserve(arena, 32);
 
     if (!proc->is_external) {
-        semantic_check_type(prog, proc->ret_type, known_types, proc->type_param, proc->source_path);
+        semantic_check_type(prog, proc->ret_type, known_types, &proc->type_params, proc->source_path);
     }
     for (i32 i = 0; i < proc->params.length; i++) {
         Param *param = (Param *)proc->params.data[i];
         if (!proc->is_external) {
-            semantic_check_type(prog, param->type, known_types, proc->type_param, proc->source_path);
+            semantic_check_type(prog, param->type, known_types, &proc->type_params, proc->source_path);
         }
         semantic_check_ident_available(param->name, param->line, param->col);
         if (scope_has(&scope.locals, param->name)) {
@@ -4102,7 +4242,7 @@ static void semantic_check_proc(Program *prog, ProcDecl *proc, Scope *base_scope
 
     for (i32 i = 0; i < proc->body.length; i++) {
         Stmt *stmt = (Stmt *)proc->body.data[i];
-        semantic_check_stmt(prog, stmt, &scope, known_types, proc->type_param, arena);
+        semantic_check_stmt(prog, stmt, &scope, known_types, &proc->type_params, arena);
     }
 
     Vec_string8 labels = Vec_string8_reserve(arena, 4);
@@ -4354,6 +4494,7 @@ static void diag_pop_decl_context(const char *prev_source_path, const char *prev
 typedef struct SemanticTypeInfo {
     bool found;
     bool is_generic;
+    i32 type_param_count;
     string8 name;
     const char *kind;
     const char *path;
@@ -4366,19 +4507,19 @@ static SemanticTypeInfo semantic_find_type_info(Program *prog, string8 name) {
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
         if (string8_equals(&decl->name, &name)) {
-            return (SemanticTypeInfo){true, decl->is_generic, decl->name, decl->is_union ? "union" : "struct", decl->source_path, decl->line, decl->col};
+            return (SemanticTypeInfo){true, decl->is_generic, decl->type_params.length, decl->name, decl->is_union ? "union" : "struct", decl->source_path, decl->line, decl->col};
         }
     }
     for (i32 i = 0; i < prog->aliases.length; i++) {
         AliasDecl *decl = (AliasDecl *)prog->aliases.data[i];
         if (string8_equals(&decl->name, &name)) {
-            return (SemanticTypeInfo){true, false, decl->name, "alias", decl->source_path, decl->line, decl->col};
+            return (SemanticTypeInfo){true, false, 0, decl->name, "alias", decl->source_path, decl->line, decl->col};
         }
     }
     for (i32 i = 0; i < prog->enums.length; i++) {
         EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
         if (string8_equals(&decl->name, &name)) {
-            return (SemanticTypeInfo){true, false, decl->name, "enum", decl->source_path, decl->line, decl->col};
+            return (SemanticTypeInfo){true, false, 0, decl->name, "enum", decl->source_path, decl->line, decl->col};
         }
     }
     return (SemanticTypeInfo){0};
@@ -4403,9 +4544,11 @@ static void semantic_error_generic_type_arity(TypeExpr *type, SemanticTypeInfo i
         snprintf(
             message,
             sizeof(message),
-            "generic type '%.*s' expects 1 type arg, got %d",
+            "generic type '%.*s' expects %d type arg%s, got %d",
             (int)type->name.length,
             type->name.data,
+            (int)info.type_param_count,
+            info.type_param_count == 1 ? "" : "s",
             (int)type->args.length
         );
         bool has_note = false;
@@ -4428,12 +4571,14 @@ static void semantic_error_generic_type_arity(TypeExpr *type, SemanticTypeInfo i
         return;
     }
     printf(
-        "%s:%d:%d: semantic error: generic type '%.*s' expects 1 type arg, got %d\n",
+        "%s:%d:%d: semantic error: generic type '%.*s' expects %d type arg%s, got %d\n",
         source_path ? source_path : g_source_path,
         type->line,
         type->col,
         (int)type->name.length,
         type->name.data,
+        (int)info.type_param_count,
+        info.type_param_count == 1 ? "" : "s",
         (int)type->args.length
     );
     diag_note_import_chain();
@@ -4489,16 +4634,16 @@ static void semantic_error_nongeneric_type_args(TypeExpr *type, SemanticTypeInfo
     return;
 }
 
-static void semantic_check_type(Program *prog, TypeExpr *type, Vec_string8 *known_types, string8 generic_param, const char *source_path) {
+static void semantic_check_type(Program *prog, TypeExpr *type, Vec_string8 *known_types, Vec_string8 *generic_params, const char *source_path) {
     if (!type) return;
     if (type->kind == Type_Name) {
         if (semantic_builtin_type_name(type->name)) return;
-        if (generic_param.data && string8_equals(&type->name, &generic_param)) return;
+        if (generic_params && scope_has(generic_params, type->name)) return;
         if (scope_has(known_types, type->name)) return;
         semantic_error_name_path("use of undeclared type", type->name, source_path, type->line, type->col);
     }
     if (type->kind == Type_Ptr || type->kind == Type_Array) {
-        semantic_check_type(prog, type->elem, known_types, generic_param, source_path);
+        semantic_check_type(prog, type->elem, known_types, generic_params, source_path);
         return;
     }
     if (type->kind == Type_Generic) {
@@ -4509,19 +4654,19 @@ static void semantic_check_type(Program *prog, TypeExpr *type, Vec_string8 *know
         if (info.found && !info.is_generic) {
             semantic_error_nongeneric_type_args(type, info, source_path);
         }
-        if (info.found && info.is_generic && type->args.length != 1) {
+        if (info.found && info.is_generic && type->args.length != info.type_param_count) {
             semantic_error_generic_type_arity(type, info, source_path);
         }
         for (i32 i = 0; i < type->args.length; i++) {
-            semantic_check_type(prog, (TypeExpr *)type->args.data[i], known_types, generic_param, source_path);
+            semantic_check_type(prog, (TypeExpr *)type->args.data[i], known_types, generic_params, source_path);
         }
         return;
     }
     if (type->kind == Type_Proc) {
         for (i32 i = 0; i < type->args.length; i++) {
-            semantic_check_type(prog, (TypeExpr *)type->args.data[i], known_types, generic_param, source_path);
+            semantic_check_type(prog, (TypeExpr *)type->args.data[i], known_types, generic_params, source_path);
         }
-        semantic_check_type(prog, type->ret_type, known_types, generic_param, source_path);
+        semantic_check_type(prog, type->ret_type, known_types, generic_params, source_path);
         return;
     }
 }
@@ -4632,11 +4777,48 @@ static void semantic_collect_angle_pattern_params(TypeExpr *type, Vec_string8 *k
 static void semantic_resolve_proc_angle_types(Program *prog, Vec_string8 *known_types, memops_arena *arena) {
     for (i32 i = 0; i < prog->procs.length; i++) {
         ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
+
+        /* `proc<T, U, V>`: every name has to be a fresh parameter. Mixing a
+           parameter with a concrete type would mean a partial specialisation,
+           which has no lowering here, so it is rejected rather than guessed at. */
+        if (decl->angle_types.length > 0) {
+            bool all_params = true;
+            for (i32 a = 0; a < decl->angle_types.length; a++) {
+                TypeExpr *t = (TypeExpr *)decl->angle_types.data[a];
+                if (t->kind != Type_Name || semantic_known_type_name(known_types, t->name)) {
+                    all_params = false;
+                    break;
+                }
+            }
+            if (!all_params) {
+                semantic_error_name_path(
+                    "every name in a multi-parameter generic must be a new type parameter",
+                    decl->name, decl->source_path, decl->line, decl->col);
+                decl->angle_types.length = 0;
+                continue;
+            }
+            decl->type_params = Vec_string8_reserve(arena, decl->angle_types.length);
+            for (i32 a = 0; a < decl->angle_types.length; a++) {
+                TypeExpr *t = (TypeExpr *)decl->angle_types.data[a];
+                for (i32 b = 0; b < decl->type_params.length; b++) {
+                    if (string8_equals(&decl->type_params.data[b], &t->name)) {
+                        semantic_error_name_path("duplicate type parameter",
+                            t->name, decl->source_path, decl->line, decl->col);
+                    }
+                }
+                Vec_string8_append(arena, &decl->type_params, t->name);
+            }
+            decl->is_generic = true;
+            decl->angle_types.length = 0;
+            continue;
+        }
+
         if (!decl->angle_type) continue;
 
         TypeExpr *angle = decl->angle_type;
         if (angle->kind == Type_Name && !semantic_known_type_name(known_types, angle->name)) {
-            decl->type_param = angle->name;
+            decl->type_params = Vec_string8_reserve(arena, 1);
+            Vec_string8_append(arena, &decl->type_params, angle->name);
             decl->is_generic = true;
             decl->angle_type = null;
             continue;
@@ -4646,15 +4828,16 @@ static void semantic_resolve_proc_angle_types(Program *prog, Vec_string8 *known_
         i32 pattern_param_count = 0;
         semantic_collect_angle_pattern_params(angle, known_types, &pattern_param, &pattern_param_count);
         if (pattern_param_count == 1) {
-            decl->type_param = pattern_param;
+            decl->type_params = Vec_string8_reserve(arena, 1);
+            Vec_string8_append(arena, &decl->type_params, pattern_param);
             decl->is_generic = true;
             decl->generic_pattern = angle;
             decl->angle_type = null;
-            semantic_check_type(prog, decl->generic_pattern, known_types, decl->type_param, decl->source_path);
+            semantic_check_type(prog, decl->generic_pattern, known_types, &decl->type_params, decl->source_path);
             continue;
         }
 
-        semantic_check_type(prog, angle, known_types, (string8){0}, decl->source_path);
+        semantic_check_type(prog, angle, known_types, null, decl->source_path);
         string8 suffix = type_mangle_concrete(arena, angle);
         string8 full_name = string8_reserve(arena, decl->name.length + 1 + suffix.length);
         string8_append_bytes(arena, &full_name, decl->name.data, decl->name.length);
@@ -4677,6 +4860,57 @@ static string8 proc_semantic_key(memops_arena *arena, ProcDecl *decl) {
         return key;
     }
     return decl ? decl->name : (string8){0};
+}
+
+/* Two modules that both use a C function must both declare it -- a `cinclude`
+   brings no names into I. Forbidding that makes modules uncomposable: importing
+   any two libraries that each declare `printf` would fail on a conflict neither
+   author can see or resolve. C allows a compatible redeclaration for the same
+   reason, so I does too, but only for `external` procs and only when the
+   signatures are identical. A redeclaration that disagrees is still an error --
+   that is a real conflict about what the C function looks like. */
+static bool type_expr_identical(TypeExpr *a, TypeExpr *b) {
+    if (a == b) return true;
+    if (!a || !b) return false;
+    if (a->kind != b->kind) return false;
+    if (a->is_const != b->is_const) return false;
+    if (a->is_volatile != b->is_volatile) return false;
+    if (a->is_variadic != b->is_variadic) return false;
+    if (!string8_equals(&a->name, &b->name)) return false;
+    if (!string8_equals(&a->array_count, &b->array_count)) return false;
+    if (!type_expr_identical(a->elem, b->elem)) return false;
+    if (!type_expr_identical(a->ret_type, b->ret_type)) return false;
+    if (a->args.length != b->args.length) return false;
+    for (i32 i = 0; i < a->args.length; i++) {
+        if (!type_expr_identical((TypeExpr *)a->args.data[i], (TypeExpr *)b->args.data[i])) return false;
+    }
+    return true;
+}
+
+static bool proc_signatures_identical(ProcDecl *a, ProcDecl *b) {
+    if (!a || !b) return false;
+    if (a->is_generic || b->is_generic) return false;
+    if (a->is_variadic != b->is_variadic) return false;
+    if (a->params.length != b->params.length) return false;
+    if (!type_expr_identical(a->ret_type, b->ret_type)) return false;
+    for (i32 i = 0; i < a->params.length; i++) {
+        Param *pa = (Param *)a->params.data[i];
+        Param *pb = (Param *)b->params.data[i];
+        if (!pa || !pb) return false;
+        if (!type_expr_identical(pa->type, pb->type)) return false;
+    }
+    return true;
+}
+
+static bool proc_is_compatible_external_redeclaration(Program *prog, i32 upto, ProcDecl *decl) {
+    if (!decl || !decl->is_external) return false;
+    for (i32 i = 0; i < upto; i++) {
+        ProcDecl *prev = (ProcDecl *)prog->procs.data[i];
+        if (!prev || !prev->is_external) continue;
+        if (!string8_equals(&prev->name, &decl->name)) continue;
+        return proc_signatures_identical(prev, decl);
+    }
+    return false;
 }
 
 static Vec_string8 semantic_collect_known_type_names(Program *prog, memops_arena *arena) {
@@ -4750,6 +4984,10 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
 
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        /* Type names go through the same reservation as values and procs.
+           `sizeof: struct = {...}` emitted `structdef(sizeof) { ... }` and a
+           reflect table named `sizeof_reflect`, none of which is valid C. */
+        semantic_check_ident_available(decl->name, decl->line, decl->col);
         SemanticDeclSite *prev = semantic_decl_site_find(&type_sites, decl->name);
         if (prev) {
             semantic_error_name_dup_path("duplicate struct declaration", decl->name, decl->source_path, decl->import_chain, decl->line, decl->col, prev->path, prev->import_chain, prev->line, prev->col);
@@ -4857,8 +5095,13 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
         ProcDecl *decl = (ProcDecl *)prog->procs.data[i];
         string8 proc_key = proc_semantic_key(arena, decl);
         SemanticDeclSite *prev = semantic_decl_site_find(&proc_sites, proc_key);
-        if (prev) {
+        bool compatible_external = prev && proc_is_compatible_external_redeclaration(prog, i, decl);
+        if (prev && !compatible_external) {
             semantic_error_name_dup_path("duplicate proc declaration", decl->name, decl->source_path, decl->import_chain, decl->line, decl->col, prev->path, prev->import_chain, prev->line, prev->col);
+        }
+        if (compatible_external) {
+            /* Already declared identically; one entry is enough. */
+            continue;
         }
         Vec_string8_append(arena, &base.procs, decl->name);
         semantic_decl_site_add(arena, &proc_sites, proc_key, decl->source_path, decl->import_chain, decl->line, decl->col);
@@ -4882,7 +5125,7 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
         const char *prev_diag_source_path = null;
         const char *prev_diag_import_chain = null;
         diag_push_decl_context(decl->source_path, decl->import_chain, &prev_diag_source_path, &prev_diag_import_chain);
-        semantic_check_type(prog, decl->type, &structs, (string8){0}, decl->source_path);
+        semantic_check_type(prog, decl->type, &structs, null, decl->source_path);
         diag_pop_decl_context(prev_diag_source_path, prev_diag_import_chain);
     }
 
@@ -4892,9 +5135,13 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
         const char *prev_diag_source_path = null;
         const char *prev_diag_import_chain = null;
         diag_push_decl_context(decl->source_path, decl->import_chain, &prev_diag_source_path, &prev_diag_import_chain);
+        Vec_string8 struct_params = Vec_string8_reserve(arena, 1);
+        if (decl->is_generic && decl->type_params.length > 0) {
+            for (i32 tp = 0; tp < decl->type_params.length; tp++) { Vec_string8_append(arena, &struct_params, decl->type_params.data[tp]); }
+        }
         for (i32 j = 0; j < decl->fields.length; j++) {
             Field *field = (Field *)decl->fields.data[j];
-            semantic_check_type(prog, field->type, &structs, decl->type_param, decl->source_path);
+            semantic_check_type(prog, field->type, &structs, &struct_params, decl->source_path);
         }
         diag_pop_decl_context(prev_diag_source_path, prev_diag_import_chain);
     }
@@ -4904,9 +5151,9 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
         const char *prev_diag_source_path = null;
         const char *prev_diag_import_chain = null;
         diag_push_decl_context(decl->source_path, decl->import_chain, &prev_diag_source_path, &prev_diag_import_chain);
-        semantic_check_type(prog, decl->type, &structs, (string8){0}, decl->source_path);
+        semantic_check_type(prog, decl->type, &structs, null, decl->source_path);
         if (decl->expr) {
-            semantic_check_expr(decl->expr, &base);
+            semantic_check_expr(decl->expr, &base, &structs, null);
         }
         diag_pop_decl_context(prev_diag_source_path, prev_diag_import_chain);
     }
@@ -4918,9 +5165,161 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
 
 typedef struct TypeSub {
     bool has;
-    string8 param;
-    TypeExpr *arg;
+    Vec_string8 params;
+    Vec_voidptr args; // TypeExpr*
 } TypeSub;
+
+static Vec_voidptr *mangle_list_for(string8 mangle);
+static TypeExpr *mangle_type_for(memops_arena *arena, string8 mangle);
+static TypeSub type_sub_one(memops_arena *arena, string8 param, TypeExpr *arg);
+
+/* The substitution a generic proc's body is lowered under for one instance.
+
+   `bound` is the type the single parameter stands for. For a pattern overload
+   like `json_read<Array<T>>` that is the T inside the pattern, not the whole
+   `Array<i32>` the instance is named after -- binding the latter would lower the
+   parameter `Array<T>` to `Array<Array<i32>>`. Only a proc with several
+   parameters consults the list registry; every other shape keeps the path it
+   always had. */
+static TypeSub proc_sub_for_instance(memops_arena *arena, ProcDecl *decl, string8 mangle, TypeExpr *bound) {
+    TypeSub sub = {0};
+    if (!decl || decl->type_params.length == 0) return sub;
+    if (decl->type_params.length > 1) {
+        Vec_voidptr *types = mangle_list_for(mangle);
+        if (types) {
+            sub.has = true;
+            sub.params = Vec_string8_reserve(arena, decl->type_params.length);
+            sub.args = ptr_array_reserve(arena, decl->type_params.length);
+            for (i32 i = 0; i < decl->type_params.length && i < types->length; i++) {
+                Vec_string8_append(arena, &sub.params, decl->type_params.data[i]);
+                ptr_array_append(arena, &sub.args, types->data[i]);
+            }
+            return sub;
+        }
+    }
+    return type_sub_one(arena, decl->type_params.data[0],
+                        bound ? bound : mangle_type_for(arena, mangle));
+}
+
+static TypeSub proc_call_sub(memops_arena *arena, ProcDecl *decl, Expr *call, TypeExpr *type_arg) {
+    TypeSub sub = {0};
+    if (!decl || !decl->is_generic) return sub;
+    if (decl->type_params.length <= 1) {
+        if (!type_arg || decl->type_params.length == 0) return sub;
+        return type_sub_one(arena, decl->type_params.data[0], type_arg);
+    }
+    if (!call || call->type_args.length != decl->type_params.length) return sub;
+    sub.has = true;
+    sub.params = Vec_string8_reserve(arena, decl->type_params.length);
+    sub.args = ptr_array_reserve(arena, decl->type_params.length);
+    for (i32 i = 0; i < decl->type_params.length; i++) {
+        Vec_string8_append(arena, &sub.params, decl->type_params.data[i]);
+        ptr_array_append(arena, &sub.args, call->type_args.data[i]);
+    }
+    return sub;
+}
+
+/* Renders the parameters as written: `T`, or `T, U, V`. */
+static void emit_proc_type_params(memops_arena *arena, string8 *out, ProcDecl *decl) {
+    for (i32 i = 0; i < decl->type_params.length; i++) {
+        if (i > 0) emit_cstr(arena, out, ", ");
+        emit_string8(arena, out, decl->type_params.data[i]);
+    }
+}
+
+static string8 proc_type_params_string(memops_arena *arena, ProcDecl *decl) {
+    string8 out = string8_reserve(arena, 16);
+    emit_proc_type_params(arena, &out, decl);
+    return out;
+}
+
+static void emit_struct_type_params(memops_arena *arena, string8 *out, StructDecl *decl) {
+    for (i32 i = 0; i < decl->type_params.length; i++) {
+        if (i > 0) emit_cstr(arena, out, ", ");
+        emit_string8(arena, out, decl->type_params.data[i]);
+    }
+}
+
+static string8 struct_type_params_string(memops_arena *arena, StructDecl *decl) {
+    string8 out = string8_reserve(arena, 16);
+    emit_struct_type_params(arena, &out, decl);
+    return out;
+}
+
+/* The substitution for one instantiation of a generic struct. The instance is
+   named by the mangled arguments joined together, which for several parameters
+   is what the list registry was recorded against. */
+static TypeSub struct_sub_for_instance(memops_arena *arena, StructDecl *decl, string8 mangle) {
+    TypeSub sub = {0};
+    if (!decl || decl->type_params.length == 0) return sub;
+    if (decl->type_params.length > 1) {
+        Vec_voidptr *types = mangle_list_for(mangle);
+        if (types) {
+            sub.has = true;
+            sub.params = Vec_string8_reserve(arena, decl->type_params.length);
+            sub.args = ptr_array_reserve(arena, decl->type_params.length);
+            for (i32 i = 0; i < decl->type_params.length && i < types->length; i++) {
+                Vec_string8_append(arena, &sub.params, decl->type_params.data[i]);
+                ptr_array_append(arena, &sub.args, types->data[i]);
+            }
+            return sub;
+        }
+    }
+    return type_sub_one(arena, decl->type_params.data[0], mangle_type_for(arena, mangle));
+}
+
+/* Binds a written `Struct<A, B>` to the declaration's parameters, in order. */
+static TypeSub struct_sub_from_args(memops_arena *arena, StructDecl *decl, TypeExpr *type) {
+    TypeSub sub = {0};
+    if (!decl || !type || decl->type_params.length == 0) return sub;
+    if (type->args.length != decl->type_params.length) return sub;
+    sub.has = true;
+    sub.params = Vec_string8_reserve(arena, decl->type_params.length);
+    sub.args = ptr_array_reserve(arena, decl->type_params.length);
+    for (i32 i = 0; i < decl->type_params.length; i++) {
+        Vec_string8_append(arena, &sub.params, decl->type_params.data[i]);
+        ptr_array_append(arena, &sub.args, type->args.data[i]);
+    }
+    return sub;
+}
+
+/* The first type parameter of a generic proc, for paths that predate multiple
+   parameters and can only be reached with one. */
+static string8 proc_first_type_param(ProcDecl *decl) {
+    string8 none = {0};
+    if (!decl || decl->type_params.length == 0) return none;
+    return decl->type_params.data[0];
+}
+
+/* The single-parameter case, which is still the overwhelming majority. */
+static TypeSub type_sub_one(memops_arena *arena, string8 param, TypeExpr *arg) {
+    TypeSub sub = {0};
+    sub.has = true;
+    sub.params = Vec_string8_reserve(arena, 1);
+    sub.args = ptr_array_reserve(arena, 1);
+    Vec_string8_append(arena, &sub.params, param);
+    ptr_array_append(arena, &sub.args, arg);
+    return sub;
+}
+
+/* The type a parameter name stands for under this substitution, or null when the
+   name is not one of the parameters. */
+static TypeExpr *type_sub_lookup(TypeSub sub, string8 name) {
+    if (!sub.has) return null;
+    for (i32 i = 0; i < sub.params.length && i < sub.args.length; i++) {
+        if (string8_equals(&sub.params.data[i], &name)) {
+            return (TypeExpr *)sub.args.data[i];
+        }
+    }
+    return null;
+}
+
+/* The first substituted type. Only meaningful where exactly one parameter is
+   possible, and asserted by the callers that use it. */
+static TypeExpr *type_sub_first_arg(TypeSub sub) {
+    if (!sub.has || sub.args.length == 0) return null;
+    return (TypeExpr *)sub.args.data[0];
+}
 
 static bool string8_equals_name(string8 a, string8 b) {
     return string8_equals(&a, &b);
@@ -4935,6 +5334,7 @@ static string8 type_mangle(memops_arena *arena, TypeExpr *type, TypeSub sub);
 static string8 type_mangle_impl(memops_arena *arena, TypeExpr *type, TypeSub sub);
 static void mangle_register(memops_arena *arena, string8 mangle, TypeExpr *type);
 static TypeExpr *substitute_type_param(memops_arena *arena, TypeExpr *src, string8 param, TypeExpr *arg);
+static TypeExpr *substitute_type_sub(memops_arena *arena, TypeExpr *src, TypeSub sub);
 
 static void emit_cstr(memops_arena *arena, string8 *out, const char *cstr) {
     string8_append_cstr(arena, out, cstr);
@@ -5062,9 +5462,10 @@ static string8 reflect_runtime_c_name(memops_arena *arena, string8 name) {
 
 static void emit_type(memops_arena *arena, string8 *out, TypeExpr *type, TypeSub sub) {
     if (type->kind == Type_Name) {
-        if (sub.has && string8_equals_name(type->name, sub.param)) {
+        TypeExpr *substituted = type_sub_lookup(sub, type->name);
+        if (substituted) {
             emit_type_qualifiers(arena, out, type);
-            emit_type(arena, out, sub.arg, (TypeSub){0});
+            emit_type(arena, out, substituted, (TypeSub){0});
             return;
         }
         emit_type_qualifiers(arena, out, type);
@@ -5106,7 +5507,7 @@ static void emit_type(memops_arena *arena, string8 *out, TypeExpr *type, TypeSub
 static string8 type_mangle(memops_arena *arena, TypeExpr *type, TypeSub sub) {
     string8 mangle = type_mangle_impl(arena, type, sub);
     mangle_register(arena, mangle,
-                    sub.has ? substitute_type_param(arena, type, sub.param, sub.arg) : type);
+                    substitute_type_sub(arena, type, sub));
     return mangle;
 }
 
@@ -5119,8 +5520,9 @@ static string8 type_mangle_impl(memops_arena *arena, TypeExpr *type, TypeSub sub
         emit_cstr(arena, &out, "volatile_");
     }
     if (type->kind == Type_Name) {
-        if (sub.has && string8_equals_name(type->name, sub.param)) {
-            return type_mangle(arena, sub.arg, (TypeSub){0});
+        TypeExpr *substituted = type_sub_lookup(sub, type->name);
+        if (substituted) {
+            return type_mangle(arena, substituted, (TypeSub){0});
         }
         emit_string8(arena, &out, type->name);
         return out;
@@ -5181,8 +5583,9 @@ static void format_type_i(memops_arena *arena, string8 *out, TypeExpr *type, Typ
         emit_cstr(arena, out, "volatile ");
     }
     if (type->kind == Type_Name) {
-        if (sub.has && string8_equals_name(type->name, sub.param)) {
-            format_type_i(arena, out, sub.arg, (TypeSub){0});
+        TypeExpr *substituted = type_sub_lookup(sub, type->name);
+        if (substituted) {
+            format_type_i(arena, out, substituted, (TypeSub){0});
             return;
         }
         emit_string8(arena, out, type->name);
@@ -5360,11 +5763,12 @@ static void symbol_json_emit_field_entry(
     printf(",\"type\":");
     symbol_json_print_string8(symbol_type_i_string(arena, field->type));
     printf(",\"type_param\":");
-    symbol_json_print_string8(decl->type_param);
+    symbol_json_print_string8(struct_type_params_string(arena, decl));
     printf(",\"source_len\":%d}", (i32)field->name.length);
 }
 
 static void symbol_json_emit_struct_entry(
+    memops_arena *arena,
     bool *has_item,
     StructDecl *decl,
     string8 detail
@@ -5380,7 +5784,7 @@ static void symbol_json_emit_struct_entry(
     printf(",\"line\":%d,\"column\":%d,\"detail\":", decl->line, decl->col);
     symbol_json_print_string8(detail);
     printf(",\"source_len\":%d,\"type_param\":", (i32)decl->name.length);
-    symbol_json_print_string8(decl->type_param);
+    symbol_json_print_string8(struct_type_params_string(arena, decl));
     printf("}");
 }
 
@@ -5486,7 +5890,7 @@ static void symbol_json_emit_proc_entry(
     symbol_json_print_string8(symbol_type_i_string(arena, decl->ret_type));
     printf(",\"variadic\":%s", decl->is_variadic ? "true" : "false");
     printf(",\"type_param\":");
-    symbol_json_print_string8(decl->type_param);
+    symbol_json_print_string8(proc_type_params_string(arena, decl));
     printf(",\"generic_pattern\":");
     if (decl->generic_pattern) {
         symbol_json_print_string8(symbol_type_i_string(arena, decl->generic_pattern));
@@ -5504,7 +5908,7 @@ static string8 symbol_detail_struct(memops_arena *arena, StructDecl *decl) {
     emit_cstr(arena, &out, decl->is_union ? ":union" : ":struct");
     if (decl->is_generic) {
         emit_cstr(arena, &out, "<");
-        emit_string8(arena, &out, decl->type_param);
+        emit_struct_type_params(arena, &out, decl);
         emit_cstr(arena, &out, ">");
     }
     emit_cstr(arena, &out, " = {");
@@ -5543,11 +5947,11 @@ static string8 proc_display_name(memops_arena *arena, ProcDecl *decl) {
     if (!split_qualified_name(decl->name, &owner, &member)) {
         return decl->name;
     }
-    string8 out = string8_reserve(arena, decl->name.length + decl->type_param.length + 2);
+    string8 out = string8_reserve(arena, decl->name.length + 32);
     emit_string8(arena, &out, owner);
     if (decl->is_generic) {
         emit_cstr(arena, &out, "<");
-        emit_string8(arena, &out, decl->type_param);
+        emit_proc_type_params(arena, &out, decl);
         emit_cstr(arena, &out, ">");
     }
     emit_string8(arena, &out, member);
@@ -5565,7 +5969,7 @@ static string8 symbol_detail_proc(memops_arena *arena, ProcDecl *decl) {
     }
     if (decl->is_generic) {
         emit_cstr(arena, &out, "<");
-        emit_string8(arena, &out, decl->type_param);
+        emit_proc_type_params(arena, &out, decl);
         emit_cstr(arena, &out, ">");
     }
     emit_cstr(arena, &out, "(");
@@ -5650,7 +6054,7 @@ static void emit_symbol_json_stmt_vars(memops_arena *arena, bool *has_item, Stmt
 static void emit_symbols_json_items(memops_arena *arena, Program *prog, bool *has_item) {
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
-        symbol_json_emit_struct_entry(has_item, decl, symbol_detail_struct(arena, decl));
+        symbol_json_emit_struct_entry(arena, has_item, decl, symbol_detail_struct(arena, decl));
         for (i32 j = 0; j < decl->fields.length; j++) {
             Field *field = (Field *)decl->fields.data[j];
             symbol_json_emit_field_entry(arena, has_item, decl, field, decl->source_path, symbol_detail_field(arena, decl, field));
@@ -5753,6 +6157,43 @@ static Vec_voidptr g_mangle_bindings;
 static bool g_mangle_bindings_ready = false;
 static TypeExpr *clone_type_expr(memops_arena *arena, TypeExpr *src);
 static TypeExpr *substitute_type_param(memops_arena *arena, TypeExpr *src, string8 param, TypeExpr *arg);
+static TypeExpr *substitute_type_sub(memops_arena *arena, TypeExpr *src, TypeSub sub);
+
+typedef struct MangleListBinding {
+    string8 mangle;
+    Vec_voidptr types; // TypeExpr*
+} MangleListBinding;
+
+static Vec_voidptr g_mangle_list_bindings;
+static bool g_mangle_list_ready;
+
+static void mangle_register_list(memops_arena *arena, string8 mangle, Vec_voidptr *types) {
+    if (!mangle.data || !types) return;
+    if (!g_mangle_list_ready) {
+        g_mangle_list_bindings = ptr_array_reserve(arena, 16);
+        g_mangle_list_ready = true;
+    }
+    for (i32 i = 0; i < g_mangle_list_bindings.length; i++) {
+        MangleListBinding *b = (MangleListBinding *)g_mangle_list_bindings.data[i];
+        if (string8_equals(&b->mangle, &mangle)) return;
+    }
+    MangleListBinding *entry = memops_arena_push_struct(arena, MangleListBinding);
+    entry->mangle = mangle;
+    entry->types = ptr_array_reserve(arena, types->length);
+    for (i32 i = 0; i < types->length; i++) {
+        ptr_array_append(arena, &entry->types, clone_type_expr(arena, (TypeExpr *)types->data[i]));
+    }
+    ptr_array_append(arena, &g_mangle_list_bindings, entry);
+}
+
+static Vec_voidptr *mangle_list_for(string8 mangle) {
+    if (!g_mangle_list_ready) return null;
+    for (i32 i = 0; i < g_mangle_list_bindings.length; i++) {
+        MangleListBinding *b = (MangleListBinding *)g_mangle_list_bindings.data[i];
+        if (string8_equals(&b->mangle, &mangle)) return &b->types;
+    }
+    return null;
+}
 
 static void mangle_register(memops_arena *arena, string8 mangle, TypeExpr *type) {
     if (!type || !mangle.data) return;
@@ -5788,12 +6229,22 @@ static TypeExpr *mangle_type_for(memops_arena *arena, string8 mangle) {
 static void collect_type_instances(TypeExpr *type, string8 base, Vec_string8 *out, memops_arena *arena) {
     if (!type) return;
     if (type->kind == Type_Generic && string8_equals_name(type->name, base)) {
-        if (type->args.length == 1) {
-            TypeExpr *arg = (TypeExpr *)type->args.data[0];
-            if (!type_is_concrete_under_sub(arg, (TypeSub){0})) {
-                return;
+        if (type->args.length >= 1) {
+            Vec_voidptr resolved = ptr_array_reserve(arena, type->args.length);
+            string8 mangle = string8_reserve(arena, 32);
+            bool concrete = true;
+            for (i32 i = 0; i < type->args.length; i++) {
+                TypeExpr *arg = (TypeExpr *)type->args.data[i];
+                if (!type_is_concrete_under_sub(arg, (TypeSub){0})) { concrete = false; break; }
+                ptr_array_append(arena, &resolved, arg);
+                if (i > 0) string8_append_cstr(arena, &mangle, "_");
+                string8 inner = type_mangle(arena, arg, (TypeSub){0});
+                string8_append_bytes(arena, &mangle, inner.data, inner.length);
             }
-            string8 mangle = type_mangle(arena, arg, (TypeSub){0});
+            if (!concrete) return;
+            if (type->args.length > 1) {
+                mangle_register_list(arena, mangle, &resolved);
+            }
             if (!array_string8_contains(out, mangle)) {
                 Vec_string8_append(arena, out, mangle);
             }
@@ -5940,7 +6391,8 @@ static void collect_type_instances_from_expr(Expr *e, string8 base, Vec_string8 
     } else if (e->kind == Expr_Field) {
         collect_type_instances_from_expr(e->base, base, out, arena);
     } else if (e->kind == Expr_SizeofType || e->kind == Expr_AlignofType) {
-        collect_type_instances(e->cast_type, base, out, arena);
+        if (e->cast_type) collect_type_instances(e->cast_type, base, out, arena);
+        else collect_type_instances_from_expr(e->inner, base, out, arena);
     } else if (e->kind == Expr_ZeroInit) {
         collect_type_instances(e->cast_type, base, out, arena);
     } else if (e->kind == Expr_InitList) {
@@ -6055,7 +6507,8 @@ static void collect_type_instances_from_expr_sub(Expr *e, string8 base, Vec_stri
     } else if (e->kind == Expr_Field) {
         collect_type_instances_from_expr_sub(e->base, base, out, arena, sub);
     } else if (e->kind == Expr_SizeofType || e->kind == Expr_AlignofType) {
-        collect_type_instances_sub(e->cast_type, base, out, arena, sub);
+        if (e->cast_type) collect_type_instances_sub(e->cast_type, base, out, arena, sub);
+        else collect_type_instances_from_expr_sub(e->inner, base, out, arena, sub);
     } else if (e->kind == Expr_ZeroInit) {
         collect_type_instances_sub(e->cast_type, base, out, arena, sub);
     } else if (e->kind == Expr_InitList) {
@@ -6123,11 +6576,9 @@ static void collect_generic_struct_instances(Program *prog, StructDecl *decl, Ve
             collect_generic_struct_instances(prog, s, &owner_instances, arena);
             collecting_nested_dependencies = false;
             for (i32 j = 0; j < owner_instances.length; j++) {
-                TypeExpr *arg = mangle_type_for(arena, owner_instances.data[j]);
+
                 TypeSub sub = {0};
-                sub.has = true;
-                sub.param = s->type_param;
-                sub.arg = arg;
+                sub = struct_sub_for_instance(arena, s, owner_instances.data[j]);
                 for (i32 k = 0; k < s->fields.length; k++) {
                     Field *f = (Field *)s->fields.data[k];
                     collect_type_instances_sub(f->type, decl->name, out, arena, sub);
@@ -6153,10 +6604,7 @@ static void collect_generic_struct_instances(Program *prog, StructDecl *decl, Ve
             collect_generic_proc_instances_with_sites(prog, p, &proc_instances, null, &instance_sites, arena);
             for (i32 j = 0; j < proc_instances.length; j++) {
                 TypeExpr *arg = mangle_type_for(arena, proc_instances.data[j]);
-                TypeSub sub = {0};
-                sub.has = true;
-                sub.param = p->type_param;
-                sub.arg = arg;
+                TypeSub sub = proc_sub_for_instance(arena, p, proc_instances.data[j], arg);
                 for (i32 k = 0; k < p->params.length; k++) {
                     Param *param = (Param *)p->params.data[k];
                     collect_type_instances_sub(param->type, decl->name, out, arena, sub);
@@ -6223,7 +6671,7 @@ static GenericProcEntry *generic_entry_from_decl(Vec_voidptr *entries, ProcDecl 
 
 static bool generic_pattern_bind(memops_arena *arena, ProcDecl *decl, TypeExpr *pattern, TypeExpr *arg, TypeExpr **bound) {
     if (!decl || !pattern || !arg) return false;
-    if (pattern->kind == Type_Name && string8_equals(&pattern->name, &decl->type_param)) {
+    if (pattern->kind == Type_Name && string8_equals_name(pattern->name, proc_first_type_param(decl))) {
         if (!*bound) {
             *bound = arg;
             return true;
@@ -6270,6 +6718,7 @@ static bool generic_proc_match_type_arg(memops_arena *arena, ProcDecl *decl, Typ
 }
 
 static TypeExpr *substitute_type_param(memops_arena *arena, TypeExpr *src, string8 param, TypeExpr *arg);
+static TypeExpr *substitute_type_sub(memops_arena *arena, TypeExpr *src, TypeSub sub);
 
 static GenericProcEntry *generic_entry_from_call(
     Vec_voidptr *entries,
@@ -6280,7 +6729,7 @@ static GenericProcEntry *generic_entry_from_call(
     memops_arena *arena
 ) {
     if (out_bound) *out_bound = null;
-    TypeExpr *resolved_arg = sub.has ? substitute_type_param(arena, arg, sub.param, sub.arg) : arg;
+    TypeExpr *resolved_arg = substitute_type_sub(arena, arg, sub);
     for (i32 i = 0; i < entries->length; i++) {
         GenericProcEntry *e = (GenericProcEntry *)entries->data[i];
         if (!string8_equals(&e->decl->name, &name)) continue;
@@ -6296,8 +6745,9 @@ static GenericProcEntry *generic_entry_from_call(
 static bool type_is_concrete_under_sub(TypeExpr *type, TypeSub sub) {
     if (!type) return false;
     if (type->kind == Type_Name) {
-        if (sub.has && string8_equals(&type->name, &sub.param)) {
-            return type_is_concrete_under_sub(sub.arg, (TypeSub){0});
+        TypeExpr *substituted = type_sub_lookup(sub, type->name);
+        if (substituted) {
+            return type_is_concrete_under_sub(substituted, (TypeSub){0});
         }
         return !string8_is_symbolic_type_name(type->name);
     }
@@ -6341,6 +6791,48 @@ static bool collect_generic_calls_from_expr(
     bool changed = false;
     if (!e) return false;
     if (e->kind == Expr_Call) {
+        if (e->type_args.length > 1) {
+            /* Several type arguments: the instance is keyed by all of them
+               joined, which is also the suffix the symbol takes. The types are
+               registered against that key so the substitution can be rebuilt
+               wherever only the mangle travelled. */
+            GenericProcEntry *target = null;
+            for (i32 t = 0; t < entries->length; t++) {
+                GenericProcEntry *entry = (GenericProcEntry *)entries->data[t];
+                if (string8_equals(&entry->decl->name, &e->name) &&
+                    entry->decl->type_params.length == e->type_args.length) {
+                    target = entry;
+                    break;
+                }
+            }
+            if (target) {
+                bool all_concrete = true;
+                Vec_voidptr resolved = ptr_array_reserve(arena, e->type_args.length);
+                string8 joined = string8_reserve(arena, 32);
+                for (i32 t = 0; t < e->type_args.length; t++) {
+                    TypeExpr *arg = (TypeExpr *)e->type_args.data[t];
+                    if (!type_is_concrete_under_sub(arg, sub)) { all_concrete = false; break; }
+                    TypeExpr *concrete = substitute_type_sub(arena, arg, sub);
+                    ptr_array_append(arena, &resolved, concrete);
+                    if (t > 0) string8_append_cstr(arena, &joined, "_");
+                    string8 m = type_mangle(arena, arg, sub);
+                    string8_append_bytes(arena, &joined, m.data, m.length);
+                }
+                if (all_concrete) {
+                    mangle_register_list(arena, joined, &resolved);
+                    if (generic_entry_add_instance(arena, target, joined, joined)) {
+                        changed = true;
+                    }
+                    if (!generic_instance_site_find(constraint_sites, target->decl->name, joined)) {
+                        ptr_array_append(
+                            arena,
+                            constraint_sites,
+                            generic_instance_site_new(arena, target->decl->name, joined, source_path, e->line, e->col)
+                        );
+                    }
+                }
+            }
+        }
         if (e->type_args.length == 1) {
             TypeExpr *bound = null;
             GenericProcEntry *target = generic_entry_from_call(entries, e->name, (TypeExpr *)e->type_args.data[0], sub, &bound, arena);
@@ -6573,11 +7065,8 @@ static void collect_generic_proc_instances_build(Program *prog, memops_arena *ar
         for (i32 i = 0; i < entries.length; i++) {
             GenericProcEntry *entry = (GenericProcEntry *)entries.data[i];
             for (i32 j = 0; j < entry->instances.length; j++) {
-                TypeExpr *arg = mangle_type_for(arena, entry->sub_instances.data[j]);
-                TypeSub sub = {0};
-                sub.has = true;
-                sub.param = entry->decl->type_param;
-                sub.arg = arg;
+                TypeExpr *bound = mangle_type_for(arena, entry->sub_instances.data[j]);
+                TypeSub sub = proc_sub_for_instance(arena, entry->decl, entry->instances.data[j], bound);
                 for (i32 k = 0; k < entry->decl->body.length; k++) {
                     Stmt *s = (Stmt *)entry->decl->body.data[k];
                     if (collect_generic_calls_from_stmt(s, sub, &entries, constraint_sites, arena)) {
@@ -6831,6 +7320,7 @@ struct TypeScope {
 
 static TypeExpr *type_name_expr_const(memops_arena *arena, const char *name);
 static TypeExpr *substitute_type_param(memops_arena *arena, TypeExpr *src, string8 param, TypeExpr *arg);
+static TypeExpr *substitute_type_sub(memops_arena *arena, TypeExpr *src, TypeSub sub);
 
 static TypeScope type_scope_make(memops_arena *arena, i32 cap) {
     TypeScope s = {0};
@@ -6848,7 +7338,7 @@ static TypeScope type_scope_copy(memops_arena *arena, TypeScope *src) {
 
 static TypeExpr *type_scope_apply_sub(TypeScope *scope, memops_arena *arena, TypeExpr *type) {
     if (!scope || !scope->sub.has || !type) return type;
-    return substitute_type_param(arena, type, scope->sub.param, scope->sub.arg);
+    return substitute_type_sub(arena, type, scope->sub);
 }
 
 static void type_scope_add(memops_arena *arena, TypeScope *s, string8 name, TypeExpr *type) {
@@ -6948,6 +7438,17 @@ static TypeExpr *clone_type_expr(memops_arena *arena, TypeExpr *src) {
         }
     }
     return dst;
+}
+
+/* Applies every substitution in one pass, so a body written over <T, U> is
+   rewritten in a single walk rather than once per parameter. */
+static TypeExpr *substitute_type_sub(memops_arena *arena, TypeExpr *src, TypeSub sub) {
+    if (!sub.has || !src) return src;
+    TypeExpr *out = src;
+    for (i32 i = 0; i < sub.params.length && i < sub.args.length; i++) {
+        out = substitute_type_param(arena, out, sub.params.data[i], (TypeExpr *)sub.args.data[i]);
+    }
+    return out;
 }
 
 static TypeExpr *substitute_type_param(memops_arena *arena, TypeExpr *src, string8 param, TypeExpr *arg) {
@@ -7065,10 +7566,11 @@ static TypeExpr *lookup_field_type(Program *prog, TypeExpr *base_type, string8 f
         }
         if (base_type->kind == Type_Generic && decl->is_generic) {
             if (!string8_equals(&decl->name, &base_type->name)) continue;
-            if (base_type->args.length != 1) return null;
-            TypeExpr *arg = (TypeExpr *)base_type->args.data[0];
+            if (base_type->args.length != decl->type_params.length) return null;
             Field *field = struct_find_field(decl, field_name);
-            if (field) return substitute_type_param(arena, field->type, decl->type_param, arg);
+            if (field) {
+                return substitute_type_sub(arena, field->type, struct_sub_from_args(arena, decl, base_type));
+            }
         }
     }
     return null;
@@ -7289,7 +7791,7 @@ static void check_reflect_variant_arm(
     (void)arena;
 }
 
-static StructDecl *lookup_aggregate_decl(Program *prog, TypeExpr *type, TypeSub *sub) {
+static StructDecl *lookup_aggregate_decl(Program *prog, TypeExpr *type, TypeSub *sub, memops_arena *arena) {
     if (sub) *sub = (TypeSub){0};
     if (!type) return null;
     type = resolve_alias_type(prog, type);
@@ -7301,10 +7803,8 @@ static StructDecl *lookup_aggregate_decl(Program *prog, TypeExpr *type, TypeSub 
         }
         if (type->kind == Type_Generic && decl->is_generic && string8_equals(&decl->name, &type->name)) {
             if (decl->is_external && decl->fields.length == 0) return null;
-            if (sub && type->args.length == 1) {
-                sub->has = true;
-                sub->param = decl->type_param;
-                sub->arg = (TypeExpr *)type->args.data[0];
+            if (sub && type->args.length == decl->type_params.length) {
+                *sub = struct_sub_from_args(arena, decl, type);
             }
             return decl;
         }
@@ -7640,14 +8140,12 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, Program *prog, memop
             TypeExpr *proc_type = callee ? type_proc_from_callable_type(prog, callee) : null;
             return proc_type ? proc_type->ret_type : null;
         }
-        if (string8_equals_cstr(&e->name, "sizeof") || string8_equals_cstr(&e->name, "alignof")) {
-            return type_name_expr(arena, "usize");
-        }
         TypeExpr *type_arg = null;
         ProcDecl *decl = lookup_call_proc_decl(prog, e, scope, arena, &type_arg, null);
         if (decl) {
-            if (decl->is_generic && type_arg) {
-                return substitute_type_param(arena, decl->ret_type, decl->type_param, type_arg);
+            if (decl->is_generic) {
+                TypeSub call_sub = proc_call_sub(arena, decl, e, type_arg);
+                if (call_sub.has) return substitute_type_sub(arena, decl->ret_type, call_sub);
             }
             if (decl->is_generic) {
                 /* The type argument is missing or wrong, which is reported at the
@@ -8780,9 +9278,11 @@ static void type_error_proc_type_arg_count(
             snprintf(
                 message,
                 sizeof(message),
-                "generic proc '%.*s' expects 1 type arg, got %d",
+                "generic proc '%.*s' expects %d type arg%s, got %d",
                 (int)decl->name.length,
                 decl->name.data,
+                (int)(decl->type_params.length > 0 ? decl->type_params.length : 1),
+                (decl->type_params.length == 1 || decl->type_params.length == 0) ? "" : "s",
                 got
             );
             diag_json_error_with_note(
@@ -8800,12 +9300,14 @@ static void type_error_proc_type_arg_count(
             return;
         }
         printf(
-            "%s:%d:%d: type error: generic proc '%.*s' expects 1 type arg, got %d\n",
+            "%s:%d:%d: type error: generic proc '%.*s' expects %d type arg%s, got %d\n",
             g_diag_source_path ? g_diag_source_path : g_source_path,
             line,
             col,
             (int)decl->name.length,
             decl->name.data,
+            (int)(decl->type_params.length > 0 ? decl->type_params.length : 1),
+            (decl->type_params.length == 1 || decl->type_params.length == 0) ? "" : "s",
             got
         );
     } else {
@@ -9063,6 +9565,56 @@ static void type_error_proc_argument(
     return;
 }
 
+/* A call whose name resolves to nothing at all. This used to return quietly,
+   which is how `sops_skin_state_deinit`, `pacops_character_name` and
+   `guiops_layout_content_height` -- none of which exist -- passed `i: checked`
+   and were caught only by clang, pointing at generated code. A `cinclude` brings
+   no declarations with it: C functions are named in I or they are not callable.
+   See docs/name-resolution.md. */
+/* Compiler builtins that are spelled like calls. `printfmt` never reaches the
+   backend as a call at all -- it is lowered to a printf during emission -- so it
+   has no declaration to find and must not be reported as undeclared. `sizeof`
+   and `alignof` used to belong on this list; they are now their own node kind
+   and cannot reach the call path. */
+static bool call_name_is_builtin(string8 name) {
+    return string8_equals_cstr(&name, "printfmt");
+}
+
+static void type_error_call_undeclared(
+    string8 name,
+    i32 line,
+    i32 col
+) {
+    if (g_diag_json) {
+        char message[1024];
+        snprintf(
+            message,
+            sizeof(message),
+            "call to undeclared proc '%.*s'; declare it, or add "
+            "`%.*s: proc(...)->T = { external; }` if it comes from C",
+            (int)name.length,
+            name.data,
+            (int)name.length,
+            name.data
+        );
+        diag_json_error(diag_current_path(), line, col, "type", message);
+        diag_record_error();
+        return;
+    }
+    printf(
+        "%s:%d:%d: type error: call to undeclared proc '%.*s'; declare it, or add "
+        "`%.*s: proc(...)->T = { external; }` if it comes from C\n",
+        g_diag_source_path ? g_diag_source_path : g_source_path,
+        line,
+        col,
+        (int)name.length,
+        name.data,
+        (int)name.length,
+        name.data
+    );
+    diag_finish_at(line, col);
+}
+
 static void type_error_call_non_proc(
     string8 name,
     TypeExpr *callee,
@@ -9070,7 +9622,15 @@ static void type_error_call_non_proc(
     i32 col,
     memops_arena *arena
 ) {
-    string8 callee_name = type_mangle(arena, callee, (TypeSub){0});
+    /* `callee` is null whenever the callee expression has no inferable type: an
+       undeclared receiver (`nosuch.method()`), a field that does not exist on a
+       primitive (`n.g()` with `n: i32`), an index into an undeclared name, or a
+       void-valued call used as a base. Mangling null dereferences it, so name
+       the type only when there is one. type_mangle itself stays strict, because
+       a null reaching it from a real mangling context is a compiler bug that
+       should stay loud rather than emit a bogus symbol. */
+    string8 callee_name = callee ? type_mangle(arena, callee, (TypeSub){0})
+                                 : string8_from_cstr(arena, "unknown");
     if (g_diag_json) {
         char message[1024];
         snprintf(
@@ -9456,6 +10016,37 @@ static void type_error_enum_member(EnumDecl *decl, string8 member_name, i32 line
     diag_finish_range(line, col, (i32)member_name.length + 1);
 }
 
+/* Types that provably cannot have a field, so `.name` on them is always wrong.
+
+   Deliberately a closed list of I's own scalars plus arrays rather than
+   "anything not a declared aggregate". A type name the compiler does not know
+   is a foreign C type arriving through a `cinclude` -- D3D11_RASTERIZER_DESC
+   and friends are declared in `d3d11.h` and nowhere in I -- and its fields are
+   genuinely unknown here, so reporting on those would be a false positive.
+   That silence is the type-level twin of the undeclared-call bargain in
+   `docs/name-resolution.md`, and it goes away with the same fix. */
+static bool type_never_has_fields(TypeExpr *type) {
+    if (!type) return false;
+    if (type->kind == Type_Array) return true;
+    if (type->kind != Type_Name) return false;
+    string8 n = type->name;
+    return string8_equals_cstr(&n, "i8") ||
+           string8_equals_cstr(&n, "i16") ||
+           string8_equals_cstr(&n, "i32") ||
+           string8_equals_cstr(&n, "i64") ||
+           string8_equals_cstr(&n, "u8") ||
+           string8_equals_cstr(&n, "u16") ||
+           string8_equals_cstr(&n, "u32") ||
+           string8_equals_cstr(&n, "u64") ||
+           string8_equals_cstr(&n, "f32") ||
+           string8_equals_cstr(&n, "f64") ||
+           string8_equals_cstr(&n, "usize") ||
+           string8_equals_cstr(&n, "b32") ||
+           string8_equals_cstr(&n, "bool") ||
+           string8_equals_cstr(&n, "char") ||
+           string8_equals_cstr(&n, "void");
+}
+
 static void type_error_field_access(
     Program *prog,
     Expr *base_expr,
@@ -9488,6 +10079,7 @@ static void type_error_field_access(
             field_name.data
         );
         diag_finish_at(line, col);
+        return;
     }
 
     TypeExpr *resolved = resolve_alias_type(prog, base);
@@ -9556,6 +10148,7 @@ static void type_error_field_access(
             );
         }
         diag_finish_at(line, col);
+        return;
     }
 
     if (g_diag_json) {
@@ -9903,7 +10496,7 @@ static void type_check_initializer_against(
     }
 
     TypeSub sub = {0};
-    StructDecl *decl = lookup_aggregate_decl(prog, expected, &sub);
+    StructDecl *decl = lookup_aggregate_decl(prog, expected, &sub, arena);
     if (!decl) return;
 
     i32 positional_index = 0;
@@ -9966,7 +10559,7 @@ static void type_check_initializer_against(
         }
 
         type_check_expr(value, scope, prog, arena);
-        TypeExpr *field_type = sub.has ? substitute_type_param(arena, field->type, sub.param, sub.arg) : field->type;
+        TypeExpr *field_type = substitute_type_sub(arena, field->type, sub);
         type_check_initializer_against(value, field_type, scope, prog, arena);
         TypeExpr *actual = infer_expr_type(value, scope, prog, arena);
         check_assignment_compatible("field initializer", prog, field_type, actual, init->line, init->col, arena);
@@ -10056,12 +10649,46 @@ static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_
     TypeExpr *type_arg = null;
     bool concrete_specialization = false;
     ProcDecl *decl = lookup_call_proc_decl(prog, call, scope, arena, &type_arg, &concrete_specialization);
+
+    /* C resolves a name to its nearest binding, so a local or a parameter
+       shadows a proc of the same name. The proc table used to win regardless,
+       which meant I read `helper(3)` as a call to the proc while C read the same
+       text as calling the `i32` local next to it -- one program, two meanings,
+       and a clang error about generated code the author never wrote.
+
+       Procs are never entered into the TypeScope; it holds locals, parameters,
+       globals, function-like macros and reflection globals. So a hit here is by
+       construction a nearer binding than the top-level proc, and preferring it
+       is exactly C's rule. Explicit type arguments are left alone: `f<i32>(x)`
+       is unambiguously a generic proc call, never a variable. */
+    if (decl && call->type_args.length == 0) {
+        TypeExpr *shadowing = type_scope_lookup(scope, call->name);
+        if (shadowing) {
+            if (!type_proc_from_callable_type(prog, shadowing)) {
+                type_error_call_non_proc(call->name, shadowing, call->line, call->col, arena);
+                for (i32 i = 0; i < call->args.length; i++) {
+                    type_check_expr((Expr *)call->args.data[i], scope, prog, arena);
+                }
+                return;
+            }
+            /* Callable after all -- a proc-pointer local, say. Hand it to the
+               indirect path below, which already checks against a proc type. */
+            decl = null;
+        }
+    }
+
     if (!decl) {
         if (call->type_args.length > 0) {
             type_error_missing_type_operation(call, type_arg, arena);
         }
         TypeExpr *callee_type = type_scope_lookup(scope, call->name);
         if (!callee_type) {
+            if (!call_name_is_builtin(call->name)) {
+                type_error_call_undeclared(call->name, call->line, call->col);
+            }
+            /* Still check the arguments: their own mistakes are independent of
+               the callee being unknown, and reporting them together beats
+               making the author fix one call at a time. */
             for (i32 i = 0; i < call->args.length; i++) {
                 type_check_expr((Expr *)call->args.data[i], scope, prog, arena);
             }
@@ -10104,7 +10731,8 @@ static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_
         return;
     }
     if (decl->is_generic) {
-        if (call->type_args.length != 1) {
+        i32 wanted = decl->type_params.length > 0 ? decl->type_params.length : 1;
+        if (call->type_args.length != wanted) {
             type_error_proc_type_arg_count(decl, call->type_args.length, call->line, call->col);
             /* Parameter types still mention the unsubstituted type param, so
                checking arguments against them would only invent follow-on errors. */
@@ -10127,8 +10755,9 @@ static void type_check_call(Expr *call, TypeScope *scope, Program *prog, memops_
     for (i32 i = 0; i < call->args.length && i < decl->params.length; i++) {
         Param *param = (Param *)decl->params.data[i];
         TypeExpr *expected = param->type;
-        if (decl->is_generic && type_arg) {
-            expected = substitute_type_param(arena, param->type, decl->type_param, type_arg);
+        if (decl->is_generic) {
+            TypeSub call_sub = proc_call_sub(arena, decl, call, type_arg);
+            if (call_sub.has) expected = substitute_type_sub(arena, param->type, call_sub);
         }
         Expr *arg = (Expr *)call->args.data[i];
         type_check_initializer_against(arg, expected, scope, prog, arena);
@@ -10222,14 +10851,18 @@ static void type_check_expr(Expr *e, TypeScope *scope, Program *prog, memops_are
         TypeExpr *field = lookup_field_type(prog, base, e->name, arena);
         TypeExpr *resolved = resolve_alias_type(prog, base);
         check_reflect_variant_arm(prog, e, base, arena);
-        if (!field && resolved && (resolved->kind == Type_Ptr ||
-                                   type_is_declared_aggregate(prog, resolved) ||
-                                   type_is_reflect_runtime_record(prog, resolved))) {
-            type_error_field_access(prog, e->base, base, e->name, e->line, e->col, arena);
-        } else if (!field && resolved) {
-            StructDecl *opaque = lookup_opaque_external_struct(prog, resolved);
-            if (opaque) {
-                type_error_opaque_field_access(opaque, e->name, e->line, e->col);
+        if (!field && resolved) {
+            if (resolved->kind == Type_Ptr ||
+                type_is_declared_aggregate(prog, resolved) ||
+                type_is_reflect_runtime_record(prog, resolved)) {
+                type_error_field_access(prog, e->base, base, e->name, e->line, e->col, arena);
+            } else {
+                StructDecl *opaque = lookup_opaque_external_struct(prog, resolved);
+                if (opaque) {
+                    type_error_opaque_field_access(opaque, e->name, e->line, e->col);
+                } else if (type_never_has_fields(resolved)) {
+                    type_error_field_access(prog, e->base, base, e->name, e->line, e->col, arena);
+                }
             }
         }
         return;
@@ -10573,18 +11206,35 @@ static void type_check_generic_proc_instances(
         collect_generic_proc_instances_with_sites(prog, p, &instances, &sub_instances, &instance_sites, arena);
         for (i32 j = 0; j < instances.length; j++) {
             TypeExpr *arg = mangle_type_for(arena, sub_instances.data[j]);
-            TypeSub sub = {0};
-            sub.has = true;
-            sub.param = p->type_param;
-            sub.arg = arg;
+            TypeSub sub = proc_sub_for_instance(arena, p, instances.data[j], arg);
             type_check_proc_body(prog, p, globals, sub, arena);
         }
+    }
+}
+
+static void type_scope_add_function_like_macros(memops_arena *arena, TypeScope *scope, Program *prog) {
+    for (i32 i = 0; i < prog->preprocessor_lines.length; i++) {
+        string8 line = prog->preprocessor_lines.data[i];
+        if (!preprocessor_define_is_function_like(line)) continue;
+        string8 name = preprocessor_define_name(arena, line);
+        if (!name.data) continue;
+        TypeExpr *macro = type_new(arena, Type_Proc);
+        macro->args = ptr_array_reserve(arena, 1);
+        /* No return type on purpose. cpp substitutes tokens and has no types, so
+           a macro's result is genuinely unknown -- `#define TWICE(x) ((x)*2)`
+           yields a number while `gin_require(...)` yields nothing at all. A null
+           return type is how the checker already spells "unknown", and it makes
+           both usable without inventing a type for either. */
+        macro->ret_type = null;
+        macro->is_variadic = true;
+        type_scope_add(arena, scope, name, macro);
     }
 }
 
 static void type_check_program(Program *prog, memops_arena *arena) {
     TypeScope globals = type_scope_make(arena, 64);
     type_scope_add_reflection_globals(arena, &globals, prog);
+    type_scope_add_function_like_macros(arena, &globals, prog);
     for (i32 i = 0; i < prog->globals.length; i++) {
         Stmt *g = (Stmt *)prog->globals.data[i];
         const char *prev_diag_source_path = g_diag_source_path;
@@ -11232,15 +11882,13 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
         emit_string8(arena, out, e->string_lit);
         return;
     }
-    if (e->kind == Expr_SizeofType) {
-        emit_cstr(arena, out, "sizeof(");
-        emit_type(arena, out, e->cast_type, sub);
-        emit_cstr(arena, out, ")");
-        return;
-    }
-    if (e->kind == Expr_AlignofType) {
-        emit_cstr(arena, out, "_Alignof(");
-        emit_type(arena, out, e->cast_type, sub);
+    if (e->kind == Expr_SizeofType || e->kind == Expr_AlignofType) {
+        emit_cstr(arena, out, e->kind == Expr_SizeofType ? "sizeof(" : "_Alignof(");
+        if (e->cast_type) {
+            emit_type(arena, out, e->cast_type, sub);
+        } else {
+            emit_expr(arena, out, e->inner, sub, generic_name);
+        }
         emit_cstr(arena, out, ")");
         return;
     }
@@ -11346,14 +11994,25 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
             emit_cstr(arena, out, ")");
             return;
         }
-        if (e->type_args.length == 1) {
+        if (e->type_args.length > 1) {
+            /* Several type arguments join into one suffix, so `first<i32, f32>`
+               calls `first_i32_f32` -- the same name the instance was recorded
+               and emitted under. */
+            string8 joined = string8_reserve(arena, 32);
+            for (i32 t = 0; t < e->type_args.length; t++) {
+                if (t > 0) string8_append_cstr(arena, &joined, "_");
+                string8 m = type_mangle(arena, (TypeExpr *)e->type_args.data[t], sub);
+                string8_append_bytes(arena, &joined, m.data, m.length);
+            }
+            emit_mono_proc_name(arena, out, e->name, joined);
+        } else if (e->type_args.length == 1) {
             TypeExpr *arg = (TypeExpr *)e->type_args.data[0];
             string8 mangle = type_mangle(arena, arg, sub);
             emit_mono_proc_name(arena, out, e->name, mangle);
         } else if (generic_name.data && string8_equals_name(e->name, generic_name) && sub.has) {
             emit_string8(arena, out, e->name);
             emit_cstr(arena, out, "_");
-            string8 mangle = type_mangle(arena, sub.arg, (TypeSub){0});
+            string8 mangle = type_mangle(arena, type_sub_first_arg(sub), (TypeSub){0});
             emit_string8(arena, out, mangle);
         } else {
             emit_string8(arena, out, reflect_runtime_c_name(arena, e->name));
@@ -11624,7 +12283,7 @@ static void emit_struct_monomorph_comment(memops_arena *arena, string8 *out, Str
     emit_cstr(arena, out, decl->is_union ? "union " : "struct ");
     emit_string8(arena, out, decl->name);
     emit_cstr(arena, out, "<");
-    emit_string8(arena, out, decl->type_param);
+    emit_struct_type_params(arena, out, decl);
     emit_cstr(arena, out, "> -> ");
     emit_string8(arena, out, decl->name);
     emit_cstr(arena, out, "_");
@@ -11639,9 +12298,7 @@ static void emit_struct_monomorph_comment(memops_arena *arena, string8 *out, Str
 
 static void emit_struct_decl_mono(memops_arena *arena, string8 *out, StructDecl *decl, string8 type_mangled, TypeExpr *arg) {
     TypeSub sub = {0};
-    sub.has = true;
-    sub.param = decl->type_param;
-    sub.arg = arg;
+    sub = struct_sub_for_instance(arena, decl, type_mangled);
 
     emit_struct_monomorph_comment(arena, out, decl, type_mangled);
     emit_line_directive_path(arena, out, decl->source_path, decl->line);
@@ -11681,9 +12338,7 @@ static ConcreteStructDef *concrete_struct_def_new(
     def->mangle = mangle;
     def->arg = arg;
     if (is_mono) {
-        def->sub.has = true;
-        def->sub.param = decl->type_param;
-        def->sub.arg = arg;
+        def->sub = struct_sub_for_instance(arena, decl, mangle);
     }
     return def;
 }
@@ -11736,8 +12391,11 @@ static string8 concrete_value_dependency_name(Program *prog, memops_arena *arena
     if (type->kind == Type_Array) {
         return concrete_value_dependency_name(prog, arena, type->elem, sub);
     }
-    if (type->kind == Type_Name && sub.has && string8_equals_name(type->name, sub.param)) {
-        return concrete_value_dependency_name(prog, arena, sub.arg, (TypeSub){0});
+    if (type->kind == Type_Name) {
+        TypeExpr *substituted = type_sub_lookup(sub, type->name);
+        if (substituted) {
+            return concrete_value_dependency_name(prog, arena, substituted, (TypeSub){0});
+        }
     }
     TypeExpr *resolved = resolve_alias_type(prog, type);
     if (resolved && resolved != type) {
@@ -11839,10 +12497,7 @@ static void emit_proc_proto(memops_arena *arena, string8 *out, ProcDecl *decl) {
 
 static void emit_proc_decl_mono(memops_arena *arena, string8 *out, ProcDecl *decl, string8 type_mangled, TypeExpr *arg, GenericInstanceSite *site) {
     if (decl->is_external) return;
-    TypeSub sub = {0};
-    sub.has = true;
-    sub.param = decl->type_param;
-    sub.arg = arg;
+    TypeSub sub = proc_sub_for_instance(arena, decl, type_mangled, arg);
 
     emit_proc_monomorph_comment(arena, out, decl, type_mangled, site);
     emit_line_directive_path(arena, out, decl->source_path, decl->line);
@@ -11865,10 +12520,7 @@ static void emit_proc_decl_mono(memops_arena *arena, string8 *out, ProcDecl *dec
 
 static void emit_proc_proto_mono(memops_arena *arena, string8 *out, ProcDecl *decl, string8 type_mangled, TypeExpr *arg, GenericInstanceSite *site) {
     if (decl->is_external && !decl->emit_external_proto) return;
-    TypeSub sub = {0};
-    sub.has = true;
-    sub.param = decl->type_param;
-    sub.arg = arg;
+    TypeSub sub = proc_sub_for_instance(arena, decl, type_mangled, arg);
 
     emit_proc_monomorph_comment(arena, out, decl, type_mangled, site);
     emit_line_directive_path(arena, out, decl->source_path, decl->line);
@@ -12061,13 +12713,13 @@ static void emit_proc_monomorph_comment(
     if (split_qualified_name(decl->name, &owner, &member)) {
         emit_string8(arena, out, owner);
         emit_cstr(arena, out, "<");
-        emit_string8(arena, out, decl->type_param);
+        emit_proc_type_params(arena, out, decl);
         emit_cstr(arena, out, ">");
         emit_string8(arena, out, member);
     } else {
         emit_string8(arena, out, decl->name);
         emit_cstr(arena, out, "<");
-        emit_string8(arena, out, decl->type_param);
+        emit_proc_type_params(arena, out, decl);
         emit_cstr(arena, out, ">");
     }
     emit_cstr(arena, out, " -> ");
@@ -12161,7 +12813,7 @@ static void emit_struct_reflection_fields(
             emit_struct_reflection_fields(arena, out, prog, f->anon, concrete_name, sub);
             continue;
         }
-        TypeExpr *field_type = sub.has ? substitute_type_param(arena, f->type, sub.param, sub.arg) : f->type;
+        TypeExpr *field_type = substitute_type_sub(arena, f->type, sub);
         string8 type_name = type_mangle(arena, field_type, (TypeSub){0});
         bool is_bitfield = f->bit_width.data != null;
         emit_cstr(arena, out, "    {");
@@ -12445,11 +13097,9 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
             string8_append_bytes(arena, &concrete_name, decl->name.data, decl->name.length);
             string8_append_cstr(arena, &concrete_name, "_");
             string8_append_bytes(arena, &concrete_name, mangle.data, mangle.length);
-            TypeExpr *arg = mangle_type_for(arena, mangle);
+
             TypeSub sub = {0};
-            sub.has = true;
-            sub.param = decl->type_param;
-            sub.arg = arg;
+            sub = struct_sub_for_instance(arena, decl, mangle);
             emit_struct_reflection(arena, out, prog, decl, concrete_name, sub);
         }
     }
@@ -12786,11 +13436,9 @@ static void emit_monomorph_struct_reflection(memops_arena *arena, Program *prog,
             string8_append_bytes(arena, &concrete_name, decl->name.data, decl->name.length);
             string8_append_cstr(arena, &concrete_name, "_");
             string8_append_bytes(arena, &concrete_name, mangle.data, mangle.length);
-            TypeExpr *arg = mangle_type_for(arena, mangle);
+
             TypeSub sub = {0};
-            sub.has = true;
-            sub.param = decl->type_param;
-            sub.arg = arg;
+            sub = struct_sub_for_instance(arena, decl, mangle);
             emit_struct_reflection(arena, out, prog, decl, concrete_name, sub);
         }
     }

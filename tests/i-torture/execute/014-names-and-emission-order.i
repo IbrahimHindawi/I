@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 // Hazards that exist because I lowers to C rather than to machine code. The
 // source is order-independent; the emitted C is not, and C resolves names by a

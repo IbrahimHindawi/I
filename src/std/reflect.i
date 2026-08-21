@@ -1,3 +1,4 @@
+import "cstd.i"
 // Reflection records, mirroring std/reflect.h.
 //
 // The compiler generates one table per struct, union and enum, so `Color<>` and
@@ -41,8 +42,7 @@ reflect_kind_struct: const i32 = 0;
 reflect_kind_union: const i32 = 1;
 reflect_kind_enum: const i32 = 2;
 
-reflect_field: struct = {
-    external;
+reflect_field: struct[external] = {
     name: *const char;
     type: *const char;
     attrs: *const char;
@@ -61,22 +61,19 @@ reflect_field: struct = {
     info: *const reflect;
 }
 
-reflect_value: struct = {
-    external;
+reflect_value: struct[external] = {
     name: *const char;
     // i32, matching C. An unadorned C enum's members must fit in int, and I
     // permits negative members, so signed 32-bit carries every legal value.
     value: i32;
 }
 
-reflect_variant: union = {
-    external;
+reflect_variant: union[external] = {
     fields: *const reflect_field;
     values: *const reflect_value;
 }
 
-reflect: struct = {
-    external;
+reflect: struct[external] = {
     name: *const char;
     size: u64;
     align: u64;

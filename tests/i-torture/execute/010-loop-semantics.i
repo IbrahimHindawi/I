@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 // Loop lowering has a small number of plausible wrong answers, and each one
 // changes an observable count rather than crashing.

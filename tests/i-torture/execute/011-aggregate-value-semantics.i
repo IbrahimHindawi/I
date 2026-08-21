@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 // Aggregates are values. A lowering that passes or assigns them by reference
 // produces the right answer for reads and the wrong answer the moment anything

@@ -122,6 +122,7 @@ main:proc()->i32={
         name="comments",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 
 // top-level line comment
 /* top-level block comment */
@@ -147,6 +148,7 @@ main:proc()->i32 = {
         name="enum_dot_members",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 
 Kind:enum = {
     None,
@@ -353,6 +355,7 @@ main:proc()->i32 = {
         name="generic_delayed_numeric_algorithms",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 
 add:proc<T>(x:T, y:T)->T = {
     return x + y;
@@ -797,6 +800,7 @@ main:proc()->i32={
         name="reflect_angle_syntax",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 
 Payload:struct = {
     x:i32;
@@ -815,6 +819,7 @@ main:proc()->i32 = {
         name="boring_c_surface",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 #define WINCALL
 #define TWICE(x) ((x) * 2)
 
@@ -893,6 +898,7 @@ main:proc()->i32={
         name="gin_c_surface",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 #define WINCALL
 
 I32:alias = i32;
@@ -949,6 +955,7 @@ main:proc()->i32 = {
         name="external_c_array_alias_generic_specialization",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 cinclude "external_c_array_alias_generic_specialization_types.h"
 
 vec2:alias = [2]f32;
@@ -1045,6 +1052,7 @@ main:proc()->i32 = {
         name="initializer_lists",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 
 Pair:struct = {
     a:i32;
@@ -1076,6 +1084,7 @@ main:proc()->i32 = {
         name="typed_compound_initializers",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 
 Payload:struct = {
     x:i32;
@@ -1116,6 +1125,7 @@ main:proc()->i32 = {
         name="generic_value_struct_order_and_bare_init_arg",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 
 Box:struct<T> = {
     value:T;
@@ -1147,6 +1157,7 @@ main:proc()->i32 = {
         name="postfix_address_deref",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 
 Node:struct = {
     value:i32;
@@ -1179,6 +1190,7 @@ main:proc()->i32 = {
         name="function_pointer_types",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 
 Callback:alias = *proc(x:i32, label:*const char)->i32;
 
@@ -1210,6 +1222,7 @@ main:proc()->i32 = {
         name="external_globals",
         source=r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 
 State:struct = {
     value:i32;
@@ -1248,6 +1261,7 @@ shared_sum:proc(p:*SharedPayload)->i32 = {
 
 
 MODULE_APP_SOURCE = r'''
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 cinclude "stdio.h"
 import "module.i"
 
@@ -2667,28 +2681,6 @@ shared_value:i32 = 2;
 
     check_json_semantic_cases = (
         (
-            "check_json_sizeof_arg_count",
-            r'''
-main:proc()->i32 = {
-    value:i32 = sizeof(1, 2);
-    return value;
-}
-''',
-            "sizeof expects exactly 1 argument",
-            "",
-        ),
-        (
-            "check_json_alignof_arg_count",
-            r'''
-main:proc()->i32 = {
-    value:i32 = alignof(1, 2);
-    return value;
-}
-''',
-            "alignof expects exactly 1 argument",
-            "",
-        ),
-        (
             "check_json_undeclared_type",
             r'''
 main:proc()->i32 = {
@@ -2916,6 +2908,424 @@ main:proc()->i32 = {
             print(result.stdout)
             return 1
         print(f"ok {case_name}")
+
+    for case_name, which in (("check_json_sizeof_arg_count", "sizeof"),
+                             ("check_json_alignof_arg_count", "alignof")):
+        case_i = TEST_DIR / f"{case_name}.i"
+        case_i.write_text(
+            "main:proc()->i32 = {\n"
+            f"    value:i32 = {which}(1, 2);\n"
+            "    return value;\n}\n",
+            encoding="utf-8", newline="\n",
+        )
+        result = run([str(I_EXE), "--check", str(case_i), "--diagnostics=json"])
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            print(f"{case_name}: expected JSON parse diagnostic")
+            print(result.stdout)
+            return 1
+        if (
+            result.returncode == 0
+            or not isinstance(data, list)
+            or len(data) != 1
+            or data[0].get("category") != "parse"
+            or f"{which} takes exactly one operand" not in data[0].get("message", "")
+        ):
+            print(f"{case_name}: expected exactly one parse diagnostic")
+            print(result.stdout)
+            return 1
+        print(f"ok {case_name}")
+
+    # `sizeof` used to be split by a parser guess: an operand made only of
+    # identifiers, `*`, `,` and angle brackets was filed as a type, anything else
+    # became an Expr_Call to a proc named "sizeof" that is declared nowhere. The
+    # guess cannot be right -- `sizeof(gin_vertex)` and `sizeof(line)` are the
+    # same shape and only the symbol tables separate them -- so the operand was
+    # never checked at all, and `sizeof(Playr)` reached clang.
+    sizeof_i = TEST_DIR / "sizeof_operand.i"
+
+    # Both readings must keep working; njinn has 445 sites split across them.
+    for src, label in (
+        ("main:proc()->i32 = { return cast(sizeof(i32), i32); }\n", "builtin type"),
+        ("P:struct = { x: i32; }\n"
+         "main:proc()->i32 = { return cast(sizeof(P), i32); }\n", "declared type"),
+        ("main:proc()->i32 = { v:[64]char = {}; return cast(sizeof(v), i32); }\n", "variable"),
+        ("g_buf:[8]i32 = {};\n"
+         "main:proc()->i32 = { return cast(sizeof(g_buf), i32); }\n", "global"),
+        ("P:struct = { x: i32; }\n"
+         "main:proc()->i32 = { p:P = {}; return cast(sizeof(p.x), i32); }\n", "field"),
+        ("main:proc()->i32 = { a:[3]i32 = {}; return cast(sizeof(a[0]), i32); }\n", "index"),
+        ("main:proc()->i32 = { return cast(alignof(i32), i32); }\n", "alignof type"),
+        ("P:struct = { x: i32; }\n"
+         "main:proc()->i32 = { p:P = {}; return cast(alignof(p.x), i32); }\n", "alignof field"),
+    ):
+        sizeof_i.write_text(src, encoding="utf-8", newline="\n")
+        ok = run([str(I_EXE), "check", str(sizeof_i)])
+        if ok.returncode != 0:
+            print(f"sizeof_operand: {label!r} must still check")
+            print(ok.stdout)
+            return 1
+
+    # The point of the change: an operand that is neither is now an error here
+    # rather than a clang error about generated code.
+    for src, label in (
+        ("P:struct = { x: i32; }\n"
+         "main:proc()->i32 = { return cast(sizeof(Playr), i32); }\n", "typo'd type"),
+        ("main:proc()->i32 = { return cast(sizeof(no_such_thing), i32); }\n", "unknown name"),
+        ("main:proc()->i32 = { return cast(alignof(no_such_thing), i32); }\n", "alignof unknown"),
+    ):
+        sizeof_i.write_text(src, encoding="utf-8", newline="\n")
+        bad = run([str(I_EXE), "check", str(sizeof_i)])
+        if bad.returncode == 0 or "neither a type nor a value" not in bad.stdout:
+            print(f"sizeof_operand: {label!r} should be rejected")
+            print(bad.stdout)
+            return 1
+
+    # The expression form must lower to the C operator, not to a call.
+    sizeof_c = TEST_DIR / "sizeof_operand.c"
+    sizeof_i.write_text(
+        "P:struct = { x: i32; }\n"
+        "main:proc()->i32 = { p:P = {}; a:[3]i32 = {};\n"
+        "  return cast(sizeof(p.x), i32) + cast(alignof(p.x), i32)\n"
+        "       + cast(sizeof(a[0]), i32); }\n",
+        encoding="utf-8", newline="\n",
+    )
+    lowered = run([str(I_EXE), "compile", str(sizeof_i), "-o", str(sizeof_c), "--no-header"])
+    if lowered.returncode != 0:
+        print("sizeof_operand: expression form failed to compile")
+        print(lowered.stdout)
+        return 1
+    lowered_c = sizeof_c.read_text(encoding="utf-8")
+    for want in ("sizeof(p.x)", "_Alignof(p.x)", "sizeof(a[0])"):
+        if want not in lowered_c:
+            print(f"sizeof_operand: expected {want!r} in the generated C")
+            print(lowered_c)
+            return 1
+    print("ok sizeof_operand")
+
+    # `sizeof` is a builtin, not an identifier. Declaring one passed `i: checked`
+    # and then emitted `i32 sizeof(i32 n);` or `structdef(sizeof)`, which clang
+    # rejects as a syntax error. Proc and struct names were not checked against
+    # the reserved list at all, so `typedef` slipped through the same way.
+    reserved_i = TEST_DIR / "sizeof_reserved.i"
+    for src, label in (
+        ("sizeof:proc(n: i32)->i32 = { return n; }\n"
+         "main:proc()->i32 = { return 0; }\n", "proc named sizeof"),
+        ("main:proc()->i32 = { sizeof:i32 = 5; return sizeof; }\n", "local named sizeof"),
+        ("sizeof:struct = { x: i32; }\n"
+         "main:proc()->i32 = { return 0; }\n", "struct named sizeof"),
+        ("alignof:proc()->i32 = { return 1; }\n"
+         "main:proc()->i32 = { return 0; }\n", "proc named alignof"),
+        ("typedef:proc()->i32 = { return 1; }\n"
+         "main:proc()->i32 = { return 0; }\n", "proc named typedef"),
+        ("typedef:struct = { x: i32; }\n"
+         "main:proc()->i32 = { return 0; }\n", "struct named typedef"),
+    ):
+        reserved_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(reserved_i)])
+        if res.returncode == 0 or "cannot be used as a name" not in res.stdout:
+            print(f"sizeof_reserved: {label!r} should be rejected")
+            print(res.stdout)
+            return 1
+    print("ok sizeof_reserved")
+
+    # A call to a name that resolves to nothing used to be accepted silently.
+    # That is how `sops_skin_state_deinit`, `pacops_character_name` and
+    # `guiops_layout_content_height` -- none of which exist -- passed
+    # `i: checked` while writing njinn's fx editor, and were caught only by clang
+    # pointing at generated code. A `cinclude` brings no names into I.
+    undeclared_i = TEST_DIR / "call_undeclared.i"
+    for src, label in (
+        ("main:proc()->i32 = { return no_such_proc_anywhere(3); }\n", "plain call"),
+        ('cinclude "stdio.h"\n'
+         'main:proc()->i32 = { printf("hi\\n"); return 0; }\n', "cinclude is not a declaration"),
+    ):
+        undeclared_i.write_text(src, encoding="utf-8", newline="\n")
+        bad = run([str(I_EXE), "check", str(undeclared_i)])
+        if bad.returncode == 0 or "call to undeclared proc" not in bad.stdout:
+            print(f"call_undeclared: {label!r} should be rejected")
+            print(bad.stdout)
+            return 1
+
+    # Declaring it is what makes it callable.
+    undeclared_i.write_text(
+        'cinclude "stdio.h"\n'
+        "printf: proc(fmt: *const char, ...)->i32 = { external; }\n"
+        'main:proc()->i32 = { printf("hi\\n"); return 0; }\n',
+        encoding="utf-8", newline="\n",
+    )
+    good = run([str(I_EXE), "check", str(undeclared_i)])
+    if good.returncode != 0:
+        print("call_undeclared: a declared external must be callable")
+        print(good.stdout)
+        return 1
+
+    # `printfmt` is lowered during emission and never reaches the backend as a
+    # call, so it has no declaration to find and must not be reported.
+    undeclared_i.write_text(
+        'cinclude "stdio.h"\n'
+        "printf: proc(fmt: *const char, ...)->i32 = { external; }\n"
+        'main:proc()->i32 = { printfmt("n={}\\n", 3); return 0; }\n',
+        encoding="utf-8", newline="\n",
+    )
+    builtin = run([str(I_EXE), "check", str(undeclared_i)])
+    if builtin.returncode != 0:
+        print("call_undeclared: printfmt is a builtin, not an undeclared call")
+        print(builtin.stdout)
+        return 1
+    print("ok call_undeclared")
+
+    # A function-like `#define` is callable: cpp expands it, so requiring a proc
+    # declaration would be requiring a declaration for something that is not a
+    # proc. 131 of njinn's 309 unresolved calls were `gin_require`/`gin_assert`.
+    # Its signature is genuinely unknown -- cpp has no types -- so any argument
+    # list is accepted and the result has no type of its own.
+    macro_i = TEST_DIR / "call_macro.i"
+    macro_i.write_text(
+        "#define TWICE(x) ((x) * 2)\n"
+        "#define REQUIRE(cond, tag) do { if (!(cond)) { } } while (0)\n"
+        "#define PLAIN_LIMIT 128\n"
+        "main:proc()->i32 = {\n"
+        "    REQUIRE(1 == 1, \"tag\");\n"
+        "    n:i32 = TWICE(4);\n"
+        "    return n + PLAIN_LIMIT;\n}\n",
+        encoding="utf-8", newline="\n",
+    )
+    macro = run([str(I_EXE), "check", str(macro_i)])
+    if macro.returncode != 0:
+        print("call_macro: function-like macros must be callable")
+        print(macro.stdout)
+        return 1
+
+    # Through an import, too -- njinn defines gin_require in pch.i and calls it
+    # from eleven other files.
+    macro_mod = TEST_DIR / "call_macro_mod.i"
+    macro_app = TEST_DIR / "call_macro_app.i"
+    macro_mod.write_text("#define SHOUT(x) ((x) + 1)\nhelper:proc()->i32 = { return 1; }\n",
+                         encoding="utf-8", newline="\n")
+    macro_app.write_text('import "call_macro_mod.i"\n'
+                         "main:proc()->i32 = { return SHOUT(1) + helper(); }\n",
+                         encoding="utf-8", newline="\n")
+    macro_import = run([str(I_EXE), "check", str(macro_app)])
+    if macro_import.returncode != 0:
+        print("call_macro: a macro must stay callable through an import")
+        print(macro_import.stdout)
+        return 1
+
+    # An object-like define is a value, not a callable. This is the
+    # discriminating half: registering every define as callable passes the cases
+    # above and breaks this one.
+    macro_i.write_text("#define PLAIN_LIMIT 128\n"
+                       "main:proc()->i32 = { return PLAIN_LIMIT(); }\n",
+                       encoding="utf-8", newline="\n")
+    obj = run([str(I_EXE), "check", str(macro_i)])
+    if obj.returncode == 0 or "call to undeclared proc" not in obj.stdout:
+        print("call_macro: an object-like define must not be callable")
+        print(obj.stdout)
+        return 1
+    print("ok call_macro")
+
+    # Two modules that both use a C function must both declare it, so importing
+    # both has to work. Forbidding it would make modules uncomposable over a
+    # conflict neither author can see. Identical `external` signatures merge; a
+    # disagreement is still an error, and that is not hypothetical -- std
+    # declared fseek's offset as i64 while njinn used C's `long`, and this rule
+    # is what caught it.
+    redecl_mod = TEST_DIR / "redecl_mod.i"
+    redecl_app = TEST_DIR / "redecl_app.i"
+    redecl_mod.write_text(
+        'cinclude "stdio.h"\n'
+        "printf: proc(fmt: *const char, ...)->i32 = { external; }\n"
+        "mod_helper:proc()->i32 = { return 1; }\n",
+        encoding="utf-8", newline="\n")
+    redecl_app.write_text(
+        'cinclude "stdio.h"\n'
+        'import "redecl_mod.i"\n'
+        "printf: proc(fmt: *const char, ...)->i32 = { external; }\n"
+        'main:proc()->i32 = { printf("%d\\n", mod_helper()); return 0; }\n',
+        encoding="utf-8", newline="\n")
+    same = run([str(I_EXE), "check", str(redecl_app)])
+    if same.returncode != 0:
+        print("external_redeclaration: identical external declarations must merge")
+        print(same.stdout)
+        return 1
+
+    redecl_app.write_text(
+        'cinclude "stdio.h"\n'
+        'import "redecl_mod.i"\n'
+        "printf: proc(fmt: *const char)->i32 = { external; }\n"
+        'main:proc()->i32 = { printf("x"); return mod_helper(); }\n',
+        encoding="utf-8", newline="\n")
+    differs = run([str(I_EXE), "check", str(redecl_app)])
+    if differs.returncode == 0 or "duplicate proc declaration" not in differs.stdout:
+        print("external_redeclaration: a disagreeing signature must still be an error")
+        print(differs.stdout)
+        return 1
+
+    # Non-external procs are unaffected: two definitions of the same name is a
+    # real duplicate whatever their signatures say.
+    redecl_app.write_text(
+        'import "redecl_mod.i"\n'
+        "mod_helper:proc()->i32 = { return 2; }\n"
+        "main:proc()->i32 = { return mod_helper(); }\n",
+        encoding="utf-8", newline="\n")
+    defined = run([str(I_EXE), "check", str(redecl_app)])
+    if defined.returncode == 0 or "duplicate proc declaration" not in defined.stdout:
+        print("external_redeclaration: a redefined non-external proc is still duplicate")
+        print(defined.stdout)
+        return 1
+    print("ok external_redeclaration")
+
+    # C resolves a name to its nearest binding, so a local or parameter shadows a
+    # proc of the same name. I checked the proc table first regardless, so it
+    # read `helper(3)` as a call to the proc while C read the same text as
+    # calling the i32 local -- one program, two meanings. The emitted C was
+    # name-for-name identical to the source, so the error surfaced from clang as
+    # "called object type 'i32' is not a function or function pointer", about
+    # generated code the author never wrote.
+    shadow_i = TEST_DIR / "call_shadowed_proc.i"
+    for src, label in (
+        ("helper: proc(v: i32)->i32 = { return v * 2; }\n"
+         "main: proc()->i32 = { helper: i32 = 7; n: i32 = helper(3); return helper + n; }\n",
+         "local shadows proc"),
+        ("helper: proc(v: i32)->i32 = { return v * 2; }\n"
+         "f: proc(helper: i32)->i32 = { return helper(3); }\n"
+         "main: proc()->i32 = { return f(1); }\n",
+         "parameter shadows proc"),
+    ):
+        shadow_i.write_text(src, encoding="utf-8", newline="\n")
+        bad = run([str(I_EXE), "check", str(shadow_i)])
+        if bad.returncode == 0 or "cannot call non-proc symbol 'helper'" not in bad.stdout:
+            print(f"call_shadowed_proc: {label!r} should be rejected at the call")
+            print(bad.stdout)
+            return 1
+
+    # The three discriminating cases. Resolving the scope before the proc table
+    # unconditionally would pass the two above and break all of these.
+    for src, label in (
+        # An ordinary call must still find the proc.
+        ("helper: proc(v: i32)->i32 = { return v * 2; }\n"
+         "main: proc()->i32 = { return helper(3); }\n", "unshadowed call"),
+        # A shadowing binding that *is* callable stays callable, via the
+        # indirect-call path.
+        ("helper: proc(v: i32)->i32 = { return v * 2; }\n"
+         "main: proc()->i32 = { fp: *proc(v: i32)->i32 = helper; return fp(3); }\n",
+         "proc-pointer local"),
+        # C permits the shadow itself silently -- no diagnostic even under
+        # -Wall -Wextra -Wshadow -- and only rejects the call. Matching C is the
+        # point, so a shadow that is never called must still check.
+        ("helper: proc(v: i32)->i32 = { return v * 2; }\n"
+         "main: proc()->i32 = { helper: i32 = 7; return helper; }\n",
+         "shadow that is never called"),
+        # Explicit type arguments are unambiguously a generic proc call, never a
+        # variable, so that path is left alone.
+        ("identity: proc<T>(v: T)->T = { return v; }\n"
+         "main: proc()->i32 = { identity: i32 = 1; return identity<i32>(5) + identity; }\n",
+         "explicit type arguments"),
+    ):
+        shadow_i.write_text(src, encoding="utf-8", newline="\n")
+        good = run([str(I_EXE), "check", str(shadow_i)])
+        if good.returncode != 0:
+            print(f"call_shadowed_proc: {label!r} must still check")
+            print(good.stdout)
+            return 1
+    print("ok call_shadowed_proc")
+
+    # One attribute slot per declaration. The slot already existed on procs,
+    # holding a single calling convention; it now takes a comma-separated list,
+    # and structs and enums have the same one. `external` belongs there because
+    # it describes the declaration -- do not emit it, C already has it -- rather
+    # than being a member of the body.
+    attr_i = TEST_DIR / "decl_attributes.i"
+    for src, label in (
+        ('cinclude "time.h"\n'
+         "timespec: struct[external] = { tv_sec: i64; tv_nsec: long; }\n"
+         "main:proc()->i32 = { t:timespec = {}; return cast(t.tv_sec, i32); }\n",
+         "struct[external] with fields"),
+        ('cinclude "stdio.h"\n'
+         "FILE: struct[external] = {}\n"
+         "main:proc()->i32 = { p:*FILE = null; if (p == null) { return 1; } return 0; }\n",
+         "struct[external] = {} is the opaque form"),
+        ('cinclude "stdio.h"\n'
+         "printf: proc[external](fmt: *const char, ...)->i32 = {}\n"
+         'main:proc()->i32 = { printf("hi\\n"); return 0; }\n',
+         "proc[external]"),
+        ("#define WINCALL\n"
+         'cinclude "stdio.h"\n'
+         "printf: proc[external, WINCALL](fmt: *const char, ...)->i32 = {}\n"
+         'main:proc()->i32 = { printf("hi\\n"); return 0; }\n',
+         "proc[external, WINCALL] -- two attributes"),
+        ('cinclude "stdio.h"\n'
+         "DXGI_FORMAT: enum[external] = { UNKNOWN, }\n"
+         "main:proc()->i32 = { return 0; }\n",
+         "enum[external]"),
+        # The old spellings still parse, which is what let 347 declarations
+        # migrate a file at a time instead of in one commit.
+        ('cinclude "time.h"\n'
+         "timespec: struct = { external; tv_sec: i64; tv_nsec: long; }\n"
+         "main:proc()->i32 = { t:timespec = {}; return cast(t.tv_sec, i32); }\n",
+         "legacy struct = { external; ... }"),
+        ('cinclude "stdio.h"\n'
+         "printf: proc(fmt: *const char, ...)->i32 = { external; }\n"
+         'main:proc()->i32 = { printf("hi\\n"); return 0; }\n',
+         "legacy proc = { external; }"),
+        ("#define WINCALL\n"
+         "add: proc[WINCALL](a: i32, b: i32)->i32 = { return a + b; }\n"
+         "main:proc()->i32 = { return add(1, 2); }\n",
+         "bare callconv, the slot's original meaning"),
+    ):
+        attr_i.write_text(src, encoding="utf-8", newline="\n")
+        ok = run([str(I_EXE), "check", str(attr_i)])
+        if ok.returncode != 0:
+            print(f"decl_attributes: {label!r} must check")
+            print(ok.stdout)
+            return 1
+
+    # The attribute has to actually carry, not merely parse: an `[external]`
+    # declaration must emit no definition, while its non-external neighbour does.
+    attr_c = TEST_DIR / "decl_attributes.c"
+    attr_i.write_text(
+        'cinclude "stdio.h"\n'
+        "FILE: struct[external] = {}\n"
+        "Local: struct = { a: i32; }\n"
+        "printf: proc[external](fmt: *const char, ...)->i32 = {}\n"
+        'main:proc()->i32 = { l:Local = {}; printf("%d\\n", l.a); return 0; }\n',
+        encoding="utf-8", newline="\n")
+    emitted = run([str(I_EXE), "compile", str(attr_i), "-o", str(attr_c), "--no-header"])
+    if emitted.returncode != 0:
+        print("decl_attributes: expected a clean compile")
+        print(emitted.stdout)
+        return 1
+    emitted_c = attr_c.read_text(encoding="utf-8")
+    if "structdef(FILE)" in emitted_c:
+        print("decl_attributes: struct[external] must not emit a definition")
+        return 1
+    if "structdef(Local)" not in emitted_c:
+        print("decl_attributes: a non-external struct must still be emitted")
+        return 1
+    # And for procs. Before the slot took a list, any identifier in it was read
+    # as a calling convention, so `proc[external]` emitted
+    # `i32 external printf(const char *, ...);` -- invalid C from a declaration
+    # that had parsed cleanly. Nothing named printf should be emitted at all.
+    if "external printf" in emitted_c or "i32 printf(" in emitted_c:
+        print("decl_attributes: proc[external] must emit no definition or prototype")
+        print(emitted_c)
+        return 1
+
+    # And the opaque form stays checked -- an empty field list claims nothing,
+    # so a field access on it is still rejected rather than passed to C.
+    attr_i.write_text(
+        'cinclude "stdio.h"\n'
+        "FILE: struct[external] = {}\n"
+        "main:proc()->i32 = { p:*FILE = null; return p[0].bogus; }\n",
+        encoding="utf-8", newline="\n")
+    opaque = run([str(I_EXE), "check", str(attr_i)])
+    if opaque.returncode == 0 or "is external" not in opaque.stdout:
+        print("decl_attributes: field access on an opaque external must be rejected")
+        print(opaque.stdout)
+        return 1
+    print("ok decl_attributes")
 
     line_map_i = TEST_DIR / "generated_line_map.i"
     line_map_c = TEST_DIR / "generated_line_map.c"
@@ -3274,6 +3684,7 @@ main:proc()->i32 = {{
     diamond_shared_dot_path = f"{TEST_DIR.as_posix()}/./diamond_shared.i"
     diamond_shared_i.write_text(r'''
 cinclude "stdio.h"
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 #define DIAMOND_SHARED_FLAG 1
 
 DiamondPayload:struct = {
@@ -3303,6 +3714,7 @@ diamond_right:proc(p:DiamondPayload)->i32 = {{
 }}
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     diamond_app_i.write_text(f'''
+printf: proc(fmt: *const char, ...)->i32 = {{ external; }}
 cinclude "stdio.h"
 import "{diamond_left_i.as_posix()}"
 import "{diamond_right_i.as_posix()}"
@@ -3352,6 +3764,7 @@ main:proc()->i32 = {{
     diamond_rev_app_c = TEST_DIR / "diamond_rev_app.c"
     diamond_rev_app_exe = TEST_DIR / "diamond_rev_app.exe"
     diamond_rev_app_i.write_text(f'''
+printf: proc(fmt: *const char, ...)->i32 = {{ external; }}
 cinclude "stdio.h"
 import "{diamond_right_i.as_posix()}"
 import "{diamond_left_i.as_posix()}"
@@ -6263,6 +6676,64 @@ main:proc()->i32 = {
         return 1
     print("ok type_reflect_no_import")
 
+    # A generic proc may take several type parameters, monomorphising to one
+    # symbol per tuple of arguments. These are the three ways it can be written
+    # wrong; each has to be a diagnostic at the declaration or the call rather
+    # than something the backend discovers.
+    multi_generic_i = TEST_DIR / "type_multi_param_generics.i"
+    for src, needle, label in (
+        ("f: proc<T, U>(a: T, b: U)->T = { return a; }\n"
+         "main: proc()->i32 = { return f<i32>(1, 2); }\n",
+         "expects 2 type args, got 1",
+         "arity"),
+        # A parameter beside a concrete type would be a partial specialisation,
+        # which has no lowering here.
+        ("f: proc<T, i32>(a: T, b: i32)->T = { return a; }\n"
+         "main: proc()->i32 = { return 0; }\n",
+         "must be a new type parameter",
+         "mixed concrete"),
+        ("f: proc<T, T>(a: T, b: T)->T = { return a; }\n"
+         "main: proc()->i32 = { return 0; }\n",
+         "duplicate type parameter",
+         "duplicate"),
+        # Structs take several parameters too, and their arity is checked the
+        # same way, against what the declaration asked for.
+        ("P: struct<K, V> = { k: K; v: V; }\n"
+         "main: proc()->i32 = { x: P<i32> = {}; return x.k; }\n",
+         "expects 2 type args, got 1",
+         "struct arity"),
+    ):
+        multi_generic_i.write_text(src, encoding="utf-8", newline="\n")
+        r = run([str(I_EXE), "check", str(multi_generic_i)])
+        if r.returncode == 0 or needle not in r.stdout:
+            print("type_multi_param_generics: %s should be rejected with %r" % (label, needle))
+            print(r.stdout)
+            return 1
+
+    # And the shape that must keep working: two parameters, two instantiations
+    # over different tuples, each getting its own symbol.
+    multi_generic_c = TEST_DIR / "type_multi_param_generics.c"
+    multi_generic_i.write_text(
+        "pick: proc<T, U>(a: T, b: U)->U = { return b; }\n"
+        "main: proc()->i32 = {\n"
+        "    x: i32 = pick<f32, i32>(1.5f, 4);\n"
+        "    y: f32 = pick<i32, f32>(4, 1.5f);\n"
+        "    return x + cast(y, i32);\n"
+        "}\n",
+        encoding="utf-8", newline="\n")
+    r = run([str(I_EXE), str(multi_generic_i), str(multi_generic_c)])
+    if r.returncode != 0:
+        print("type_multi_param_generics: a well-formed multi-parameter generic should compile")
+        print(r.stdout)
+        return 1
+    generated = multi_generic_c.read_text(encoding="utf-8")
+    # The suffix joins the arguments in order, so the two tuples cannot collide.
+    for needle in ("pick_f32_i32", "pick_i32_f32"):
+        if needle not in generated:
+            print("type_multi_param_generics: expected a monomorph named %s" % needle)
+            return 1
+    print("ok type_multi_param_generics")
+
 
     # The reflect runtime's C names carry an `i_` prefix so they do not squat on
     # the C global namespace of every program -- `reflect` unprefixed is a GLSL
@@ -7203,6 +7674,7 @@ int IB_array_use(IB_ArrayVec3 v, IB_ArrayMat3 m, IB_ArrayMat4 mm, IB_ArrayVec3s 
         ibind_array_alias_use_c = TEST_DIR / "ibind_array_alias_use.c"
         ibind_array_alias_use_exe = TEST_DIR / "ibind_array_alias_use.exe"
         ibind_array_alias_source = r'''
+printf: proc(fmt: *const char, ...)->i32 = { external; }
 cinclude "stdio.h"
 cinclude "ibind_array_alias.h"
 import "{IBIND_OUT}"
@@ -7780,6 +8252,101 @@ main:proc()->i32 = {
             print(bad_indirect.stdout)
             return 1
     print("ok call_indirect_bad")
+
+    # A call whose callee expression has no inferable type used to hand a null
+    # TypeExpr to type_error_call_non_proc, which dereferenced it in
+    # type_mangle_impl: `nosuch.method()` segfaulted the compiler. Six shapes
+    # reached it, including one with a perfectly well-declared receiver
+    # (`n.g()` with `n: i32`), so this was never only about undeclared names.
+    # Exit 1 is a reported diagnostic; a crash is 3221225477 on Windows, so
+    # asserting the code catches a regression even if a message still prints.
+    untyped_base_i = TEST_DIR / "call_untyped_base.i"
+    for src, label in (
+        ("main:proc()->i32 = { return nosuch.method(); }\n", "undeclared receiver"),
+        ("main:proc()->i32 = { n:i32 = 1; return n.g(); }\n", "field on a scalar"),
+        ("main:proc()->i32 = { a:[3]i32 = {}; return a.g(); }\n", "field on an array"),
+        ("f:proc()->void = { return; }\n"
+         "main:proc()->i32 = { return f().g(); }\n", "field on a void call"),
+        ("main:proc()->i32 = { return nosuch[0](); }\n", "index of undeclared"),
+        ("main:proc()->i32 = { return q.w.e.r(); }\n", "chained undeclared"),
+    ):
+        untyped_base_i.write_text(src, encoding="utf-8", newline="\n")
+        untyped = run([str(I_EXE), "check", str(untyped_base_i)])
+        if untyped.returncode != 1:
+            print(f"call_untyped_base: {label!r} expected exit 1, got "
+                  f"{untyped.returncode} (crash?)")
+            print(untyped.stdout)
+            return 1
+        if "error" not in untyped.stdout:
+            print(f"call_untyped_base: {label!r} exited 1 without a diagnostic")
+            print(untyped.stdout)
+            return 1
+    print("ok call_untyped_base")
+
+    # Field access was only checked on pointers, declared aggregates and
+    # reflect records. On a scalar or an array it was accepted silently, so
+    # `n.bogus` with `n: i32` reached clang and became an error about generated
+    # code the author never wrote.
+    fieldless_i = TEST_DIR / "field_access_fieldless.i"
+    for src, label in (
+        ("main:proc()->i32 = { n:i32 = 1; return n.bogus; }\n", "i32"),
+        ("main:proc()->i32 = { v:f32 = 1.0f; return cast(v.bogus, i32); }\n", "f32"),
+        ("main:proc()->i32 = { a:[3]i32 = {}; return a.bogus; }\n", "array"),
+    ):
+        fieldless_i.write_text(src, encoding="utf-8", newline="\n")
+        fieldless = run([str(I_EXE), "check", str(fieldless_i)])
+        if fieldless.returncode != 1 or "has no field" not in fieldless.stdout:
+            print(f"field_access_fieldless: {label} expected a 'has no field' error")
+            print(fieldless.stdout)
+            return 1
+
+    # The discriminating half. A type the compiler has never seen is a foreign C
+    # type arriving through a `cinclude`, and its fields are genuinely unknown
+    # here -- reporting on those would reject njinn, where D3D11_RASTERIZER_DESC
+    # and friends are declared only in d3d11.h. Widening the check to "anything
+    # that is not a declared aggregate" passes the three cases above and breaks
+    # this one, so it is what keeps the fix honest.
+    fieldless_i.write_text(
+        'cinclude "stdio.h"\n'
+        "main:proc()->i32 = { f:FILE = {}; return cast(f.bogus, i32); }\n",
+        encoding="utf-8", newline="\n",
+    )
+    foreign = run([str(I_EXE), "check", str(fieldless_i)])
+    if foreign.returncode != 0:
+        print("field_access_fieldless: a cinclude'd C type must not be reported on")
+        print(foreign.stdout)
+        return 1
+
+    # A pointer field error printed its useful `use q[0].bogus` hint and then
+    # fell through to the generic message, reporting the same mistake twice --
+    # and the second one claimed a pointer "has no field", which is misleading.
+    fieldless_i.write_text(
+        "P:struct = { x: i32; }\n"
+        "main:proc()->i32 = { p:P = {}; q:*P = p.&; return q.bogus; }\n",
+        encoding="utf-8", newline="\n",
+    )
+    dup = run([str(I_EXE), "check", str(fieldless_i)])
+    if dup.stdout.count("type error") != 1:
+        print("field_access_fieldless: expected exactly one error for a pointer field")
+        print(dup.stdout)
+        return 1
+    if "use q[0].bogus" not in dup.stdout:
+        print("field_access_fieldless: the surviving error should be the useful one")
+        print(dup.stdout)
+        return 1
+
+    # And a real field still resolves.
+    fieldless_i.write_text(
+        "P:struct = { x: i32; }\n"
+        "main:proc()->i32 = { p:P = {}; return p.x; }\n",
+        encoding="utf-8", newline="\n",
+    )
+    good = run([str(I_EXE), "check", str(fieldless_i)])
+    if good.returncode != 0:
+        print("field_access_fieldless: a valid field access must still check")
+        print(good.stdout)
+        return 1
+    print("ok field_access_fieldless")
 
     # Identifiers that are legal in I but are C keywords used to reach the C
     # compiler verbatim: `typedef: i32 = 1;` emitted `i32 typedef = 1;` and

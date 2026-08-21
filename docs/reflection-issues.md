@@ -233,6 +233,40 @@ header's.
 helpers and passes unchanged against the I implementations; and by
 `reflect_runtime_names`, which now also fails if the header grows a helper back.*
 
+## Immutability -- settled, and it needed nothing
+
+Reflection tables are compiler-generated and must never be mutated. Measured
+against the current compiler, that is already enforced three ways over:
+
+- **Deep `const` in the emitted C**: `static const i_reflect_value[]`,
+  `static const i_reflect_field[]`, `const i_reflect`, `extern const i_reflect`,
+  with every interior pointer const-qualified in `reflect.h`.
+- **`.rdata`**: `llvm-nm` reports the tables as `R`/`r`. A program that forces a
+  write through segfaults (exit 139).
+- **A mutable `*reflect` is unconstructible**: `p: *reflect = Point<>.&` is a
+  type error -- *expected `ptr_reflect`, got `ptr_const_reflect`*.
+
+A magic lowering of `*reflect` to `*const reflect`, to save writing `const`, was
+proposed and rejected. The short version: that type error *is* the enforcement,
+so the magic would delete the check it was meant to strengthen. It would also
+make `*T` mean different things for different `T` under `substitute_type_sub`,
+and the tedium it saves is 11 spellings across all of njinn -- 75 of the 96 in
+the tree are in `src/std/reflect.i`, one file written once. Full reasoning in
+`shape.md` 9.2.
+
+**The one real hole is not a reflection hole.** `cast` launders `const` away for
+every type, silently:
+
+    p: *reflect = cast(Point<>.&, *reflect);
+    p[0].size = 999;                          // accepted
+
+Tracked as `shape.md` 9.1, alongside the general fix (`cast` from `*const T` to
+`*T` should be an error) and the general answer to the ergonomic complaint
+(type aliases, 9.3). Nothing here needs a reflection-specific change.
+
+*Wants a test asserting the `.rdata` placement, so it cannot silently regress
+into `.data` if the emitter changes.*
+
 ## Nothing Open
 
 Every item this document opened has been settled. The natural next questions, if
@@ -241,6 +275,9 @@ tables should be reachable by name at run time (there is still no
 `i_reflect_find_type`, so a walk can recurse through `info` but cannot look a
 type up from a string), and whether `<>` should extend to anything beyond
 structs, unions and enums.
+
+Immutability was raised and closed above without a language change; the general
+`cast`/`const` hole it exposed lives in `shape.md` 9.1, not here.
 
 Each would need a discriminating test in the execute suite before being called
 done, per `compiler-hardening.md`. `017-generics-and-reflection.i` is where they

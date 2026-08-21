@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 // I lowers to C, so every operator has two precedences: I's, and the one the
 // emitted C would get if the emitter dropped a parenthesis. The emitter

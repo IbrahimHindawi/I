@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 // Corners of the type surface that real code touches rarely enough to go
 // untested: unions, aliases, sizeof against an array, and the empty for.

@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 // forward jump out of a nested loop, the usual reason C code reaches for goto
 find_pair: proc(target: i32)->i32 = {

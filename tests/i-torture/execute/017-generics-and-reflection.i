@@ -2,7 +2,7 @@ cinclude "stdio.h"
 
 import "std/reflect.i"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 // Generics and reflection are I's distinctive features, which makes them the
 // least battle-tested part of the compiler. Monomorphisation in particular has

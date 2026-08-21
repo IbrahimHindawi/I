@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 is_space: proc(c: u8)->bool = {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r';

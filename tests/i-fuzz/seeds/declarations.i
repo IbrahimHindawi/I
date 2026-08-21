@@ -5,7 +5,7 @@ define("SEED_IMPLEMENTATION")
 
 #define SEED_LIMIT 8
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 Color: enum = { Red = -1, Green = 0, Blue = 1 shl 2, Alias = Blue }
 

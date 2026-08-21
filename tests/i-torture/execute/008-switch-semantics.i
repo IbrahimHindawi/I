@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 // A case takes a block, so it does not fall through. This shipped falling
 // through once: an enemy AI ran its approach case, fell into retreat, and

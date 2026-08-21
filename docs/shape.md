@@ -142,7 +142,7 @@ happens to values that do not fit.
 
 ## 3. Names And Scope
 
-### 3.1 Shadowing an enclosing local
+### 3.1 Shadowing an enclosing local *(fixed)*
 
 **Today.** Rejected. Shadowing a *global* is allowed, and sibling blocks may
 reuse a name, so scopes are properly nested — it is specifically the enclosing
@@ -181,6 +181,9 @@ may not shadow a proc", or, if shadowing is allowed, an error at the *call*
 saying the name now refers to a local. Found while auditing the reflect runtime's
 `i_` prefix; it has nothing to do with reflection and reproduces with any proc.
 
+C permits the shadow silently and reports it at the call, so the fix is to own
+that diagnostic rather than to pick a new rule. See `name-resolution.md`.
+
 ### 3.2 C keywords as identifiers
 
 **Today.** Rejected with a diagnostic, added this week — `typedef: i32 = 1`
@@ -198,7 +201,7 @@ is a fair question from a student.
 parameters. Globals, proc names, struct and union names, field names, enum
 members and type aliases are unchecked.
 
-### 3.4 A call to an undeclared name is not an error
+### 3.4 A call to an undeclared name is not an error *(fixed)*
 
 **Today.** Not checked. The name resolves to nothing, and only the C compiler
 objects:
@@ -227,6 +230,10 @@ one; or keep implicit calls and require a flag to allow them, so the permissive
 mode is opt-in rather than the default. Either way the fix is worth more than it
 costs — this is the cheapest possible class of bug to catch and it is currently
 escaping to the backend.
+
+Measured and written up in `name-resolution.md`: where the check goes, what
+actually breaks (16 names, not the 407 call sites it first looks like), and the
+one genuine language question buried in it.
 
 ### 3.3 Visibility
 
@@ -274,13 +281,21 @@ every operator pair.
 **Today.** `import "path.i"` brings a file's symbols into scope. `std` is
 resolved from beside the compiler executable.
 
-**Needs.** What happens on a circular import; whether importing the same file
-twice through different paths is one module or two; whether an import is
-transitive — if A imports B and B imports C, does A see C's symbols; and what
-the generated header is supposed to contain relative to what the file exports.
+**Measured, not assumed** -- three of the four questions here already have
+answers in the implementation:
 
-None of these have shown up as bugs yet, which usually means they have not been
-exercised rather than that they are settled.
+- **Circular imports are diagnosed**, with the full chain:
+  `semantic error: import cycle: a.i -> b.i -> a.i`.
+- **Imports are transitive.** If A imports B and B imports C, A sees C's
+  symbols. Verified with a *discriminating* test: a plain transitive call
+  proves nothing while 3.4 is open, since an unresolved callee is accepted
+  anyway. Passing the wrong argument count through two levels does produce
+  `proc 'deep' expects 0 args, got 3`, so the visibility is real.
+- **Transitive types work too**, not just procs.
+
+**Still open.** Whether importing the same file twice through different paths
+is one module or two, and what the generated header is supposed to contain
+relative to what the file exports.
 
 ## 6. Generics And Reflection
 
@@ -322,6 +337,240 @@ this with runtime flags.
 broadly: whether I wants conditional compilation at all, or something better,
 given that the soul document lists "macro accidents" among C's failures.
 
+## 9. Const And Immutability
+
+### 9.1 `cast` launders `const` away
+
+**Today.** `const` is enforced on assignment, but `cast` is a hole straight
+through it, with no diagnostic:
+
+    p: *reflect = cast(Point<>.&, *reflect);
+    p[0].size = 999;                          // i: generated
+
+The emitted C is `((i_reflect *)(&(Point_reflect)))`. clang catches it only
+under `-Wcast-qual`, which is not on by default. The write does fault at
+runtime -- see 9.2 -- so the failure mode is a crash rather than corruption, but
+the compile-time gap is real.
+
+This is not a reflection bug. It is general: `cast` from `*const T` to `*T` is
+accepted for every `T`. The Settled list below claims `const` is enforced, and
+through `cast` it is not.
+
+**Bearing.** Make `cast` from `*const T` to `*T` an error, or require a named,
+ugly, greppable escape hatch for the rare case that wants it. Fixing it here
+covers reflection for free and repairs a claim this document currently makes
+falsely.
+
+### 9.2 Reflection immutability -- settled, no language change
+
+Reflection tables are compiler-generated and must never be mutated. Measured
+against the current compiler, this is already true at every level:
+
+- **Deep `const` in the emitted C.** `static const i_reflect_value[]`,
+  `static const i_reflect_field[]`, `const i_reflect`, `extern const i_reflect`,
+  and every interior pointer const-qualified in `reflect.h` (`const char *name`,
+  `const i_reflect *info`).
+- **Read-only section.** `llvm-nm` reports the tables as `R`/`r` -- `.rdata`. A
+  program that forces a write through segfaults (exit 139). The pages are
+  read-only at runtime already.
+- **A mutable `*reflect` is unconstructible.** `p: *reflect = Point<>.&` is a
+  type error today: *initializer expected `ptr_reflect`, got
+  `ptr_const_reflect`*.
+
+**Rejected: lowering `*reflect` to `*const reflect` as a magic exception.**
+Proposed to save writing `const`. Four reasons not to:
+
+1. **It deletes the check it is trying to strengthen.** That type error on
+   `p: *reflect = Point<>.&` *is* the enforcement. Make `*reflect` silently mean
+   `*const reflect` and the declaration compiles; whatever catches the
+   subsequent write fires later, further from the cause, or not at all.
+2. **Generics.** `proc<T>(p: *T)` instantiated with `T = reflect` -- does the
+   magic apply? If yes, `substitute_type_sub` becomes type-dependent and `*T`
+   means different things for different `T`. If no, two spellings diverge based
+   on how you arrived at them.
+3. **It moves magic from the producer into the type system.** `Type<>` is magic
+   at one site: the compiler manufactures a table. Once manufactured, `reflect`
+   is an ordinary struct with ordinary rules, and that containment is why the
+   magic has cost nothing so far. `*T` meaning different things for different
+   `T` is not contained -- it is in every signature, every instantiation, the
+   LSP, and every error message.
+4. **The tedium is smaller than it feels.** 96 `*const reflect*` spellings
+   exist; **75 are in `src/std/reflect.i`**, one file written once. All of njinn
+   (28K lines) has 11. i-learn has 6. That is a permanent type-system exception
+   to save eleven `const` keywords in an entire engine.
+
+The ergonomic complaint is real but wants the general fix in 9.3, not an
+exception.
+
+**Still worth doing:** assert the `.rdata` placement in `run_tests.py`, so it
+cannot silently regress into `.data` if the emitter changes.
+
+### 9.3 Type aliases exist, spelled `alias`
+
+**Correction.** An earlier draft of this section claimed there was no alias form
+at all. That was wrong: it was based on testing `myint: type = i32`, which fails
+because the keyword is `alias`, not `type`.
+
+    myint: alias = i32;
+    reflectref: alias = *const reflect;
+
+Both check. `bindings/cglm.i` has been using it all along -- `vec2: alias = [2]f32;`.
+
+So the ergonomic complaint behind the rejected `*reflect` magic in 9.2 already
+has its general answer in the language, and it needs no new feature:
+`reflectref: alias = *const reflect;` covers `*const reflect_field` and
+`*const reflect_value` too.
+
+**Still worth recording.** Whether aliases are transparent (a second spelling of
+the same type) or distinct (a new type that does not interconvert). Transparent
+appears to be what happens today -- `vec3` and `[3]f32` are used
+interchangeably -- but it is nowhere written down, which is exactly the condition
+this document exists to remove.
+
+## 10. Module Namespaces
+
+**The proposal.** `mem.arena` in I source, lowering to `mem_arena` in C.
+
+**Today.** There is no namespace form of any kind. Every spelling of one is a
+parse error:
+
+    import "mem.i" as mem      // parse error: expected ':' after identifier
+    module mem;                // parse error: expected ':' after identifier
+
+So symbols are namespaced by hand, in C's manner. In njinn, **887 of 1035
+top-level procs (86%) carry a hand-written module prefix**, across **29 distinct
+prefixes** -- `gin_` (204), `gops_` (201), `fxops_` (106), `guiops_` (59),
+`resops_` (52), and so on down to `ma_` and `resio_`. That is precisely the
+"repeated C-era bookkeeping" `i-soul.md` says the language should make explicit
+and checkable rather than leave to discipline, and it is currently enforced by
+nothing but habit.
+
+**A crash, found while checking the above -- now fixed.** Dotted call syntax did
+not merely fail to parse, it segfaulted the compiler:
+
+    main: proc()->i32 = { return nosuch.method(); }     // exit 139
+
+The first guess -- "calls through an unresolved receiver" -- was wrong. Six
+shapes reached it, including `n.g()` with `n: i32`, whose receiver is perfectly
+well declared. The real condition was *any* callee expression with no inferable
+type: `type_check_call` passed a null `TypeExpr` to `type_error_call_non_proc`,
+which dereferenced it in `type_mangle_impl`.
+
+Fixed, along with two defects found underneath it:
+
+- `type_error_field_access` printed its "cannot resolve base type" diagnostic and
+  then fell through to dereference the null it had just reported.
+- The pointer arm also fell through, so every pointer field error printed twice
+  -- once with the useful `use q[0].bogus` hint, then again as
+  `type 'ptr_P' has no field 'bogus'`, which is misleading since pointers have no
+  fields at all.
+- Field access was checked only on pointers, declared aggregates and reflect
+  records, so `n.bogus` with `n: i32` was **accepted silently** and became a
+  clang error about generated code. Now reported, but only for types that
+  provably have no fields (I's scalars and arrays): a name the compiler has never
+  seen is a foreign C type from a `cinclude`, whose fields are genuinely unknown,
+  and reporting on those rejects njinn. That silence is the type-level twin of
+  3.4 and goes away with the same fix.
+
+*Covered by `call_untyped_base` (six shapes, asserting exit 1 rather than a
+crash) and `field_access_fieldless` (scalars and arrays report, a `cinclude`d C
+type does not, a pointer reports exactly once, a real field still resolves). Both
+verified against the pre-fix compiler: the crash cases exit 139, the scalar cases
+exit 0, and the pointer case reports twice.*
+
+**Why this is a better kind of magic than the one rejected in 9.2.** The
+distinction is where the magic lives. `*reflect` meaning `*const reflect` puts it
+in the *type system*, where `*T` starts meaning different things for different
+`T` and the effect reaches every signature, every instantiation and every error
+message. `mem.arena` puts it in the *surface syntax*: resolved once at name
+resolution, lowering one-to-one to a symbol you could have written by hand. It is
+also the naming scheme already committed to -- `proc<T>` becomes `proc_T` and
+`Pair<i32, f32>` becomes `Pair_i32_f32`, so `mem.arena` becoming `mem_arena` is
+the same rule applied to modules instead of type arguments.
+
+**Three things to decide.**
+
+1. **Is the prefix mandatory or optional at the call site?** Required gives
+   C++/Rust-grade clarity and changes every existing njinn call site. Optional --
+   bare `arena` still resolves -- makes it an alias, and then two modules
+   exporting `arena` need a rule for which wins. Optional-with-ambiguity-error is
+   the likely answer, but note it **interacts with 3.4**: while an unresolved
+   callee is silently accepted, the checker cannot distinguish "ambiguous" from
+   "undeclared", so this decision is partly blocked on that one.
+2. **Where does the module name come from?** Filename (`mem.i` gives `mem`), an
+   explicit `module` declaration in the file, or the import site
+   (`import "std/mem.i" as mem`). Filename is the least ceremony; explicit is the
+   only one that survives a file rename without breaking callers.
+3. **`.` is already field access.** `mem.arena` and `player.health` are the same
+   token sequence, separated only by whether the left side resolves to a module
+   or a value. Go does exactly this, so it is workable, but the parser cannot
+   decide it and the resolver must -- which affects the LSP, and it means every
+   "no such field" and "no such module" diagnostic has to know which one the user
+   meant. Worth signing up for deliberately rather than discovering.
+
+**Bearing -- weaker than it first looks.** The 86% figure proves the prefixes get
+written, not that a feature is needed. Checked for drift and there is almost
+none: `fxops.i` is 106 of 111 consistent, `gops.i` 199 of 218, `gin.i` 191 of
+212. The files that look like total violations -- `externs.i` (34 of 34),
+`os.i` (53 of 58), `pch.i` (7 of 7) -- exist to declare *C* symbols, which no
+namespace feature would touch. The discipline is not failing.
+
+What it actually buys, ranked:
+
+1. Renaming a module is one edit instead of 201. Real, rare, and `sed` does it.
+2. **Import-site aliasing** (`import "long/path.i" as g`). Manual prefixes cannot
+   do this at all, because the prefix is baked into the symbol.
+3. **Two libraries you do not control that both prefix `str_`.** With flat names
+   you fork one. This is the only decisive argument, and it is
+   `stranger-with-generics.md`'s problem, not njinn's.
+
+What it costs:
+
+4. **Grep.** Today `grep gops_update` finds exactly one thing. Under namespaces
+   the definition reads `update:` and callers read `gops.update`, so the string
+   `gops_update` exists nowhere in the source -- only in generated C. For a
+   codebase navigated by grep this is a daily cost against a rare benefit.
+5. **A translation tax downstream.** Debugger frames, profiler rows, linker
+   errors and crash dumps all say `mem_arena` while the source says `mem.arena`.
+   Mechanical and cheap, but "the C you get is the C you would have written" is a
+   selling point and this chips at it.
+6. The `.` overload: resolver complexity, LSP work, and every "no such field" /
+   "no such module" diagnostic has to infer which was meant.
+
+**The reframe.** `std.vec` versus `std_vec` is cosmetic. The question underneath
+is whether two strangers' libraries can coexist in one program. If that is the
+goal, the feature is (2) and (3) -- import aliasing and module identity separate
+from symbol spelling -- and the dotted spelling is incidental. That makes this a
+library-ecosystem feature in ergonomics costume, and there is no ecosystem yet.
+
+**So: below 3.4, 9.1 and `true`/`false`.** Build import aliasing when there is a
+second author. The segfault above stands on its own and should be fixed either
+way.
+
+## 11. Declaration Attributes *(implemented)*
+
+**Today.** `proc[...]` is already parsed and carries a calling convention
+(`platform_add: proc[WINCALL](...)`), seven uses across the tree. Structs have no
+such slot, and `external` is spelled two different ways -- a pseudo-field inside a
+struct body, a statement inside a proc body.
+
+**Proposal.** One attribute slot per declaration:
+`struct[external]`, `proc[external, WINCALL]`, `struct[packed]`,
+`struct[align(16)]`, `enum[u32]`.
+
+The case is not tidiness. The last three are **parse errors today** with no
+syntax at all -- they are §7 (packing and alignment, unstatable in a language
+driving a D3D11 renderer) and §2.6 (enum underlying type). One slot answers all
+of them. It also dissolves the opaque-struct question: `struct[external] = {}`
+with an empty field list *is* the opaque form, so there is no second construct.
+
+**Implemented**, and the tree has migrated: 268 procs and 79 structs, unions and
+enums across 30 files. The old spellings still parse, and the test fixtures were
+left on them so the legacy form stays covered. `= {}` stays on external procs
+(`name : kind = value` with no exceptions) and attributes are comma-separated in
+one bracket. Still open: whether attributes take *arguments*, which is what
+`struct[align(16)]` and `enum[u32]` need. Full account in `attributes.md`.
+
 ## Settled This Week
 
 Recorded so they do not get re-litigated:
@@ -333,7 +582,8 @@ Recorded so they do not get re-litigated:
   regenerating a 28,301-line engine with zero changed lines.
 - **`if` requires a braced body**, which makes the dangling-else ambiguity
   unwritable. Already true; worth stating as intent rather than accident.
-- **`const` is enforced** on assignment.
+- **`const` is enforced** on assignment -- but *not* through `cast`, which
+  launders it silently. See 9.1; the claim is only half true today.
 - **Reflection is one record, kind-tagged, with a variant payload.** Odin's
   shape, which ports to I as-is; Zig's needs language-level tagged unions first.
   This also settled nested type links and made a union its own kind rather than
@@ -345,6 +595,21 @@ Recorded so they do not get re-litigated:
 - **Reflected enum values are `i32`.** I permits negative members and they must
   round-trip; `u32` would turn `-1` into `4294967295` and break every lookup by
   value. Independent of how the enum underlying type (§2.6) resolves.
+- **A `cinclude` brings no names into I.** It sends a header to the C compiler
+  and nothing else; every C function is declared in I before it can be called.
+  Implemented, with three consequent rules -- function-like macros are callable
+  with an unknown signature, identical `external` redeclarations merge, and
+  builtins spelled like calls are exempt. Full account in `name-resolution.md`.
+- **A name resolves to its nearest binding, as in C.** A local or parameter
+  shadows a proc, and calling it is an error at the call site rather than a clang
+  message about generated code. The shadow itself stays legal and silent, which
+  is also what C does. Implemented; see `name-resolution.md` 3.1, including why
+  the first analysis of this one was wrong.
+- **Reflection data is immutable, and needs no new language rule to be.**
+  Deep `const`, `.rdata` placement and an unconstructible mutable
+  `*reflect` are all already in place. A proposed magic lowering of
+  `*reflect` to `*const reflect` was rejected: it would delete the very
+  diagnostic that enforces this. Full reasoning in 9.2.
 
 ## Suggested Order
 
@@ -355,7 +620,9 @@ Recorded so they do not get re-litigated:
 3. **`bool` vs `b32`, and `string`** (§2.2, §2.3) — small, and they remove
    visible inconsistency.
 4. **Shadowing** (§3.1) — a one-line change either way, currently asymmetric.
-5. Everything else as it comes up.
+5. **`cast` and `const`** (§9.1) — small, and it makes an existing Settled
+   claim true instead of half true.
+6. Everything else as it comes up.
 
 Whatever is decided, write it into the lowering table described in
 `compiler-hardening.md` and give it a discriminating test. A decision that is

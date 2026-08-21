@@ -1,5 +1,6 @@
 cinclude "stdio.h"
 cinclude "stdlib.h"
+import "cstd.i"
 
 Option: struct<T> = {
     has_value: bool;

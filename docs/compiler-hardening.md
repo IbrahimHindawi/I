@@ -150,6 +150,12 @@ misleads a reader — including a student.
 
 ## Not yet covered
 
+The largest gap is not a construct but a resolution rule: **a call to a name
+nothing declares is not checked**, so it reaches clang and reports there. Three
+instances were hit in a single sitting of ordinary porting. Measured and written
+up separately in `name-resolution.md`, together with the proc-shadowing case,
+which is the same shape.
+
 Constructs with no discriminating test, roughly in the order worth doing:
 
 - **field and enum-member name collisions** with C keywords, and the remaining

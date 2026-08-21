@@ -4,11 +4,12 @@ cinclude "std/memops_os.h"
 cinclude "stdlib.h"
 cinclude "stdio.h"
 cinclude "string.h"
+import "cstd.i"
 
-memops_os_page_size: proc()->u64 = { external; }
-memops_os_reserve: proc(size: u64)->*u8 = { external; }
-memops_os_commit: proc(ptr: *void, size: u64)->*void = { external; }
-memops_os_debug_break: proc()->void = { external; }
+memops_os_page_size: proc[external]()->u64 = {}
+memops_os_reserve: proc[external](size: u64)->*u8 = {}
+memops_os_commit: proc[external](ptr: *void, size: u64)->*void = {}
+memops_os_debug_break: proc[external]()->void = {}
 
 memops_arena: struct = {
     base: *u8;
