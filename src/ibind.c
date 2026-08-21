@@ -482,9 +482,8 @@ static void emit_enum(CXCursor c, FILE *out) {
         return;
     }
     char *clean = sanitize_ident(name);
-    fprintf(out, "%s: enum = {\n", clean);
+    fprintf(out, "%s: enum[external] = {\n", clean);
     clang_visitChildren(c, enum_item_visitor, out);
-    fprintf(out, "    external;\n");
     fprintf(out, "}\n\n");
     free(clean);
     free(name);
@@ -604,7 +603,7 @@ static void emit_opaque_record_decl_for_type(CXType type, FILE *out) {
     char *clean = sanitize_ident(strip_tag_prefix(name));
     if (!emitted_name_contains(g_emitted_opaque_records, clean)) {
         emitted_name_add(&g_emitted_opaque_records, clean);
-        fprintf(out, "%s: struct = { external; }\n\n", clean);
+        fprintf(out, "%s: struct[external] = {}\n\n", clean);
     }
     free(clean);
     free(name);
@@ -757,10 +756,9 @@ static void emit_record_named(CXCursor c, FILE *out, int is_union, const char *f
     if (size >= 0 && align >= 0) {
         fprintf(out, "// ibind: layout size=%lld align=%lld\n", size, align);
     }
-    fprintf(out, "%s: %s = {\n", clean, is_union ? "union" : "struct");
+    fprintf(out, "%s: %s[external] = {\n", clean, is_union ? "union" : "struct");
     record_emit_ctx ctx = {out, clean, 0};
     clang_visitChildren(c, record_field_visitor, &ctx);
-    fprintf(out, "    external;\n");
     fprintf(out, "}\n\n");
     free(clean);
     free(name);
@@ -782,9 +780,9 @@ static void emit_function(CXCursor c, FILE *out) {
     emit_opaque_record_decl_for_type(clang_getResultType(fn), out);
     const char *callconv = calling_conv_name(fn);
     if (callconv) {
-        fprintf(out, "%s: proc[%s](", clean, callconv);
+        fprintf(out, "%s: proc[external_emit, %s](", clean, callconv);
     } else {
-        fprintf(out, "%s: proc(", clean);
+        fprintf(out, "%s: proc[external_emit](", clean);
     }
     for (int i = 0; i < argc; i++) {
         CXCursor arg = clang_Cursor_getArgument(c, (unsigned)i);
@@ -810,7 +808,7 @@ static void emit_function(CXCursor c, FILE *out) {
         fprintf(out, "...");
     }
     char *ret = emit_type(clang_getResultType(fn));
-    fprintf(out, ")->%s = { external_emit; }\n", ret);
+    fprintf(out, ")->%s = {}\n", ret);
     free(ret);
     free(clean);
     free(name);

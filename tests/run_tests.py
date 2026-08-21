@@ -7536,7 +7536,7 @@ int IB_log(const char *fmt, ...);
             '#define IB_STATIC_TEXT "typed text"',
             '#define IB_STATIC_CHAR 65',
             '#define IB_ANON_READY 7',
-            "IB_Mode: enum = {",
+            "IB_Mode: enum[external] = {",
             "    IB_MODE_READY = 1,",
             "IB_Callback: alias = *proc(x:i32, label:*const char)->i32;",
             "IB_DataCallback: alias = *proc(ctx:*void, data:*const void)->void;",
@@ -7547,12 +7547,12 @@ int IB_log(const char *fmt, ...);
             "IB_Vec3: alias = [3]f32;",
             "IB_Mat3: alias = [3]IB_Vec3;",
             "IB_Mat4: alias = [4][4]f32;",
-            "IB_Opaque: struct = { external; }",
-            "IB_Private: struct = { external; }",
-            "IB_FieldOpaque: struct = { external; }",
+            "IB_Opaque: struct[external] = {}",
+            "IB_Private: struct[external] = {}",
+            "IB_FieldOpaque: struct[external] = {}",
             "IB_Handle: alias = *IB_Private;",
             "IB_ConstHandle: alias = *const IB_Private;",
-            "IB_Payload: struct = {",
+            "IB_Payload: struct[external] = {",
             "    value:i32;",
             "    weights:[4]f32;",
             "    cb:IB_Callback;",
@@ -7562,45 +7562,45 @@ int IB_log(const char *fmt, ...);
             "    title:IB_LPCWSTR;",
             "    handle:IB_Handle;",
             "    field_opaque:*IB_FieldOpaque;",
-            "IB_Defined: struct = {",
+            "IB_Defined: struct[external] = {",
             "    value:i32;",
-            "IB_Bits: struct = {",
+            "IB_Bits: struct[external] = {",
             "    // ibind: bitfield flags:3",
             "    // ibind: field_offset flags:0",
             "    flags:u32;",
             "    // ibind: bitfield mode:5",
             "    // ibind: field_offset mode:3",
             "    mode:u32;",
-            "IB_Anon_anon0: union = {",
+            "IB_Anon_anon0: union[external] = {",
             "    x:i32;",
             "    y:f32;",
-            "IB_Anon_anon1: struct = {",
+            "IB_Anon_anon1: struct[external] = {",
             "    a:i32;",
             "    b:i32;",
-            "IB_Anon_anon2: struct = {",
+            "IB_Anon_anon2: struct[external] = {",
             "    z:i32;",
-            "IB_Anon: struct = {",
+            "IB_Anon: struct[external] = {",
             "    _anon0:IB_Anon_anon0;",
             "    named:IB_Anon_anon1;",
             "    _anon2:IB_Anon_anon2;",
             "// ibind: packed",
             "// ibind: layout size=5 align=1",
-            "IB_Packed: struct = {",
+            "IB_Packed: struct[external] = {",
             "    // ibind: field_offset tag:0",
             "    tag:char;",
             "    // ibind: field_offset value:8",
             "    value:i32;",
-            "IB_Flex: struct = {",
+            "IB_Flex: struct[external] = {",
             "    count:u32;",
             "    // ibind: incomplete_array bytes",
             "    bytes:*char;",
-            "IB_do: proc(cb: IB_Callback, payload: *IB_Payload)->i32 = { external_emit; }",
-            "IB_copy: proc(dst: *void, src: *const void, count: u32)->*void = { external_emit; }",
-            "IB_use_handle: proc(handle: IB_Handle, opaque: *const IB_Opaque, defined: *IB_Defined)->i32 = { external_emit; }",
-            "IB_call: proc[__stdcall](cb: IB_StdCallback, value: i32)->i32 = { external_emit; }",
-            "IB_wide: proc(title: IB_LPCWSTR, out_title: *IB_WChar)->i32 = { external_emit; }",
-            "IB_use_vec: proc(v: IB_Vec3, m: IB_Mat3, mm: IB_Mat4)->i32 = { external_emit; }",
-            "IB_log: proc(fmt: *const char, ...)->i32 = { external_emit; }",
+            "IB_do: proc[external_emit](cb: IB_Callback, payload: *IB_Payload)->i32 = {}",
+            "IB_copy: proc[external_emit](dst: *void, src: *const void, count: u32)->*void = {}",
+            "IB_use_handle: proc[external_emit](handle: IB_Handle, opaque: *const IB_Opaque, defined: *IB_Defined)->i32 = {}",
+            "IB_call: proc[external_emit, __stdcall](cb: IB_StdCallback, value: i32)->i32 = {}",
+            "IB_wide: proc[external_emit](title: IB_LPCWSTR, out_title: *IB_WChar)->i32 = {}",
+            "IB_use_vec: proc[external_emit](v: IB_Vec3, m: IB_Mat3, mm: IB_Mat4)->i32 = {}",
+            "IB_log: proc[external_emit](fmt: *const char, ...)->i32 = {}",
         ):
             if needle not in ibind_text:
                 print(f"ibind_bindgen: generated binding missing {needle!r}")
@@ -7622,7 +7622,7 @@ int IB_log(const char *fmt, ...);
             print("ibind_bindgen: typed constants should honor --prefix")
             print(ibind_text)
             return 1
-        if "IB_Defined: struct = { external; }" in ibind_text:
+        if "IB_Defined: struct[external] = {}" in ibind_text:
             print("ibind_bindgen: defined forward typedef should not emit opaque external record")
             print(ibind_text)
             return 1
@@ -7656,14 +7656,14 @@ int IB_array_use(IB_ArrayVec3 v, IB_ArrayMat3 m, IB_ArrayMat4 mm, IB_ArrayVec3s 
             "IB_ArrayVec4: alias = [4]f32;",
             "IB_ArrayMat3: alias = [3]IB_ArrayVec3;",
             "IB_ArrayMat4: alias = [4][4]f32;",
-            "IB_ArrayVec3s: union = {",
+            "IB_ArrayVec3s: union[external] = {",
             "    raw:IB_ArrayVec3;",
-            "IB_ArrayVec4s: union = {",
+            "IB_ArrayVec4s: union[external] = {",
             "    raw:IB_ArrayVec4;",
-            "IB_ArrayMat4s: union = {",
+            "IB_ArrayMat4s: union[external] = {",
             "    raw:[4]IB_ArrayVec4;",
             "    col:[4]IB_ArrayVec4s;",
-            "IB_array_use: proc(v: IB_ArrayVec3, m: IB_ArrayMat3, mm: IB_ArrayMat4, vs: IB_ArrayVec3s, ms: IB_ArrayMat4s)->i32 = { external_emit; }",
+            "IB_array_use: proc[external_emit](v: IB_ArrayVec3, m: IB_ArrayMat3, mm: IB_ArrayMat4, vs: IB_ArrayVec3s, ms: IB_ArrayMat4s)->i32 = {}",
         ):
             if needle not in ibind_array_alias_text:
                 print(f"ibind_array_alias: generated binding missing {needle!r}")
@@ -7753,7 +7753,7 @@ typedef struct IB_FilterPayload {
             print(ibind_filter.stdout)
             return ibind_filter.returncode
         ibind_filter_text = ibind_filter_out.read_text(encoding="utf-8")
-        if "IB_FilterPayload: struct = {" not in ibind_filter_text or "noise:*IB_FilterNoise;" not in ibind_filter_text:
+        if "IB_FilterPayload: struct[external] = {" not in ibind_filter_text or "noise:*IB_FilterNoise;" not in ibind_filter_text:
             print("ibind_bindgen_filter: expected selected header declaration and dependency type reference")
             print(ibind_filter_text)
             return 1
