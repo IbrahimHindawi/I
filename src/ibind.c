@@ -756,7 +756,10 @@ static void emit_record_named(CXCursor c, FILE *out, int is_union, const char *f
     if (size >= 0 && align >= 0) {
         fprintf(out, "// ibind: layout size=%lld align=%lld\n", size, align);
     }
-    fprintf(out, "%s: %s[external] = {\n", clean, is_union ? "union" : "struct");
+    /* A forced name means the record is anonymous in the header and exists
+       only under a name ibind invented, so C cannot be asked its layout. */
+    fprintf(out, "%s: %s[external%s] = {\n", clean, is_union ? "union" : "struct",
+            forced_name ? ", no_layout_check" : "");
     record_emit_ctx ctx = {out, clean, 0};
     clang_visitChildren(c, record_field_visitor, &ctx);
     fprintf(out, "}\n\n");

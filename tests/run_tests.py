@@ -3327,6 +3327,91 @@ main:proc()->i32 = {
         return 1
     print("ok decl_attributes")
 
+    # An `external` record is a claim about a type C owns: these fields, these
+    # types, this order. Nothing checked the claim, so a header that reordered a
+    # member -- or a `long` that was the wrong width on this target -- meant I
+    # type-checked field access against a layout that was a lie, and the result
+    # was wrong bytes rather than a diagnostic.
+    #
+    # The compiler cannot assert `sizeof(X) == 24`; it does not compute C
+    # layouts. It emits a shadow record built from what I was told and asks C to
+    # compare the two, which catches order, member type, padding and alignment
+    # for free at compile time.
+    layout_h = TEST_DIR / "layout_check.h"
+    layout_h.write_text(
+        "#pragma once\n"
+        "#include <stdint.h>\n"
+        "typedef struct lc_point { int32_t x; int32_t y; } lc_point;\n",
+        encoding="utf-8", newline="\n")
+    layout_i = TEST_DIR / "layout_check.i"
+    layout_c = TEST_DIR / "layout_check.c"
+
+    def layout_build(fields, extra=""):
+        layout_i.write_text(
+            'cinclude "layout_check.h"\n'
+            f"lc_point: struct[external{extra}] = {{ {fields} }}\n"
+            "main:proc()->i32 = { p:lc_point = {}; return 0; }\n",
+            encoding="utf-8", newline="\n")
+        gen = run([str(I_EXE), "compile", str(layout_i), "-o", str(layout_c), "--no-header"])
+        if gen.returncode != 0:
+            return None, gen.stdout
+        built = run(["clang.exe", "-c", str(layout_c), "-I", str(TEST_DIR),
+                     "-I", "src", "-I", "src/std", "-o", str(TEST_DIR / "layout_check.o")])
+        return built.returncode, built.stdout
+
+    # The truthful declaration compiles, and the checks are actually emitted --
+    # zero errors would otherwise be indistinguishable from zero checks.
+    rc, out = layout_build("x: i32; y: i32;")
+    if rc != 0:
+        print("layout_check: a correct declaration must compile")
+        print(out)
+        return 1
+    generated = layout_c.read_text(encoding="utf-8")
+    if generated.count("_Static_assert") < 6 or "i_layout_lc_point" not in generated:
+        print("layout_check: expected a shadow record and per-field assertions")
+        print(generated)
+        return 1
+
+    # Each way a declaration can be wrong. Reordering is the one a bare size
+    # check would miss, which is why offsets are asserted per field.
+    for fields, label in (
+        ("x: f64; y: f64;", "wrong member types"),
+        ("y: i32; x: i32;", "members reordered"),
+        ("x: i32; y: i32; z: i32;", "extra member"),
+        ("x: i32;", "missing member"),
+    ):
+        rc, out = layout_build(fields)
+        if rc == 0:
+            print(f"layout_check: {label!r} must fail the layout assertion")
+            return 1
+        if "static assertion failed" not in out and "static_assert" not in out:
+            print(f"layout_check: {label!r} failed for the wrong reason")
+            print(out)
+            return 1
+
+    # `no_layout_check` opts out, for records that have no C type of that name at
+    # all: ibind synthesises one for a genuinely anonymous member, and C cannot
+    # be asked about a type it cannot name.
+    rc, out = layout_build("x: f64; y: f64; z: i32;", extra=", no_layout_check")
+    if rc != 0:
+        print("layout_check: no_layout_check must suppress the assertion")
+        print(out)
+        return 1
+
+    # An opaque record claims nothing, so there is nothing to check and nothing
+    # to emit -- asserting on FILE's layout would be a compile error.
+    layout_i.write_text(
+        'cinclude "stdio.h"\n'
+        "FILE: struct[external] = {}\n"
+        "main:proc()->i32 = { p:*FILE = null; if (p == null) { return 1; } return 0; }\n",
+        encoding="utf-8", newline="\n")
+    opaque = run([str(I_EXE), "compile", str(layout_i), "-o", str(layout_c), "--no-header"])
+    if opaque.returncode != 0 or "i_layout_FILE" in layout_c.read_text(encoding="utf-8"):
+        print("layout_check: an opaque external must get no layout check")
+        print(opaque.stdout)
+        return 1
+    print("ok layout_check")
+
     line_map_i = TEST_DIR / "generated_line_map.i"
     line_map_c = TEST_DIR / "generated_line_map.c"
     line_map_h = TEST_DIR / "generated_line_map.h"
@@ -7571,13 +7656,13 @@ int IB_log(const char *fmt, ...);
             "    // ibind: bitfield mode:5",
             "    // ibind: field_offset mode:3",
             "    mode:u32;",
-            "IB_Anon_anon0: union[external] = {",
+            "IB_Anon_anon0: union[external, no_layout_check] = {",
             "    x:i32;",
             "    y:f32;",
-            "IB_Anon_anon1: struct[external] = {",
+            "IB_Anon_anon1: struct[external, no_layout_check] = {",
             "    a:i32;",
             "    b:i32;",
-            "IB_Anon_anon2: struct[external] = {",
+            "IB_Anon_anon2: struct[external, no_layout_check] = {",
             "    z:i32;",
             "IB_Anon: struct[external] = {",
             "    _anon0:IB_Anon_anon0;",

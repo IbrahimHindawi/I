@@ -658,6 +658,7 @@ struct Param {
 
 struct StructDecl {
     string8 name;
+    bool no_layout_check;
     const char *source_path;
     const char *import_chain;
     bool is_generic;
@@ -2824,6 +2825,7 @@ static Stmt *parse_stmt(Parser *p) {
 typedef struct DeclAttributes {
     bool is_external;
     bool emit_external_proto;
+    bool no_layout_check;
     string8 callconv;
 } DeclAttributes;
 
@@ -2838,6 +2840,11 @@ static DeclAttributes parse_decl_attributes(Parser *p) {
         } else if (string8slice_equals_cstr(tok->text, "external_emit")) {
             attrs.is_external = true;
             attrs.emit_external_proto = true;
+        } else if (string8slice_equals_cstr(tok->text, "no_layout_check")) {
+            /* The record has no C type of that name at all -- ibind synthesises
+               one for a genuinely anonymous member, which exists only in I. Its
+               layout cannot be compared against something C cannot name. */
+            attrs.no_layout_check = true;
         } else {
             /* Anything else is a calling convention, which is all this slot held
                before it took a list, so `proc[WINCALL]` keeps working. */
@@ -2933,6 +2940,7 @@ static StructDecl *parse_struct_decl(Parser *p, Token *name_tok, bool is_union) 
 
     DeclAttributes attrs = parse_decl_attributes(p);
     if (attrs.is_external) decl->is_external = true;
+    if (attrs.no_layout_check) decl->no_layout_check = true;
 
     parser_expect(p, Token_Equal, is_union ? "expected '=' after union" : "expected '=' after struct");
     parser_expect(p, Token_LBrace, is_union ? "expected '{' in union" : "expected '{' in struct");
@@ -12863,6 +12871,138 @@ static void emit_struct_reflection_fields(
 /* A union reports as its own kind rather than as a struct with a flag, so a
    consumer that only handles structs cannot silently walk overlapping members
    as though they were adjacent; §3 of docs/reflection-issues.md. */
+/* Layout verification for `external` records.
+
+   An `external` struct is a claim about a type C owns: these fields, these
+   types, this order. Nothing checked that claim. If a header reordered a member,
+   or a `long` was the wrong width on this target, I type-checked field access
+   happily against a layout that was a lie, and the result was wrong bytes rather
+   than a diagnostic. Procs at least have a prototype C can compare against;
+   records had nothing.
+
+   The compiler cannot assert `sizeof(X) == 24` because it does not compute C
+   layouts -- it defers to C for sizes everywhere, including reflection. So it
+   emits a *shadow* record built from what I was told, and asks C to compare the
+   two. C computes both with the same rules, so any disagreement about order,
+   member type, padding or alignment fails at compile time, at zero runtime cost
+   and with no effect on codegen.
+
+   Skipped: bitfields and anonymous members, which `offsetof` cannot address;
+   generic records, which have no single C type; and records with no field list,
+   which claim nothing to check. Emitted once into the .c rather than the header,
+   because one translation unit proving the layout proves it for all thirty. */
+static bool struct_layout_checkable_depth(Program *prog, StructDecl *decl, i32 depth) {
+    if (!decl || !decl->is_external || decl->is_generic) return false;
+    if (decl->no_layout_check) return false;
+    if (decl->fields.length == 0) return false;
+    if (depth > 16) return false;   /* cyclic or absurdly deep; do not guess */
+    for (i32 i = 0; i < decl->fields.length; i++) {
+        Field *f = (Field *)decl->fields.data[i];
+        if (!f || f->anon || f->bit_width.data) return false;
+        if (!f->name.data || f->name.length == 0) return false;
+        /* A by-value field of an unnameable record makes this record unnameable
+           too: the shadow would mention a type C does not have. Pointers are
+           exempt -- a pointer is a pointer whatever it points at. */
+        TypeExpr *t = f->type;
+        while (t && t->kind == Type_Array) t = t->elem;
+        if (!t || t->kind != Type_Name) continue;
+        for (i32 j = 0; j < prog->structs.length; j++) {
+            StructDecl *other = (StructDecl *)prog->structs.data[j];
+            if (!other || !string8_equals(&other->name, &t->name)) continue;
+            if (other == decl) break;
+            if (other->is_external && !struct_layout_checkable_depth(prog, other, depth + 1)) {
+                return false;
+            }
+            break;
+        }
+    }
+    return true;
+}
+
+static bool struct_layout_checkable(Program *prog, StructDecl *decl) {
+    return struct_layout_checkable_depth(prog, decl, 0);
+}
+
+static void emit_struct_layout_check(memops_arena *arena, string8 *out, Program *prog, StructDecl *decl) {
+    if (!struct_layout_checkable(prog, decl)) return;
+
+    /* The reflect runtime's records are spelled `i_reflect_field` and friends in
+       C while I keeps the short name, so the check has to name the C one. */
+    string8 c_name = reflect_runtime_c_name(arena, decl->name);
+    string8 shadow = concat_name2(arena, string8_from_cstr(arena, "i_layout"), "_", decl->name);
+
+    emit_cstr(arena, out, "typedef ");
+    emit_cstr(arena, out, decl->is_union ? "union {\n" : "struct {\n");
+    emit_struct_fields(arena, out, decl, (TypeSub){0}, "    ");
+    emit_cstr(arena, out, "} ");
+    emit_string8(arena, out, shadow);
+    emit_cstr(arena, out, ";\n");
+
+    emit_cstr(arena, out, "_Static_assert(sizeof(");
+    emit_string8(arena, out, c_name);
+    emit_cstr(arena, out, ") == sizeof(");
+    emit_string8(arena, out, shadow);
+    emit_cstr(arena, out, "), \"external layout mismatch: ");
+    emit_string8(arena, out, decl->name);
+    emit_cstr(arena, out, " size\");\n");
+
+    emit_cstr(arena, out, "_Static_assert(_Alignof(");
+    emit_string8(arena, out, c_name);
+    emit_cstr(arena, out, ") == _Alignof(");
+    emit_string8(arena, out, shadow);
+    emit_cstr(arena, out, "), \"external layout mismatch: ");
+    emit_string8(arena, out, decl->name);
+    emit_cstr(arena, out, " alignment\");\n");
+
+    for (i32 i = 0; i < decl->fields.length; i++) {
+        Field *f = (Field *)decl->fields.data[i];
+        emit_cstr(arena, out, "_Static_assert(offsetof(");
+        emit_string8(arena, out, c_name);
+        emit_cstr(arena, out, ", ");
+        emit_string8(arena, out, f->name);
+        emit_cstr(arena, out, ") == offsetof(");
+        emit_string8(arena, out, shadow);
+        emit_cstr(arena, out, ", ");
+        emit_string8(arena, out, f->name);
+        emit_cstr(arena, out, "), \"external layout mismatch: ");
+        emit_string8(arena, out, decl->name);
+        emit_cstr(arena, out, ".");
+        emit_string8(arena, out, f->name);
+        emit_cstr(arena, out, " offset\");\n");
+
+        emit_cstr(arena, out, "_Static_assert(sizeof(((");
+        emit_string8(arena, out, c_name);
+        emit_cstr(arena, out, " *)0)->");
+        emit_string8(arena, out, f->name);
+        emit_cstr(arena, out, ") == sizeof(((");
+        emit_string8(arena, out, shadow);
+        emit_cstr(arena, out, " *)0)->");
+        emit_string8(arena, out, f->name);
+        emit_cstr(arena, out, "), \"external layout mismatch: ");
+        emit_string8(arena, out, decl->name);
+        emit_cstr(arena, out, ".");
+        emit_string8(arena, out, f->name);
+        emit_cstr(arena, out, " type\");\n");
+    }
+    emit_cstr(arena, out, "\n");
+}
+
+static void emit_external_layout_checks(memops_arena *arena, string8 *out, Program *prog) {
+    bool any = false;
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        if (!struct_layout_checkable(prog, decl)) continue;
+        if (!any) {
+            emit_line_directive_reset();
+            emit_cstr(arena, out,
+                      "/* Layout checks for external records: each declared layout is compared\n"
+                      "   against the one C actually has. Frontend-only, no codegen. */\n");
+            any = true;
+        }
+        emit_struct_layout_check(arena, out, prog, decl);
+    }
+}
+
 static void emit_struct_reflection(
     memops_arena *arena,
     string8 *out,
@@ -13103,6 +13243,8 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
             emit_struct_reflection(arena, out, prog, decl, concrete_name, sub);
         }
     }
+
+    emit_external_layout_checks(arena, out, prog);
 
     for (i32 i = 0; i < prog->enums.length; i++) {
         emit_enum_reflection(arena, out, (EnumDecl *)prog->enums.data[i]);
@@ -13385,10 +13527,13 @@ static void emit_module_source(memops_arena *arena, Program *prog, string8 modul
     }
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *d = (StructDecl *)prog->structs.data[i];
-        if (d->is_generic || d->is_external) continue;
-        if (decl_in_module(d->source_path, module)) {
-            emit_struct_reflection(arena, out, prog, d, d->name, (TypeSub){0});
+        if (!decl_in_module(d->source_path, module)) continue;
+        if (struct_layout_checkable(prog, d)) {
+            emit_struct_layout_check(arena, out, prog, d);
+            continue;
         }
+        if (d->is_generic || d->is_external) continue;
+        emit_struct_reflection(arena, out, prog, d, d->name, (TypeSub){0});
     }
     emit_cstr(arena, out, "\n");
 

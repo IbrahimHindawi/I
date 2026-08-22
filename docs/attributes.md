@@ -3,8 +3,8 @@
 > **Implemented.** `struct[external]`, `proc[external]`, `proc[external, WINCALL]`
 > and `enum[external]` all parse and carry their meaning, the old spellings still
 > work, and the tree has migrated -- 268 procs and 79 structs, unions and enums
-> across 30 files. Covered by `decl_attributes`. The layout-verification section
-> below is still a proposal.
+> across 30 files. Covered by `decl_attributes`. **Layout verification is also
+> implemented** -- 934 assertions now run on every njinn build.
 
 What one attribute slot per declaration buys, and what it means for C interop.
 
@@ -184,21 +184,63 @@ Separately, function-like `#define`s written in *I* source are callable with an
 unknown signature; see `name-resolution.md`. That covers `gin_require` and
 friends, not the header's macros.
 
-### The thing that makes any of this trustworthy
+### `external` vs `external_emit`
 
-Nothing currently verifies that a declared `external` layout matches C's real
-one. If a header reorders a field, or a `long` is the wrong width on this target,
-I checks field access happily against a layout that is a lie.
+The two spellings differ only in whether a C prototype is emitted, and which one
+to use is parked in `external-vs-external_emit.md` -- including the measurement
+that njinn's build passes either way, the three ways `external_emit` breaks on
+hand-written bindings, and a proposal to flip everything to `external` and keep
+`external_emit` as an opt-in audit.
 
-The compiler already emits `offsetof` for reflection tables, so the pieces are
-there. For every `external` struct with fields, emit into the generated C:
+### Layout verification -- implemented
 
-    _Static_assert(sizeof(D3D11_BUFFER_DESC) == 24, "layout mismatch");
-    _Static_assert(offsetof(D3D11_BUFFER_DESC, ByteWidth) == 0, "layout mismatch");
+Nothing verified that a declared `external` layout matched C's real one. If a
+header reordered a member, or a `long` was the wrong width on this target, I
+type-checked field access happily against a layout that was a lie, and the
+result was wrong bytes rather than a diagnostic. Procs at least have a prototype
+C can compare against; records had nothing.
 
-C then checks the declaration against the real header on every build, at zero
-runtime cost. That turns `external` from "trust me" into "verified", and it is
-what makes generating 116 declarations safe regardless of what generated them.
+The compiler cannot assert `sizeof(X) == 24` -- it does not compute C layouts,
+deferring to C everywhere including reflection. So it emits a **shadow record**
+built from what I was told and asks C to compare the two:
+
+    typedef struct { i32 x; i32 y; } i_layout_lc_point;
+    _Static_assert(sizeof(lc_point) == sizeof(i_layout_lc_point), "...size");
+    _Static_assert(_Alignof(lc_point) == _Alignof(i_layout_lc_point), "...alignment");
+    _Static_assert(offsetof(lc_point, x) == offsetof(i_layout_lc_point, x), "...x offset");
+    _Static_assert(sizeof(((lc_point *)0)->x) == sizeof(((i_layout_lc_point *)0)->x), "...x type");
+
+C computes both layouts with the same rules, so member order, member type,
+padding and alignment are all covered. Per-field offsets matter: reordering two
+members of equal size passes a bare `sizeof` check and fails this one.
+
+**Emitted once into the `.c`, never the header.** njinn has 30 translation units
+and one proving the layout proves it for all of them; emitting into a shared
+header would multiply the work thirtyfold for nothing.
+
+**Skipped**, because none of them can be compared: bitfields and anonymous
+members (`offsetof` cannot address them), generic records (no single C type),
+records with an empty field list (they claim nothing), and records marked
+`no_layout_check`.
+
+**`no_layout_check`** exists for records that have no C type of that name at
+all. `ibind` synthesises a name for a genuinely anonymous member -- cgltf's
+`union { ... } data;` becomes `cgltf_camera_anon0` -- and C cannot be asked about
+a type it cannot name. ibind now marks these automatically, and the suppression
+is **transitive**: a record with a by-value field of an unnameable type is
+itself unnameable, so `cgltf_camera` is skipped too. Pointers are exempt, since a
+pointer is a pointer whatever it points at.
+
+**Measured on njinn:** 934 assertions across 74 external records, all passing.
+Cost was measured separately at ~1% of one translation unit's compile time, with
+byte-identical object files -- `_Static_assert` is a frontend check with no
+codegen.
+
+*Covered by `layout_check`, which pairs a correct declaration against four wrong
+ones -- wrong member types, reordered members, an extra member, a missing member
+-- plus `no_layout_check` suppressing, an opaque record emitting nothing, and an
+assertion that the checks are actually present, since zero errors would otherwise
+be indistinguishable from zero checks.*
 
 ## Migration cost
 
