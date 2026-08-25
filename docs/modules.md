@@ -121,7 +121,7 @@ units each pay the per-TU header cost. Ninja's parallelism absorbs most of it.
 functions; every unit that includes `i_types.h` but does not call them warns
 about unused functions. Harmless, and about two warnings per unit. Suppressing
 `-Wunused-function` over generated code would silence it, at the cost of hiding
-genuinely dead static I procs.
+genuinely dead static ilang procs.
 
 **The whole-program parse still runs on every build.** Collecting instantiations
 needs to see everything, so the front end reads the entire program even when one

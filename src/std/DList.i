@@ -139,6 +139,6 @@ DList<T>destroy: proc<T>(arena: *memops_arena, list: *DList<T>)->void = {
     }
 }
 
-DList<T>is_empty: proc<T>(list: *DList<T>)->bool = {
+DList<T>is_empty: proc<T>(list: *DList<T>)->b32 = {
     return list == null or list[0].length == 0;
 }

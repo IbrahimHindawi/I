@@ -1,14 +1,14 @@
-# The Shape Of I
+# The Shape Of ilang
 
 Decisions still open before the language can be called finished.
 
 `i-soul.md` sets the philosophy: keep C's physical model, use C as the backend
 and ABI, and make the repeated C-era bookkeeping explicit and checkable. It also
-draws a line — I should *not* become "C but safer" in the abstract. Several
+draws a line — ilang should *not* become "C but safer" in the abstract. Several
 questions below are answered by that stance, and where they are, this note says
 so rather than re-opening them.
 
-Each entry records what I does **today**, verified against the current compiler
+Each entry records what ilang does **today**, verified against the current compiler
 rather than assumed, so the choice is between real alternatives instead of
 imagined ones.
 
@@ -26,9 +26,9 @@ come up.
 
 ## 1. The Safety Bargain
 
-The biggest one, and the one that determines what kind of language I is.
+The biggest one, and the one that determines what kind of language ilang is.
 
-C trusts the programmer and pays for it in undefined behaviour. I inherits that
+C trusts the programmer and pays for it in undefined behaviour. ilang inherits that
 by default, because it lowers to C and does nothing to intervene. The question
 is how much of it is deliberate.
 
@@ -76,21 +76,37 @@ instead of a corrupted heap.
 sign change, float/int) while leaving widening implicit; or require `cast` for
 every conversion.
 
-**Bearing.** `cast` already exists and is used everywhere in real I code, so the
+**Bearing.** `cast` already exists and is used everywhere in real ilang code, so the
 explicit form is established. The middle option is what Zig and Rust do and it
-catches a genuine bug class. This is the decision most likely to change how I
+catches a genuine bug class. This is the decision most likely to change how ilang
 code reads, so it is worth making deliberately rather than by inheritance.
+
+> **Parked.** ilang keeps C's rules for now -- deliberately dirty and unsafe.
+> Written up with everything else in that bargain in
+> [`type-safety.md`](type-safety.md), alongside the runtime half in
+> [`safety.md`](safety.md).
 
 ### 2.2 `bool` versus `b32`
 
-**Today.** Both exist. Real code uses `b32` throughout; `bool` is available and
-unused.
-
-**Options.** Keep both and document when each is for; drop `bool`; drop `b32`
-and make `bool` the ABI-compatible 32-bit boolean.
-
-Two spellings for one concept is exactly the kind of accumulated friction the
-soul document objects to.
+> **Resolved: `b32` stays, `bool` is gone.** `bool` no longer names a type and
+> reports *use of undeclared type* like any other unknown name. std's duplicate
+> `print<bool>` overload -- byte-identical to `print<b32>` -- was removed and the
+> 36 remaining uses across std and the test suite were converted. njinn was
+> already at zero, and ibind already mapped C's `bool` to `b32`, so the C
+> boundary was unaffected. Covered by `b32_only`.
+>
+> **Since fixed, in 2.4.** `core.h` had `typedef bool b32;`, so `b32` was one
+> byte rather than four. It is `int32_t` now. The measurements that made the
+> change safe: no external struct in njinn has a `b32` field, so none of the 952
+> `_Static_assert` layout checks depended on the old width; all njinn file IO is
+> byte-oriented JSON rather than raw struct dumps, so no save format did either;
+> and 122 internal struct fields grew 1 to 4 bytes, memory only.
+>
+> The one semantic change is worth knowing: C's `bool` normalises to 0/1 on
+> assignment and `int32_t` does not, so `f: b32 = x & 4` now stores `4` where it
+> used to store `1`, and `f == 1` would differ. `if (f)` is unaffected. No `b32`
+> value in njinn is compared against 1 anywhere, so nothing there can observe
+> it.
 
 ### 2.3 `string`
 
@@ -101,27 +117,96 @@ vestigial.
 **Options.** Implement it as a first-class slice type; or remove the name so it
 stops looking available. Leaving a half-present type is the worst of the three.
 
-Related: string literals are currently `*const char`. Whether I wants a length-
+Related: string literals are currently `*const char`. Whether ilang wants a length-
 carrying string is a real design question, and `std` already has `string8` and
 `string8slice`, which suggests the answer may be "in the library, not the
 language."
 
+> **Parked, with a target.** The direction is to remove as much C string usage
+> as possible, and the measurements say how much that is: 536 `*char` /
+> `*const char` against 91 `string8` mentions in njinn, 167 `strcmp`, 51
+> `snprintf`. See [`string.md`](string.md), which also covers `char`
+> signedness and records that `usize` is the only size type -- there is
+> deliberately no `isize`.
+
+### 2.3b The type algebra *(implemented)*
+
+Types compose recursively and read outside-in, with every constructor prefix:
+
+    type := T | const type | volatile type | *type | [N]type | proc(...) -> type
+
+so `x: static [4]*const Foo = {}` decomposes left to right: a static variable,
+an array of 4, pointers to, const Foo. No spiral rule.
+
+`const` binds to the type expression after it, which gives the three pointer
+forms distinct and unambiguous spellings:
+
+    *const T          pointer to const T
+    const *T          const pointer to T
+    const *const T    const pointer to const T
+
+**`const [N]T` is rejected.** C says that qualifiers on an array type qualify
+the *element*, not the array (C11 6.7.3p9), so it and `[N]const T` are the same
+type once lowered. A distinction that evaporates in the backend is worse than no
+distinction, given the correctness claim rests on the emitted C meaning what the
+ilang means.
+
+**Storage is not part of the type.** `static`, `thread_local` and friends say
+where an object lives and who can see it; `const` and `volatile` say what the
+type is and what may be done through it. Both are written before the type today
+and that is fine while the word lists stay closed and disjoint, but they are
+different categories and new words sort by which question they answer.
+`external` is in neither: it says which *compiler* emits the definition. See
+[`attributes.md`](attributes.md).
+
+Slices (`[]T`) are deliberately absent -- that is the parked
+[`string.md`](string.md) question, and it is a representation decision rather
+than a syntax one.
+
 ### 2.4 Missing widths
 
-**Today.** The primitive set is `i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 b32 bool
-char usize void`.
-
-There is `usize` but no `isize`. There is `b32` but no `b8`/`b64`. There is no
-`uintptr` or opaque pointer-sized integer. Whether those gaps are deliberate
-should be recorded either way.
+> **Resolved.** The primitive set is now:
+>
+>     i8 i16 i32 i64   u8 u16 u32 u64   f32 f64
+>     b8 b16 b32 b64   c8   usize   void
+>     intptr uintptr ptrdiff intmax uintmax
+>
+> **Booleans carry their width, and `b32` is the default** -- what comparisons
+> and `and`/`or` produce, and what matches Win32's `BOOL`. They are backed by
+> `uint8_t`, `uint16_t`, `int32_t`, `int64_t`. This is the part that forced 2.2:
+> `bool` is one byte, so a family built on it would have made `b8` and `b32` the
+> same type wearing different names.
+>
+> **`intptr uintptr ptrdiff intmax uintmax`** are ilang spellings of C's own
+> fixed names, so a program can say what it means without a `cinclude`. All five
+> are 8 bytes on every target ilang builds for today; the `printfmt` specs
+> assume that, and are where it would show up if that changed.
+>
+> `isize` remains deliberately absent -- reasoning in [`string.md`](string.md).
+> Covered by `scalar_widths`, which asserts every width at runtime rather than
+> only that the generated C compiles.
 
 ### 2.5 `char` signedness
 
 **Today.** Signed on this target, inherited from the C compiler — which means it
 is implementation-defined and can differ per platform.
 
-For a language that fixed operator precedence rather than inherit a C wart, this
-is the same kind of question. Pick signed or unsigned and state it.
+> **Resolved: the type is `c8`, and it is whatever C's `char` is.** Rather than
+> pick signed or unsigned and then have to defend the choice at every C
+> boundary, ilang declines to have an opinion and names the thing accurately:
+> `c8` *is* the C compiler's `char` on this target, width and signedness
+> included. The name also stops implying "a character", which it never was.
+>
+> `char` remains a legal spelling and **normalises to `c8` at parse time**, so
+> the two are one type rather than two that look alike -- `*const char` and
+> `*const c8` can be passed between each other with no cast, and both emit
+> `const c8 *`, where `c8` is a `typedef char` in `core.h`. Existing source
+> needs no migration: njinn's 536 `char` sites and every ibind-generated binding
+> keep working untouched.
+>
+> The visible consequence: the compiler and the LSP report `c8` back even when
+> you wrote `char`. Covered by `c8_is_char`, which passes a value across both
+> spellings and out to a real `strlen`.
 
 ### 2.6 Enum underlying type
 
@@ -137,8 +222,33 @@ then depends on how it is read:
 Both are the same four bytes. Neither reading is wrong, because nothing says
 which one is correct.
 
-**Needs.** A stated underlying type, whether it can be chosen per enum, and what
-happens to values that do not fit.
+> **Resolved: an unattributed enum is `i32`,** and the emitted C says so --
+> `typedef enum E : i32 { ... }`. It can be chosen per enum with the attribute
+> (`enum[u32]`), which now reads as a change of mind rather than the only source
+> of truth about what an enum is. All 34 enums in njinn state their type.
+>
+> **Overflow is checked too, in two halves.** Stating the underlying type is
+> what gave this something to check against -- before, `Big: enum = { X =
+> 3000000000, }` was accepted by ilang *and* by clang at every warning level,
+> and read as `-1294967296` through `i32` and `3000000000` through `u32`.
+>
+> ilang reports a member that does not fit for plain literals, negative
+> literals and implicit sequential values: 435 of the 442 members across njinn,
+> `std` and the tests. The other 7 are constant expressions (`1 shl 2`, `~0`,
+> references to siblings) and need an evaluator ilang does not have, so once a
+> value is unknown the walk stops rather than guessing at the implicit values
+> after it.
+>
+> The generated C carries
+> `#pragma clang diagnostic error "-Wmicrosoft-enum-value"` after the includes,
+> which covers the expression cases on the real `.i` line -- the same borrowing
+> the external layout asserts already do. It is placed after the includes so it
+> governs the enums ilang emits rather than whatever a third-party header
+> contains.
+>
+> So: ilang answers at `check` time for the common case, which is what an
+> editor sees; clang backstops the rest at build time. Covered by
+> `enum_default` and `enum_ranges`.
 
 ## 3. Names And Scope
 
@@ -189,7 +299,7 @@ that diagnostic rather than to pick a new rule. See `name-resolution.md`.
 **Today.** Rejected with a diagnostic, added this week — `typedef: i32 = 1`
 previously emitted `i32 typedef = 1;` and failed inside the C compiler.
 
-**Options.** Keep the restriction, or mangle on emission so any I identifier is
+**Options.** Keep the restriction, or mangle on emission so any ilang identifier is
 legal regardless of what C reserves.
 
 Rejection was chosen because it is reversible and keeps generated C readable,
@@ -197,9 +307,34 @@ which matters if the C is meant to be read as a teaching artifact. But it leaks
 the backend into the language surface, and "why can't I name a variable `auto`?"
 is a fair question from a student.
 
-**If the restriction stays,** it currently covers only local variables and proc
-parameters. Globals, proc names, struct and union names, field names, enum
-members and type aliases are unchecked.
+> **Resolved: mangle on collision.** The restriction was losing. It was added
+> for locals, then parameters, then proc names, then struct names, and globals,
+> field names, enum names and aliases were still open after four rounds -- each
+> one accepted by ilang and then rejected by clang, pointing at generated code.
+> That is a class of bug, not four bugs, and checking positions one at a time
+> could not close it.
+>
+> A reserved name is renamed on the way into C instead: `typedef` becomes
+> `i_typedef`. Every identifier passes through one function on its way to the
+> output, so declarations and references cannot disagree and there is no next
+> position to miss. `_Static_assert` becomes `i_Static_assert`, not
+> `i__Static_assert` -- C reserves any identifier containing a double
+> underscore to the implementation, so the prefix absorbs the leading one.
+>
+> **Only on collision.** Mangling every name would cost the readability of the
+> generated C, which is the reason for lowering to C at all. For the ~16 names
+> affected the C symbol differs from the ilang name; for everything else the
+> output is byte-identical.
+>
+> **`int`, `long`, `short`, `float`, `double`, `signed`, `unsigned` stay
+> rejected**, in all eight positions now rather than four. Those are also ilang
+> type spellings that pass through to C, so renaming them would make one token
+> mean a type in one position and a variable in another. `sizeof` and `alignof`
+> stay rejected too: they are operators, not identifiers.
+>
+> Covered by `sizeof_reserved` and `reserved_c_identifier`, both of which run
+> the result -- a rename that missed a *use* would fail to link, but one that
+> renamed an enum tag and not its members would build and quietly misbehave.
 
 ### 3.4 A call to an undeclared name is not an error *(fixed)*
 
@@ -216,7 +351,7 @@ objects:
 This is the most basic resolution check a compiler does, and it is absent. It is
 also the third instance of the same shape found in one sitting — alongside
 §3.1's proc shadowing and, before it was fixed, every reflection field access.
-The pattern is consistent: where I declines to resolve a name, the error
+The pattern is consistent: where ilang declines to resolve a name, the error
 reappears in generated code with a message pointing at C.
 
 Presumably it exists so a C function can be called without declaring it. That is
@@ -240,26 +375,34 @@ one genuine language question buried in it.
 **Today.** `static` and `extern` only. There is no module-level public/private
 distinction; an imported file's symbols are all visible.
 
-**Needs.** Whether I wants export control, and if so whether it is per-symbol or
+**Needs.** Whether ilang wants export control, and if so whether it is per-symbol or
 per-file.
+> **Later.** Deferred deliberately; no work planned this round.
+
 
 ## 4. Operators And Expressions
 
 ### 4.1 Truthiness
 
 **Today.** `and` and `or` accept arbitrary integers — `n and 1` compiles with
-`n: i32`. Real I code writes `x != 0 and y != 0` by convention rather than by
+`n: i32`. Real ilang code writes `x != 0 and y != 0` by convention rather than by
 requirement.
 
 **Options.** Require boolean operands, or keep C-style truthiness. If real code
 already writes the explicit form, requiring it costs nothing and removes a class
 of confusion.
 
+> **Decided: keep C's truthiness.** `n and 1` stays legal. The convention of
+> writing `x != 0 and y != 0` stays a convention. Listed with the rest of the
+> deliberately-unsafe inheritances in [`safety.md`](safety.md).
+
 ### 4.2 Arithmetic right shift
 
 **Today.** Right-shifting a negative signed value is arithmetic. C leaves this
 implementation-defined. `013-integer-conversion.i` records the behaviour but
 that is documentation of what happens, not a decision that it should.
+> **Later.** Deferred deliberately; no work planned this round.
+
 
 ### 4.3 Emitted parentheses
 
@@ -271,7 +414,7 @@ are **load-bearing** — stripping them would let C re-parse `6 & 4 == 4` back
 into its old grouping, silently. An earlier idea to emit unparenthesised C for
 legibility is therefore withdrawn for binary operators.
 
-A narrower version remains open: omit parentheses only where I's precedence
+A narrower version remains open: omit parentheses only where ilang's precedence
 agrees with C's, keeping them where the tables now differ. Cheap to state,
 fiddly to maintain, and it would need the precedence test extended to cover
 every operator pair.
@@ -296,6 +439,8 @@ answers in the implementation:
 **Still open.** Whether importing the same file twice through different paths
 is one module or two, and what the generated header is supposed to contain
 relative to what the file exports.
+> **Later.** Deferred deliberately; no work planned this round.
+
 
 ## 6. Generics And Reflection
 
@@ -312,6 +457,8 @@ for what is settled and what is still open.
 fastest way to become C++-shaped, so the honest answer may be a deliberate
 "no, error messages inside instantiations are the price." Whether there is any
 compile-time evaluation beyond enum values, `sizeof` and `Enum<>.count`.
+> **Later.** Deferred deliberately; no work planned this round.
+
 
 ## 7. The C Backend Contract
 
@@ -323,19 +470,76 @@ declaration, including padding. Whether there is control over packing and
 alignment. Whether bitfields are supported and how they map — a torture test for
 anonymous bitfields exists, so something is there. What calling convention procs
 use and whether it can be specified. What the emitted C guarantees, given
-"if the emitted C is free of undefined behaviour, it means what the I means" is
+"if the emitted C is free of undefined behaviour, it means what the ilang means" is
 the strongest correctness claim available, and it is only worth something once
 the lowering rules are written down.
+> **Later.** Deferred deliberately; no work planned this round.
+
 
 ## 8. Tooling And Diagnostics
 
-**Today.** Preprocessor directives are hoisted to the top of the generated file,
-so an inline `#ifdef` around a statement does not work. Real code works around
-this with runtime flags.
+**Today.** ~~Preprocessor directives are hoisted to the top of the generated
+file, so an inline `#ifdef` around a statement does not work. Real code works
+around this with runtime flags.~~
 
-**Needs.** Whether that is a limitation to fix or a restriction to document. More
-broadly: whether I wants conditional compilation at all, or something better,
-given that the soul document lists "macro accidents" among C's failures.
+> **Resolved: inline `#ifdef` works.** A directive at file scope still hoists --
+> that is what makes `cinclude` and a top-level `#define` work at all. One
+> written *inside* a body is now lexed into a `Token_Directive`, parsed as a
+> `Stmt_Directive`, and emitted verbatim where it was written; the collector
+> tracks brace depth so the same line is never both hoisted and placed. ilang
+> does not evaluate the condition, so both arms are parsed and type-checked and
+> neither is folded away. Covered by `inline_directives`, which runs the result
+> under both settings of a flag rather than only checking that the emitted C
+> compiles -- it compiles either way.
+
+> **Resolved: ilang evaluates conditionals; C keeps everything else.**
+>
+> The `#if` family is evaluated by ilang and never emitted. A dead arm is
+> skipped in the lexer, so it is not parsed, not type-checked, and does not
+> exist -- the same deal C makes, and what Rust's `cfg` and Zig's `comptime`
+> both settle for.
+>
+> `#define`, `#include`, `#pragma` and the rest still pass through untouched.
+> ilang records *which names are defined* so it can answer `#ifdef`, but it does
+> not expand macros; that stays C's job.
+>
+> **What it buys.** Two things that were impossible while directives were passed
+> through: omitting a whole declaration, and `#else` at file scope. The second
+> is the interesting one -- two arms would otherwise be two declarations of one
+> name, and ilang would reject the pair before C ever saw it. Evaluating the
+> condition is what makes only one of them exist.
+>
+> **What it costs, deliberately.** The arm you are not building can rot. Body
+> level previously had both arms parsed *and* type-checked, which is stronger
+> than either Rust or Zig manage, and that is now given up for consistency and
+> for the ability to guard declarations. It was a considered trade, not an
+> oversight.
+>
+> **Defines are seeded program-wide before anything is lexed.** `import` is not
+> `#include`, and the entry file is lexed before its imports are known, so a
+> `#define` in an imported file would otherwise be invisible to a conditional in
+> the file importing it -- which is exactly how njinn's `#define gin_debug_draw`
+> lives in `pch.i` and is tested in `gin.i`. A pre-pass walks the entry and its
+> imports textually and collects the *unconditional* file-scope defines. Only
+> unconditional ones: resolving a `#define` inside an `#ifdef` needs the table
+> the pass is building. The rule is that an unconditional file-scope define is
+> visible program-wide and a conditional one is visible from where it appears
+> onward in its own file, and the approximation errs toward not defining.
+>
+> **The condition language is small on purpose:** `defined(X)`, `!`, `&&`,
+> `||`, parentheses and integer literals. A bare `#if FOO` is refused rather
+> than guessed at, because ilang does not expand macros and would have to read
+> defined-ness as the value -- so `#define FOO 0` would be true here and false
+> in C. Comparison and arithmetic are refused for the same reason.
+>
+> Covered by `conditionals`, which builds and runs twelve shapes including
+> `#else` at file scope, nesting, `#elif`, `#undef`, a dead arm that is not
+> valid ilang at all, and a `#define` inside a dead arm that must not take.
+
+**Needs.** The larger question stands:**Needs.** The larger question stands: whether ilang wants conditional
+compilation *as its answer*, or something better, given that the soul document
+lists "macro accidents" among C's failures. What exists now is C's mechanism,
+placed correctly.
 
 ## 9. Const And Immutability
 
@@ -360,6 +564,11 @@ through `cast` it is not.
 ugly, greppable escape hatch for the rare case that wants it. Fixing it here
 covers reflection for free and repairs a claim this document currently makes
 falsely.
+
+> **Parked.** `cast` keeps laundering `const` for now. The named escape hatch is
+> the shape the fix would take -- a separate `bitcast` for "reinterpret these
+> bits", leaving `cast` able to keep the qualifier. Listed with the rest of the
+> deferred checks in [`type-safety.md`](type-safety.md).
 
 ### 9.2 Reflection immutability -- settled, no language change
 
@@ -429,7 +638,7 @@ this document exists to remove.
 
 ## 10. Module Namespaces
 
-**The proposal.** `mem.arena` in I source, lowering to `mem_arena` in C.
+**The proposal.** `mem.arena` in ilang source, lowering to `mem_arena` in C.
 
 **Today.** There is no namespace form of any kind. Every spelling of one is a
 parse error:
@@ -467,7 +676,7 @@ Fixed, along with two defects found underneath it:
 - Field access was checked only on pointers, declared aggregates and reflect
   records, so `n.bogus` with `n: i32` was **accepted silently** and became a
   clang error about generated code. Now reported, but only for types that
-  provably have no fields (I's scalars and arrays): a name the compiler has never
+  provably have no fields (ilang's scalars and arrays): a name the compiler has never
   seen is a foreign C type from a `cinclude`, whose fields are genuinely unknown,
   and reporting on those rejects njinn. That silence is the type-level twin of
   3.4 and goes away with the same fix.
@@ -575,6 +784,12 @@ one bracket. Still open: whether attributes take *arguments*, which is what
 
 Recorded so they do not get re-litigated:
 
+- **There will be no methods.** No `P.get: proc(self: *P)`, no receiver syntax,
+  no proc bound to a type in any form. Permanent, not deferred. The consequence
+  is that module namespaces (§10) are the only remaining answer to njinn's 91%
+  hand-written prefix rate, which raises §10 from a cosmetic question to the
+  only one on the table.
+
 - **A switch case does not fall through.** It takes a block, so it is
   self-contained. Matches Go, Rust and Zig.
 - **Bitwise operators bind tighter than comparison.** C's ordering exists only
@@ -585,18 +800,18 @@ Recorded so they do not get re-litigated:
 - **`const` is enforced** on assignment -- but *not* through `cast`, which
   launders it silently. See 9.1; the claim is only half true today.
 - **Reflection is one record, kind-tagged, with a variant payload.** Odin's
-  shape, which ports to I as-is; Zig's needs language-level tagged unions first.
+  shape, which ports to ilang as-is; Zig's needs language-level tagged unions first.
   This also settled nested type links and made a union its own kind rather than
   a flag. Details in `reflection-issues.md`, which has nothing open.
-- **The reflect runtime's C names carry an `i_` prefix**, while I source keeps
+- **The reflect runtime's C names carry an `i_` prefix**, while ilang source keeps
   the short spelling. Tables are emitted unconditionally, so `reflect` would
   otherwise squat on a common word in every program's C namespace. Not `__i_`:
   C reserves the double underscore to the implementation.
-- **Reflected enum values are `i32`.** I permits negative members and they must
+- **Reflected enum values are `i32`.** ilang permits negative members and they must
   round-trip; `u32` would turn `-1` into `4294967295` and break every lookup by
   value. Independent of how the enum underlying type (§2.6) resolves.
-- **A `cinclude` brings no names into I.** It sends a header to the C compiler
-  and nothing else; every C function is declared in I before it can be called.
+- **A `cinclude` brings no names into ilang.** It sends a header to the C compiler
+  and nothing else; every C function is declared in ilang before it can be called.
   Implemented, with three consequent rules -- function-like macros are callable
   with an unknown signature, identical `external` redeclarations merge, and
   builtins spelled like calls are exempt. Full account in `name-resolution.md`.
@@ -613,16 +828,24 @@ Recorded so they do not get re-litigated:
 
 ## Suggested Order
 
-1. **The safety bargain** (§1) — it sets the language's character, and the
-   static-diagnostic option is cheap and fits the stated philosophy.
-2. **Implicit conversions** (§2.1) — the decision most likely to change how
-   ordinary I code reads.
-3. **`bool` vs `b32`, and `string`** (§2.2, §2.3) — small, and they remove
-   visible inconsistency.
-4. **Shadowing** (§3.1) — a one-line change either way, currently asymmetric.
-5. **`cast` and `const`** (§9.1) — small, and it makes an existing Settled
-   claim true instead of half true.
-6. Everything else as it comes up.
+Types (§2.2, §2.4, §2.5, §2.6), shadowing (§3.1), undeclared calls (§3.4),
+attributes (§11) and inline `#ifdef` (§8) are done. §1, §2.1, §2.3, §4.1 and
+§9.1 are decided-and-parked. What is left, in the order worth doing it:
+
+1. ~~Reject enum members that do not fit~~ *(done)* — ilang checks literals and
+   implicit sequential values; the generated C carries a pragma that asks clang
+   for the constant-expression cases it cannot evaluate.
+2. ~~`true`/`false`~~ *(done)* — keywords producing `1` and `0`, so nothing
+   downstream had to learn about them.
+3. ~~File-scope guards around declarations~~ *(done)* — see §8. ilang evaluates
+   conditionals now, which resolved this and `#else` at file scope together.
+4. ~~Constructs ilang accepts that clang then rejects~~ — self-referential
+   types and zero-length arrays are fixed. A non-void proc that can finish
+   without returning stays accepted: that one is C's rule, kept deliberately
+   with the rest of [`safety.md`](safety.md), and clang warns about it by
+   default. Written up in [`compiler-hardening.md`](compiler-hardening.md).
+5. Everything else as it comes up: §4.2, §3.3, §5, §6, §7 are all marked
+   **Later**.
 
 Whatever is decided, write it into the lowering table described in
 `compiler-hardening.md` and give it a discriminating test. A decision that is

@@ -41,6 +41,6 @@ Array<T>get: proc<T>(array: *Array<T>, index: u64)->Option<T> = {
     return Option<T>some(array[0].data[index]);
 }
 
-Array<T>is_empty: proc<T>(array: *Array<T>)->bool = {
+Array<T>is_empty: proc<T>(array: *Array<T>)->b32 = {
     return array == null or array[0].length == 0;
 }

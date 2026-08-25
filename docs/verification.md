@@ -1,13 +1,13 @@
-# Verifying I
+# Verifying ilang
 
 This note is about one question: how do we know the compiler produces code that
 means what the source says?
 
-It is written against a real failure. While porting a C game engine to I, the
+It is written against a real failure. While porting a C game engine to ilang, the
 compiler emitted switch cases without `break`. An enemy AI ran its "approach"
 case, fell through into "retreat", and negated its own movement vector. Every
 approaching enemy walked directly away from its target. It compiled without a
-diagnostic, ran without a crash, and the I source read correctly — because the I
+diagnostic, ran without a crash, and the ilang source read correctly — because the ilang
 source *was* correct.
 
 That bug survived four separate readings of the function against its C original.
@@ -26,7 +26,7 @@ The standard taxonomy for compiler defects:
 
 The switch bug was a wrong-code bug. More precisely it was a **silent** one, in
 that no diagnostic was produced anywhere, arising from an **unsound lowering**:
-the I construct meant one thing and the C construct it was lowered to meant
+the ilang construct meant one thing and the C construct it was lowered to meant
 another. The defect lived in the gap between the two.
 
 Wrong-code bugs are the expensive category. A crash bug tells you where it is. A
@@ -60,7 +60,7 @@ one.
 
 ## The Root Cause Is A Missing Specification
 
-Ask what `case` means in I. Today the only honest answer is: whatever
+Ask what `case` means in ilang. Today the only honest answer is: whatever
 `emit_stmt` does with it.
 
 When the emitter is the specification, miscompilation is definitionally
@@ -84,13 +84,13 @@ Not verification — it finds bugs and never proves their absence — but it is 
 the return per hour is highest, and it is the rung the compiler is currently
 missing entirely.
 
-**A definitional interpreter.** Walk the typed AST and execute I's semantics
+**A definitional interpreter.** Walk the typed AST and execute ilang's semantics
 directly, independently of how they are lowered. Then run every test program
 twice, interpreted and compiled, and compare. Any divergence is a compiler bug,
 localised automatically.
 
 This is worth building for a reason beyond testing: a definitional interpreter
-*is* an executable semantics. Written this way, "what I means" becomes an
+*is* an executable semantics. Written this way, "what ilang means" becomes an
 artifact that exists apart from `main.c`, can be executed, and cannot silently
 rot. It would have caught the switch bug on its first run, because an interpreter
 implements "a case is a block" directly and has no C fall-through to inherit.
@@ -154,18 +154,18 @@ This is not a reasonable target for this project and should not be attempted.
 
 ## What Compiling To C Changes
 
-I lowers to C, which makes the verification obligation an unusual shape — cheaper
+ilang lowers to C, which makes the verification obligation an unusual shape — cheaper
 in one way and strictly harder in another.
 
 Cheaper, because the target is a language with a written standard. The obligation
-is not "prove correct machine code" but "prove this I construct and this C
+is not "prove correct machine code" but "prove this ilang construct and this C
 construct mean the same thing," and there are on the order of forty constructs.
 That is a document, not a research programme.
 
 Harder, because **the correctness statement inherits C's undefined behaviour**.
 The strongest claim available is:
 
-> if the emitted C is free of undefined behaviour, it means what the I means
+> if the emitted C is free of undefined behaviour, it means what the ilang means
 
 If a lowering can emit UB — signed overflow, a strict-aliasing violation, an
 unsequenced modification, an out-of-bounds access — then the C compiler is
@@ -187,12 +187,12 @@ clean and passes straight through to C:
         return f[0].this_field_does_not_exist_anywhere;
     }
 
-So the claim "well-typed I programs do not go wrong" is false as things stand,
+So the claim "well-typed ilang programs do not go wrong" is false as things stand,
 and the exception is unbounded rather than narrow. This matters more than it
 looks: a real engine binds D3D11, miniaudio, cgltf and cglm through this hole,
 which is a large fraction of all field accesses in the program with no checking
 whatsoever. During the port it allowed reading a field off an opaque struct that
-had never been declared anywhere in I.
+had never been declared anywhere in ilang.
 
 An escape hatch for binding C is necessary. An escape hatch with no declared
 shape is not. `external` should carry a field list that is checked, even when the
@@ -205,7 +205,7 @@ Verification claims are only worth what the type system underneath them is worth
 Two structural notes, both cheaper than any of the above.
 
 **Lower to a boring subset.** The switch bug was possible only because the C
-construct chosen had different default semantics from the I construct. Lowering
+construct chosen had different default semantics from the ilang construct. Lowering
 `switch` to an if/else chain makes C's fall-through unreachable regardless of
 whether anyone remembers to emit `break`. The general rule: never depend on a
 target construct meaning what the source construct means. Prefer lowerings that

@@ -6,12 +6,12 @@ measurements are.
 
 ## The model
 
-Using a C library from I means two separate parties need to know its shapes:
+Using a C library from ilang means two separate parties need to know its shapes:
 
-1. **I needs to know**, to type-check your code. That is the `.i` declaration.
+1. **ilang needs to know**, to type-check your code. That is the `.i` declaration.
    Always required, and identical for both spellings.
 2. **C needs to know**, so the generated C compiles. That comes from *either*
-   the header (`cinclude`) *or* I emitting prototypes (`external_emit`).
+   the header (`cinclude`) *or* ilang emitting prototypes (`external_emit`).
 
 `external` and `external_emit` differ in exactly one respect: whether a C
 prototype is emitted. One flag, `emit_external_proto`, guarding two returns in
@@ -114,7 +114,7 @@ opt-in audit.**
 
 Reasons:
 
-- **One rule instead of two**: declare it in I, `cinclude` the header in C. No
+- **One rule instead of two**: declare it in ilang, `cinclude` the header in C. No
   decision when writing a binding, one mechanism to teach.
 - **`external` never breaks.** Macros, type spellings, opaque handles all fine.
 - **The verification is being lost exactly where it was least needed.** The only

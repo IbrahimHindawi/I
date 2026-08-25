@@ -81,6 +81,6 @@ Vec<T>clear: proc<T>(array: *Vec<T>)->void = {
     }
 }
 
-Vec<T>is_empty: proc<T>(array: *Vec<T>)->bool = {
+Vec<T>is_empty: proc<T>(array: *Vec<T>)->b32 = {
     return array == null or array[0].length == 0;
 }

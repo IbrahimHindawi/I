@@ -2,7 +2,7 @@ cinclude "stdio.h"
 
 printf: proc[external](fmt: *const char, ...)->i32 = {}
 
-is_space: proc(c: u8)->bool = {
+is_space: proc(c: u8)->b32 = {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r';
 }
 

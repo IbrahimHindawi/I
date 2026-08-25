@@ -4,7 +4,7 @@ Problems with reflection as it stands. Separate from the module-system work in
 `shape.md` and `stranger-with-generics.md` — none of these are caused by, or
 blocked on, how modules are lowered.
 
-Reflection is one of I's two distinguishing features and the reason the resource
+Reflection is one of ilang's two distinguishing features and the reason the resource
 layer in a real engine is better than its C original: 153 uses of `<>.count`, 62
 of `<>.&`, and a metadata generator a third smaller than the C one it replaced.
 So these are notes on sharpening something that works, not a case against it.
@@ -19,7 +19,7 @@ fix makes the named test fail.
 
 `i_reflect_type` and `i_reflect_enum` are gone. One `reflect` record describes
 every reflected type; `kind` says which, and `variant` holds the payload only
-that kind has. In I the family is spelled without a prefix; in the emitted
+that kind has. In ilang the family is spelled without a prefix; in the emitted
 C it keeps one, for the namespace reasons under "The C names carry an `i_`
 prefix" below.
 
@@ -41,8 +41,8 @@ reflect: struct = {
 
 Every language surveyed had converged on this: Go, C#, Java, Zig, Odin, C++26,
 Rust. Of the two closest, **Odin's** shape is the one that ports — a common
-header plus a `variant` union plus a kind discriminator, expressible in I today.
-**Zig's** `union(enum)` is a language-level tagged union you `switch` on; I has
+header plus a `variant` union plus a kind discriminator, expressible in ilang today.
+**Zig's** `union(enum)` is a language-level tagged union you `switch` on; ilang has
 plain C unions only, and an inline `variant: union = {...}` does not even parse,
 so adopting Zig's shape would mean building tagged unions into the language
 first. That is a separate decision, not a prerequisite for this one.
@@ -99,7 +99,7 @@ supplies, so the check no longer depends on the declaration being in scope.
 
 ### Enum values stay `i32` (was §5)
 
-I permits negative enum members and reflection round-trips them correctly today.
+ilang permits negative enum members and reflection round-trips them correctly today.
 A `u32` field would turn `None = -1` into `4294967295`, after which every lookup
 by value misses a member that plainly exists — the silent wrong-value class this
 project's torture suite exists to catch. The reverse risk does not balance it:
@@ -171,7 +171,7 @@ inconsistent spellings and a wart for newcomers. That was wrong, and it came fro
 pattern-matching "two spellings" without checking they were the language's
 ordinary two.
 
-`.&` is I's universal address-of postfix — `g_fx.&`, `desc.&`, `mapped.&` are
+`.&` is ilang's universal address-of postfix — `g_fx.&`, `desc.&`, `mapped.&` are
 everywhere in real code. `.count` is universal member access. `Type<>` yields a
 value, and both accessors then behave exactly as they do on any other value.
 There is nothing special to learn.
@@ -182,14 +182,14 @@ downstream follows the normal rules. No change made, and none wanted.
 ### The C names carry an `i_` prefix
 
 Reflection tables are emitted unconditionally, so `std/reflect.h` puts its
-contents into the C global namespace of every I program. `reflect` unprefixed is
+contents into the C global namespace of every ilang program. `reflect` unprefixed is
 a plausible identifier for third-party C to claim — it is a GLSL builtin, and
 any vector-math library an engine links is fair game. Nothing collided in
 njinn's whole vendor set (cgltf, stb, miniaudio, jsmn, cglm, D3D11), but doing
 this before third parties depend on the spelling is far cheaper than after.
 
 So the C side is `i_reflect`, `i_reflect_field`, `i_reflect_fields()`,
-`I_Reflect_Struct`, and so on, while **I source keeps the short spelling**. The
+`I_Reflect_Struct`, and so on, while **ilang source keeps the short spelling**. The
 compiler maps between them when it emits.
 
 Not `__i_`. C reserves every identifier beginning with two underscores, or an
@@ -209,13 +209,13 @@ direction.
 *Mutation: drop one name from the table — `reflect_runtime_names` fails with
 "declared but not mapped".*
 
-### The helpers are written in I, not bound from C
+### The helpers are written in ilang, not bound from C
 
 `std/reflect.h` used to define 41 `static inline` helpers, and `std/reflect.i`
 mirrored a subset of them as `external` declarations. They are all pure logic
 — null checks, kind compares, loops over the arrays the compiler emitted, one
 small attribute tokeniser — so a C header was the wrong home for them. They are
-now ordinary I procs in `std/reflect.i`, and the header holds record layouts
+now ordinary ilang procs in `std/reflect.i`, and the header holds record layouts
 only.
 
 Three things this bought. The hand-written `external` declarations are gone, and
@@ -226,11 +226,11 @@ catch it. The helpers are type-checked. And a reader who wants to know what
 ordinary data and the tool that reads it was hidden in C.
 
 C still owns the record layouts, and has to: the compiler emits its tables as C
-initialisers of those types, so a definition on the I side would collide with the
+initialisers of those types, so a definition on the ilang side would collide with the
 header's.
 
 *Covered by `enum_reflect_preprocessor`, which asserts on the results of all 41
-helpers and passes unchanged against the I implementations; and by
+helpers and passes unchanged against the ilang implementations; and by
 `reflect_runtime_names`, which now also fails if the header grows a helper back.*
 
 ## Immutability -- settled, and it needed nothing

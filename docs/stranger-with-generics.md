@@ -1,11 +1,11 @@
 # The Stranger With Generics
 
-What happens when someone else uses an I library, and their code instantiates a
+What happens when someone else uses an ilang library, and their code instantiates a
 generic the library author never wrote down.
 
 This is a **future** problem. Nothing in the current setup hits it, and the
 reason is recorded below so the question does not get re-opened without cause.
-It is written up because it is the first thing anyone will ask the day I has a
+It is written up because it is the first thing anyone will ask the day ilang has a
 second user, and because the answer shapes the module design.
 
 ## The Problem
@@ -44,7 +44,7 @@ link fails:
 Note the second one. Reflection tables are ordinary `const` globals, so they
 collide the same way the code does.
 
-## Why C++ Has This Badly And I Does Not
+## Why C++ Has This Badly And ilang Does Not
 
 C++ has no whole-program step. It inherited C's translation-unit model, which
 was designed so a compiler could work on one file at a time on a machine with
@@ -56,7 +56,7 @@ C++98 tried to fix this properly with the `export` keyword, which would have
 allowed separately compiled templates. One implementation ever shipped it, it
 was brutally complex, and it was removed in C++11.
 
-I is in a different position. `import` already reads the entire program, and
+ilang is in a different position. `import` already reads the entire program, and
 20,000 lines parse in under 0.2 seconds. So the compiler can simply **collect
 every instantiation and emit each one once**, into a single generated unit. No
 folding, no special linkage, no COMDAT.
@@ -87,7 +87,7 @@ it is not free.
 - **Teaching** hands students `.i` files. That is source.
 - **Open-sourcing** a library hands over source too.
 
-The problem requires distributing a *closed-source binary* I library that a
+The problem requires distributing a *closed-source binary* ilang library that a
 stranger compiles against. Until that exists, this document describes a
 situation nobody is in.
 

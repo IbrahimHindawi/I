@@ -128,11 +128,11 @@ Vec<T>reserve:proc<T>(length:u64)->Vec<T> = {
     return out;
 }
 
-json_read:proc<i32>(out:*i32)->b32 = { external; }
+json_read:proc[external]<i32>(out:*i32)->b32 = {}
 
-json_read:proc<Array<T>>(out:*Array<T>)->b32 = { external; }
+json_read:proc[external]<Array<T>>(out:*Array<T>)->b32 = {}
 
-json_read:proc<Vec<T>>(out:*Vec<T>)->b32 = { external; }
+json_read:proc[external]<Vec<T>>(out:*Vec<T>)->b32 = {}
 
 Other:struct = {
     value:i32;
@@ -212,7 +212,7 @@ import "stdio.h"
         encoding="utf-8",
         newline="\n",
     )
-    import_completion_nested_module.write_text("Nested:struct = { external; }\n", encoding="utf-8", newline="\n")
+    import_completion_nested_module.write_text("Nested:struct[external] = {}\n", encoding="utf-8", newline="\n")
     cinclude_header.write_text("#pragma once\n#define VENDOR_H 1\n", encoding="utf-8", newline="\n")
     cinclude_nested_header.write_text("#pragma once\n#define NESTED_H 1\n", encoding="utf-8", newline="\n")
     import_completion.write_text(
@@ -2015,7 +2015,7 @@ main:proc()->i32 = {
         reflect_field_col,
     )
     if (
-        not any(item.name == "name" and item.detail == "Payload<>.name: *const char" for item in reflect_field_items)
+        not any(item.name == "name" and item.detail == "Payload<>.name: *const c8" for item in reflect_field_items)
         or not any(item.name == "count" and item.detail == "Payload<>.count: u64" for item in reflect_field_items)
         or not any(item.name == "kind" and item.detail == "Payload<>.kind: i32" for item in reflect_field_items)
         or not any(item.name == "variant" and item.detail == "Payload<>.variant: const reflect_variant" for item in reflect_field_items)
@@ -3516,7 +3516,7 @@ main:proc()->i32 = {
         or string_inner_signature.get("activeParameter") != 0
         or not string_inner_signature.get("signatures")
         or string_inner_signature["signatures"][0].get("parameters")
-        != [{"label": "text:*const char"}, {"label": "amount:i32"}]
+        != [{"label": "text:*const c8"}, {"label": "amount:i32"}]
     ):
         print("lsp: expected comma inside string literal to keep signature help on first parameter")
         print(string_inner_signature)

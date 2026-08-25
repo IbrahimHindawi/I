@@ -47,6 +47,6 @@ Stack<T>destroy: proc<T>(arena: *memops_arena, stack: *Stack<T>)->void = {
     }
 }
 
-Stack<T>is_empty: proc<T>(stack: *Stack<T>)->bool = {
+Stack<T>is_empty: proc<T>(stack: *Stack<T>)->b32 = {
     return stack == null or stack[0].length == 0;
 }

@@ -350,6 +350,7 @@ typedef enum TokenKind {
     Token_Char,
     Token_Colon,
     Token_Semicolon,
+    Token_Directive,
     Token_Equal,
     Token_EqualEqual,
     Token_BangEqual,
@@ -414,6 +415,8 @@ typedef enum TokenKind {
     Token_Keyword_Shr,
     Token_Keyword_Goto,
     Token_Keyword_Static,
+    Token_Keyword_True,
+    Token_Keyword_False,
 } TokenKind;
 
 typedef struct Token Token;
@@ -432,7 +435,10 @@ static const char *token_kind_name(TokenKind kind) {
         case Token_String: return "string";
         case Token_Char: return "character literal";
         case Token_Colon: return "':'";
+        case Token_Keyword_True: return "'true'";
+        case Token_Keyword_False: return "'false'";
         case Token_Semicolon: return "';'";
+        case Token_Directive: return "preprocessor directive";
         case Token_Equal: return "'='";
         case Token_EqualEqual: return "'=='";
         case Token_BangEqual: return "'!='";
@@ -573,6 +579,7 @@ struct Expr {
     Vec_voidptr args;      // Expr*
     Vec_voidptr type_args; // TypeExpr*
     Vec_voidptr designators; // Expr* or null, parallel with args for init lists
+    Vec_voidptr arg_directives; // Vec_string8* or null; args.length + 1 entries, last is the tail
     Vec_i32 designator_kinds; // InitDesignatorKind, parallel with args for init lists
     Expr *inner;
     Expr *left;
@@ -600,11 +607,13 @@ typedef enum StmtKind {
     Stmt_Switch,
     Stmt_Goto,
     Stmt_Label,
+    Stmt_Directive, // a '#' line written inside a body; `name` holds it verbatim
 } StmtKind;
 
 struct Stmt {
     StmtKind kind;
     string8 name;
+    string8 align;  /* the N in a trailing align(N); empty when unset */
     TypeExpr *type;
     const char *source_path;
     const char *import_chain;
@@ -640,7 +649,10 @@ struct SwitchCase {
 };
 
 struct Field {
+    /* '#' lines written just above this field, emitted verbatim before it. */
+    Vec_string8 pre_directives;
     string8 name;
+    string8 align;  /* the N in a trailing align(N); empty when unset */
     TypeExpr *type;
     string8 attrs;
     string8 bit_width;  // set for bitfields: 'flags: u32 : 4;'
@@ -659,6 +671,8 @@ struct Param {
 struct StructDecl {
     string8 name;
     bool no_layout_check;
+    bool packed;
+    string8 align;
     const char *source_path;
     const char *import_chain;
     bool is_generic;
@@ -667,11 +681,14 @@ struct StructDecl {
     /* `struct<T>` is one entry; `struct<K, V>` is two. */
     Vec_string8 type_params;
     Vec_voidptr fields; // Field*
+    Vec_string8 tail_directives; // '#' lines after the last field
     i32 line;
     i32 col;
 };
 
 struct EnumItem {
+    /* '#' lines written just above this item, emitted verbatim before it. */
+    Vec_string8 pre_directives;
     string8 name;
     string8 value;
     Expr *value_expr; // set when the value is a constant expression, not a bare token
@@ -680,11 +697,13 @@ struct EnumItem {
 };
 
 struct EnumDecl {
+    string8 underlying;  /* enum[u32]: the C underlying type, empty when unset */
     string8 name;
     const char *source_path;
     const char *import_chain;
     bool is_external;
     Vec_voidptr items; // EnumItem*
+    Vec_string8 tail_directives; // '#' lines after the last item
     i32 line;
     i32 col;
 };
@@ -798,6 +817,7 @@ static bool char_escape_is_simple(u8 c) {
 }
 
 static bool preprocessor_line_is_c_directive(u8 *line, u64 length);
+static void preprocessor_error(i32 line, const char *message);
 
 static void lex_error(i32 line, i32 col, const char *message) {
     if (g_diag_json) {
@@ -817,13 +837,337 @@ static Token token_make(TokenKind kind, string8slice text, i32 line, i32 col) {
     return t;
 }
 
-static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) {
+
+/* ---------------------------------------------------------------------------
+   Conditional compilation.
+
+   ilang evaluates '#if' family directives itself and never emits them. A dead
+   arm is skipped in the lexer, so it is not parsed, not type-checked, and does
+   not exist as far as the rest of the compiler is concerned -- the same deal C
+   makes, and the same deal Rust's cfg and Zig's comptime make. The cost is that
+   a branch you are not currently building can rot; that is accepted
+   deliberately, and is the reason `#else` works at file scope at all. Two arms
+   would otherwise be two declarations of one name, and ilang would reject the
+   pair before C ever saw it.
+
+   What is *not* evaluated: '#define', '#include', '#pragma' and friends still
+   pass through to C untouched. ilang records which names are defined so it can
+   answer '#ifdef', but it does not expand macros -- that stays C's job. So a
+   name defined by a C header, rather than by a '#define' ilang can see, is
+   unknown here and its '#ifdef' takes the false arm. That divergence is not
+   silent: whatever the arm declared is simply absent, and the first use of it
+   is an ordinary `undeclared name` error.
+   --------------------------------------------------------------------------- */
+
+typedef struct PreprocFrame {
+    bool live;   // this arm is being compiled
+    bool taken;  // some arm of this chain has already been taken
+    i32 line;    // where the '#if' opened, for the unterminated diagnostic
+} PreprocFrame;
+
+typedef struct PreprocState {
+    Vec_string8 defines;      // names currently defined, in source order
+    PreprocFrame frames[64];
+    i32 depth;
+    bool overflowed;
+} PreprocState;
+
+static bool preproc_live(PreprocState *pp) {
+    return pp->depth == 0 || pp->frames[pp->depth - 1].live;
+}
+
+static bool preproc_is_defined(PreprocState *pp, u8 *name, u64 length) {
+    for (i32 i = 0; i < pp->defines.length; i++) {
+        string8 d = pp->defines.data[i];
+        if (d.length == length && memcmp(d.data, name, (size_t)length) == 0) return true;
+    }
+    return false;
+}
+
+static void preproc_define(memops_arena *arena, PreprocState *pp, u8 *name, u64 length) {
+    if (preproc_is_defined(pp, name, length)) return;
+    Vec_string8_append(arena, &pp->defines, string8_copy_from_slice(arena, name, length));
+}
+
+static void preproc_undef(PreprocState *pp, u8 *name, u64 length) {
+    for (i32 i = 0; i < pp->defines.length; i++) {
+        string8 d = pp->defines.data[i];
+        if (d.length == length && memcmp(d.data, name, (size_t)length) == 0) {
+            for (i32 j = i; j + 1 < pp->defines.length; j++) {
+                pp->defines.data[j] = pp->defines.data[j + 1];
+            }
+            pp->defines.length--;
+            return;
+        }
+    }
+}
+
+/* --- the condition language -----------------------------------------------
+   `defined(X)`, `defined X`, a bare name (undefined reads as 0, as in C),
+   integer literals, `!`, `&&`, `||` and parentheses. Comparison and arithmetic
+   are rejected rather than half-supported: nothing in the tree uses them, and
+   quietly getting `#if VERSION > 2` wrong would be worse than refusing it. */
+
+typedef struct PreprocScan {
+    u8 *p;
+    u8 *end;
+    i32 line;
+    bool failed;
+} PreprocScan;
+
+static void preproc_skip_space(PreprocScan *sc) {
+    while (sc->p < sc->end && (*sc->p == ' ' || *sc->p == '\t')) sc->p++;
+}
+
+static bool preproc_ident_char(u8 c, bool first) {
+    if (c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
+    return !first && c >= '0' && c <= '9';
+}
+
+static bool preproc_eval_or(PreprocScan *sc, PreprocState *pp);
+
+static bool preproc_eval_primary(PreprocScan *sc, PreprocState *pp) {
+    preproc_skip_space(sc);
+    if (sc->p >= sc->end) {
+        preprocessor_error(sc->line, "expected a condition after the directive");
+        sc->failed = true;
+        return false;
+    }
+    if (*sc->p == '!') {
+        sc->p++;
+        return !preproc_eval_primary(sc, pp);
+    }
+    if (*sc->p == '(') {
+        sc->p++;
+        bool inner = preproc_eval_or(sc, pp);
+        preproc_skip_space(sc);
+        if (sc->p < sc->end && *sc->p == ')') sc->p++;
+        return inner;
+    }
+    if (*sc->p >= '0' && *sc->p <= '9') {
+        u64 value = 0;
+        while (sc->p < sc->end && *sc->p >= '0' && *sc->p <= '9') {
+            value = value * 10 + (u64)(*sc->p - '0');
+            sc->p++;
+        }
+        return value != 0;
+    }
+    if (preproc_ident_char(*sc->p, true)) {
+        u8 *name = sc->p;
+        while (sc->p < sc->end && preproc_ident_char(*sc->p, false)) sc->p++;
+        u64 length = (u64)(sc->p - name);
+        if (length == 7 && memcmp(name, "defined", 7) == 0) {
+            preproc_skip_space(sc);
+            bool parenthesised = sc->p < sc->end && *sc->p == '(';
+            if (parenthesised) {
+                sc->p++;
+                preproc_skip_space(sc);
+            }
+            u8 *target = sc->p;
+            while (sc->p < sc->end && preproc_ident_char(*sc->p, false)) sc->p++;
+            u64 target_length = (u64)(sc->p - target);
+            if (parenthesised) {
+                preproc_skip_space(sc);
+                if (sc->p < sc->end && *sc->p == ')') sc->p++;
+            }
+            if (target_length == 0) {
+                preprocessor_error(sc->line, "expected a macro name after 'defined'");
+                sc->failed = true;
+                return false;
+            }
+            return preproc_is_defined(pp, target, target_length);
+        }
+        /* A bare name: defined-ness stands in for its value, because ilang does
+           not expand macros. `#if FOO` where FOO is `0` therefore reads as
+           true here and false in C -- so it is refused rather than guessed. */
+        preproc_skip_space(sc);
+        if (sc->p < sc->end) {
+            preprocessor_error(sc->line,
+                               "only 'defined(X)', '!', '&&', '||' and integer literals are "
+                               "supported in a condition; ilang does not expand macros");
+            sc->failed = true;
+            return false;
+        }
+        return preproc_is_defined(pp, name, length);
+    }
+    preprocessor_error(sc->line, "unsupported expression in a preprocessor condition");
+    sc->failed = true;
+    return false;
+}
+
+static bool preproc_eval_and(PreprocScan *sc, PreprocState *pp) {
+    bool value = preproc_eval_primary(sc, pp);
+    for (;;) {
+        preproc_skip_space(sc);
+        if (sc->p + 1 < sc->end && sc->p[0] == '&' && sc->p[1] == '&') {
+            sc->p += 2;
+            bool rhs = preproc_eval_primary(sc, pp);
+            value = value && rhs;
+            continue;
+        }
+        return value;
+    }
+}
+
+static bool preproc_eval_or(PreprocScan *sc, PreprocState *pp) {
+    bool value = preproc_eval_and(sc, pp);
+    for (;;) {
+        preproc_skip_space(sc);
+        if (sc->p + 1 < sc->end && sc->p[0] == '|' && sc->p[1] == '|') {
+            sc->p += 2;
+            bool rhs = preproc_eval_and(sc, pp);
+            value = value || rhs;
+            continue;
+        }
+        return value;
+    }
+}
+
+/* Splits `#name rest` and returns the directive name; `rest` is left pointing
+   at whatever followed it. */
+static string8slice preproc_directive_name(u8 *line, u64 length, u8 **out_rest) {
+    u64 i = 0;
+    while (i < length && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i < length && line[i] == '#') i++;
+    while (i < length && (line[i] == ' ' || line[i] == '\t')) i++;
+    u64 start = i;
+    while (i < length && preproc_ident_char(line[i], i == start)) i++;
+    *out_rest = line + i;
+    return string8slice_from_parts(line + start, i - start);
+}
+
+static bool preproc_name_is(string8slice name, const char *text) {
+    u64 length = (u64)strlen(text);
+    return name.length == length && memcmp(name.data, text, (size_t)length) == 0;
+}
+
+
+/* --- seeding the define table -------------------------------------------
+
+   `import` is not `#include`. Each file is lexed separately, and the entry
+   file is lexed before its imports are even known, so a `#define` in an
+   imported file would not be visible to a conditional in the file importing it
+   -- which is exactly how njinn's `#define gin_debug_draw` lives in pch.i and
+   is tested for in gin.i.
+
+   Every one of those defines ends up in a single generated translation unit
+   anyway, so C sees them all regardless of order. This pre-pass makes ilang see
+   the same set: it walks the entry file and its imports textually, before any
+   lexing, and collects the `#define`s that are *not* themselves inside a
+   conditional.
+
+   Unconditional only, and deliberately so. A `#define` inside an `#ifdef` can
+   only be resolved by evaluating that `#ifdef`, which needs the table this pass
+   is building. Rather than close the loop, the rule is: an unconditional
+   file-scope define is visible program-wide, a conditional one is visible from
+   where it appears onward in its own file. The conservative direction -- a
+   define in a dead arm is never collected. */
+
+static const char *resolve_import_path(memops_arena *arena, string8 import_lit);
+static string8 read_i_source_for_path(memops_arena *arena, const char *path);
+
+static void preproc_seed_scan(memops_arena *arena, const char *path, PreprocState *pp,
+                              Vec_string8 *visited, i32 depth) {
+    if (depth > 32 || !path) return;
+    for (i32 i = 0; i < visited->length; i++) {
+        if (string8_equals_cstr(&visited->data[i], path)) return;
+    }
+    Vec_string8_append(arena, visited, string8_from_cstr(arena, path));
+
+    string8 src = read_i_source_for_path(arena, path);
+    if (!src.data) return;
+
+    i32 conditional_depth = 0;
+    u8 *p = src.data;
+    u8 *end = src.data + src.length;
+    while (p < end) {
+        u8 *line_start = p;
+        while (p < end && *p != '\n') p++;
+        u8 *line_end = p;
+        if (line_end > line_start && line_end[-1] == '\r') line_end--;
+        u64 length = (u64)(line_end - line_start);
+        if (p < end) p++;
+
+        u64 i = 0;
+        while (i < length && (line_start[i] == ' ' || line_start[i] == '\t')) i++;
+        if (i >= length) continue;
+
+        if (line_start[i] == '#') {
+            u8 *rest = null;
+            string8slice name = preproc_directive_name(line_start, length, &rest);
+            if (preproc_name_is(name, "if") || preproc_name_is(name, "ifdef") ||
+                preproc_name_is(name, "ifndef")) {
+                conditional_depth++;
+            } else if (preproc_name_is(name, "endif")) {
+                if (conditional_depth > 0) conditional_depth--;
+            } else if (conditional_depth == 0 &&
+                       (preproc_name_is(name, "define") || preproc_name_is(name, "undef"))) {
+                PreprocScan sc = {rest, line_end, 0, false};
+                preproc_skip_space(&sc);
+                u8 *target = sc.p;
+                while (sc.p < sc.end && preproc_ident_char(*sc.p, false)) sc.p++;
+                u64 target_length = (u64)(sc.p - target);
+                if (target_length > 0) {
+                    if (preproc_name_is(name, "define")) {
+                        preproc_define(arena, pp, target, target_length);
+                    } else {
+                        preproc_undef(pp, target, target_length);
+                    }
+                }
+            }
+            continue;
+        }
+
+        /* `import "path.i"` -- matched textually, because parsing it would need
+           the lexing this pass runs before. */
+        static const char *keyword = "import";
+        u64 keyword_length = 6;
+        if (i + keyword_length >= length) continue;
+        if (memcmp(line_start + i, keyword, (size_t)keyword_length) != 0) continue;
+        i += keyword_length;
+        while (i < length && (line_start[i] == ' ' || line_start[i] == '\t')) i++;
+        if (i >= length || line_start[i] != '"') continue;
+        u64 quote_start = i;
+        i++;
+        while (i < length && line_start[i] != '"') i++;
+        if (i >= length) continue;
+        string8 literal = string8_copy_from_slice(arena, line_start + quote_start,
+                                                  (i - quote_start) + 1);
+        preproc_seed_scan(arena, resolve_import_path(arena, literal), pp, visited, depth + 1);
+    }
+}
+
+/* Defines visible to every file's conditionals. Built once, before any lexing. */
+static PreprocState g_preproc_seed;
+static bool g_preproc_seed_ready = false;
+
+static void preproc_build_seed(memops_arena *arena, const char *entry_path) {
+    g_preproc_seed.defines = Vec_string8_reserve(arena, 8);
+    g_preproc_seed.depth = 0;
+    Vec_string8 visited = Vec_string8_reserve(arena, 8);
+    preproc_seed_scan(arena, entry_path, &g_preproc_seed, &visited, 0);
+    g_preproc_seed_ready = true;
+}
+
+static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens,
+                       Vec_string8 *out_directives) {
     i32 line = 1;
     i32 col = 1;
+    i32 brace_depth = 0; // file scope is 0; a directive deeper than that cannot be hoisted
     u8 *p = src.data;
     u8 *end = src.data + src.length;
 
+    PreprocState pp = {0};
+    pp.defines = Vec_string8_reserve(arena, 8);
+    /* Start from the program-wide unconditional defines, so a conditional can
+       see a `#define` that lives in an imported file. */
+    for (i32 i = 0; g_preproc_seed_ready && i < g_preproc_seed.defines.length; i++) {
+        string8 seeded = g_preproc_seed.defines.data[i];
+        preproc_define(arena, &pp, seeded.data, seeded.length);
+    }
+
     *out_tokens = Vec_Token_reserve(arena, 256);
+    if (out_directives) *out_directives = Vec_string8_reserve(arena, 8);
 
     while (p < end) {
         u8 c = *p;
@@ -840,16 +1184,118 @@ static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) 
         }
         if (c == '#') {
             u8 *line_start = p;
+            u8 *line_end = null;
             while (p < end && *p != '\n') {
                 p++;
             }
-            u8 *line_end = p;
+            line_end = p;
             if (line_end > line_start && line_end[-1] == '\r') line_end--;
-            if (!preprocessor_line_is_c_directive(line_start, (u64)(line_end - line_start))) {
+            u64 line_length = (u64)(line_end - line_start);
+            if (!preprocessor_line_is_c_directive(line_start, line_length)) {
                 lex_error(line, col,
                           "unknown preprocessor directive; '#' starts a C preprocessor line, use '//' for comments");
             }
+
+            u8 *rest = null;
+            string8slice name = preproc_directive_name(line_start, line_length, &rest);
+            u64 rest_length = (u64)(line_end - rest);
+            bool parent_live = preproc_live(&pp);
+
+            if (preproc_name_is(name, "if") || preproc_name_is(name, "ifdef") ||
+                preproc_name_is(name, "ifndef")) {
+                bool value = false;
+                if (parent_live) {
+                    PreprocScan sc = {rest, rest + rest_length, line, false};
+                    if (preproc_name_is(name, "if")) {
+                        value = preproc_eval_or(&sc, &pp);
+                    } else {
+                        preproc_skip_space(&sc);
+                        u8 *target = sc.p;
+                        while (sc.p < sc.end && preproc_ident_char(*sc.p, false)) sc.p++;
+                        value = preproc_is_defined(&pp, target, (u64)(sc.p - target));
+                        if (preproc_name_is(name, "ifndef")) value = !value;
+                    }
+                }
+                if (pp.depth >= (i32)(sizeof(pp.frames) / sizeof(pp.frames[0]))) {
+                    if (!pp.overflowed) {
+                        preprocessor_error(line, "conditionals nested too deeply");
+                        pp.overflowed = true;
+                    }
+                } else {
+                    pp.frames[pp.depth].live = parent_live && value;
+                    pp.frames[pp.depth].taken = value;
+                    pp.frames[pp.depth].line = line;
+                    pp.depth++;
+                }
+                continue;
+            }
+            if (preproc_name_is(name, "elif") || preproc_name_is(name, "else")) {
+                if (pp.depth == 0) {
+                    preprocessor_error(line, preproc_name_is(name, "else")
+                                                 ? "'#else' without a matching '#if'"
+                                                 : "'#elif' without a matching '#if'");
+                    continue;
+                }
+                PreprocFrame *frame = &pp.frames[pp.depth - 1];
+                bool grandparent_live = pp.depth == 1 || pp.frames[pp.depth - 2].live;
+                bool value = true;
+                if (preproc_name_is(name, "elif")) {
+                    value = false;
+                    if (grandparent_live && !frame->taken) {
+                        PreprocScan sc = {rest, rest + rest_length, line, false};
+                        value = preproc_eval_or(&sc, &pp);
+                    }
+                }
+                frame->live = grandparent_live && !frame->taken && value;
+                if (value) frame->taken = true;
+                continue;
+            }
+            if (preproc_name_is(name, "endif")) {
+                if (pp.depth == 0) {
+                    preprocessor_error(line, "'#endif' without a matching '#if'");
+                } else {
+                    pp.depth--;
+                }
+                continue;
+            }
+
+            /* Everything else is C's business and passes through -- but only
+               from an arm that is being compiled. */
+            if (!preproc_live(&pp)) continue;
+
+            if (preproc_name_is(name, "define") || preproc_name_is(name, "undef")) {
+                PreprocScan sc = {rest, rest + rest_length, line, false};
+                preproc_skip_space(&sc);
+                u8 *target = sc.p;
+                while (sc.p < sc.end && preproc_ident_char(*sc.p, false)) sc.p++;
+                u64 target_length = (u64)(sc.p - target);
+                if (target_length > 0) {
+                    if (preproc_name_is(name, "define")) {
+                        preproc_define(arena, &pp, target, target_length);
+                    } else {
+                        preproc_undef(&pp, target, target_length);
+                    }
+                }
+            }
+
+            if (brace_depth > 0) {
+                string8slice text = string8slice_from_parts(line_start, line_length);
+                Vec_Token_append(arena, out_tokens, token_make(Token_Directive, text, line, col));
+            } else if (out_directives) {
+                Vec_string8_append(arena, out_directives,
+                                   string8_copy_from_slice(arena, line_start, line_length));
+            }
             continue; // the whole line is consumed either way
+        }
+
+        /* Inside a dead arm nothing is lexed: the code is not parsed, not
+           checked, and does not exist. Skipping by line rather than by token
+           keeps a '#' inside a dead string literal from being read as a
+           directive, and is what lets a dead arm hold text that is not even
+           valid ilang. */
+        if (!preproc_live(&pp)) {
+            while (p < end && *p != '\n') p++;
+            continue;
         }
         if (c == '/' && (p + 1) < end && p[1] == '/') {
             while (p < end && *p != '\n') {
@@ -920,6 +1366,8 @@ static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) 
             else if (string8slice_equals_cstr(text, "shr")) kind = Token_Keyword_Shr;
             else if (string8slice_equals_cstr(text, "goto")) kind = Token_Keyword_Goto;
             else if (string8slice_equals_cstr(text, "static")) kind = Token_Keyword_Static;
+            else if (string8slice_equals_cstr(text, "true")) kind = Token_Keyword_True;
+            else if (string8slice_equals_cstr(text, "false")) kind = Token_Keyword_False;
             /* 'shl='/'shr=' are compound assignment; the '=' must touch the keyword. */
             if ((kind == Token_Keyword_Shl || kind == Token_Keyword_Shr) &&
                 p < end && *p == '=' && !((p + 1) < end && p[1] == '=')) {
@@ -1162,8 +1610,8 @@ static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) 
             case ':': kind = Token_Colon; break;
             case ';': kind = Token_Semicolon; break;
             case '=': kind = Token_Equal; break;
-            case '{': kind = Token_LBrace; break;
-            case '}': kind = Token_RBrace; break;
+            case '{': kind = Token_LBrace; brace_depth++; break;
+            case '}': kind = Token_RBrace; if (brace_depth > 0) brace_depth--; break;
             case '(': kind = Token_LParen; break;
             case ')': kind = Token_RParen; break;
             case '[': kind = Token_LBracket; break;
@@ -1199,6 +1647,12 @@ static void lex_tokens(memops_arena *arena, string8 src, Vec_Token *out_tokens) 
         lex_error(line, col, message);
         p++; // must advance or the loop never terminates
         col++;
+    }
+
+    /* Reported innermost-first, at the line that opened it rather than at the
+       end of the file, which is where the fix belongs. */
+    for (i32 i = pp.depth; i > 0; i--) {
+        preprocessor_error(pp.frames[i - 1].line, "unterminated '#if': missing '#endif'");
     }
 
     Vec_Token_append(arena, out_tokens, token_make(Token_EOF, string8slice_from_parts(end, 0), line, col));
@@ -1535,7 +1989,6 @@ static string8 token_to_string8(memops_arena *arena, Token *t) {
     return string8_copy_from_slice(arena, t->text.data, t->text.length);
 }
 
-static Vec_string8 collect_preprocessor_lines(memops_arena *arena, string8 src);
 
 static string8 string_lit_inner(memops_arena *arena, string8 lit) {
     if (lit.length >= 2 && lit.data[0] == '"' && lit.data[lit.length - 1] == '"') {
@@ -1620,15 +2073,95 @@ static string8 type_mangle_concrete(memops_arena *arena, TypeExpr *type) {
     return out;
 }
 
+/* One attribute slot per declaration: `struct[external]`, `proc[external,
+   WINCALL]`, `enum[external]`.
+
+   The slot already existed on procs, holding a single calling-convention
+   identifier (`platform_add: proc[WINCALL](...)`). This generalises it to a
+   comma-separated list and gives structs and enums the same one.
+
+   The bracket is where `external` belongs, because it says something about the
+   *declaration* -- do not emit it, C already has it -- while the braces are
+   where fields and statements go. Putting it inside the body made
+   `FILE: struct = { external; }` read as a struct with one strange member, and
+   left procs and structs marking the same concept two different ways.
+
+   The old spellings still parse, so the tree can migrate a file at a time.
+
+   The rule for what may live here: an attribute may change how a declaration is
+   lowered; it may not change what the declaration means in I. See
+   docs/attributes.md. */
+typedef struct DeclAttributes {
+    bool is_external;
+    bool emit_external_proto;
+    bool no_layout_check;
+    bool packed;
+    string8 align;       /* the N in align(N), empty when unset */
+    string8 underlying;  /* enum[u32] and friends, empty when unset */
+    string8 callconv;
+} DeclAttributes;
+static DeclAttributes parse_decl_attributes(Parser *p, bool is_enum);
+
+/* True when a type's text ends in a return type: `proc(...)->T` and pointers
+   to it. A trailing attribute there reads as though it belonged to the return
+   type, so it is rejected rather than silently bound to the declaration. */
+static bool type_text_ends_in_return_type(TypeExpr *type) {
+    for (i32 depth = 0; type && depth < 32; depth++) {
+        if (type->kind == Type_Proc) return true;
+        if (type->kind != Type_Ptr && type->kind != Type_Array) return false;
+        type = type->elem;
+    }
+    return false;
+}
+
+/* Reads the attribute list that may follow a variable's or field's type.
+   `align(N)` is the only one that means anything on a value; the rest describe
+   procs or records, and accepting them silently is how `[align(16)] i32` used
+   to compile to a plainly unaligned `i32`. */
+static string8 parse_trailing_decl_attributes(Parser *p, TypeExpr *type) {
+    if (parser_peek(p)->kind != Token_LBracket) return (string8){0};
+    Token *bracket = parser_peek(p);
+    if (type_text_ends_in_return_type(type)) {
+        parser_error_token(p, bracket,
+                           "an attribute cannot follow a return type; it would read as though "
+                           "it belonged to the return type rather than to the declaration");
+        return (string8){0};
+    }
+    DeclAttributes attrs = parse_decl_attributes(p, false);
+    if (attrs.is_external || attrs.emit_external_proto) {
+        parser_error_token(p, bracket,
+                           "'external' does not apply to a variable; a global with no "
+                           "initializer is the one C owns");
+    }
+    if (attrs.packed || attrs.no_layout_check || attrs.callconv.data) {
+        parser_error_token(p, bracket,
+                           "that attribute describes a record or a proc, not a value; "
+                           "'align(N)' is the only one that applies here");
+    }
+    return attrs.align;
+}
+
 static TypeExpr *parse_type(Parser *p) {
     if (parser_match(p, Token_Keyword_Const)) {
+        Token *qualifier = parser_prev(p);
         TypeExpr *inner = parse_type(p);
+        if (inner && inner->kind == Type_Array) {
+            parser_error_token(p, qualifier,
+                               "'const' cannot qualify an array; C qualifies the element type "
+                               "rather than the array, so write '[N]const T'");
+        }
         inner->is_const = true;
         return inner;
     }
 
     if (parser_match(p, Token_Keyword_Volatile)) {
+        Token *qualifier = parser_prev(p);
         TypeExpr *inner = parse_type(p);
+        if (inner && inner->kind == Type_Array) {
+            parser_error_token(p, qualifier,
+                               "'volatile' cannot qualify an array; C qualifies the element type "
+                               "rather than the array, so write '[N]volatile T'");
+        }
         inner->is_volatile = true;
         return inner;
     }
@@ -1638,10 +2171,13 @@ static TypeExpr *parse_type(Parser *p) {
         t->args = ptr_array_reserve(p->arena, 8);
         t->arg_names = Vec_string8_reserve(p->arena, 8);
 
-        if (parser_match(p, Token_LBracket)) {
-            Token *callconv_tok = parser_expect(p, Token_Identifier, "expected call convention name");
-            t->name = token_to_string8(p->arena, callconv_tok);
-            parser_expect(p, Token_RBracket, "expected ']' after call convention");
+        /* A proc *type* takes the same attribute slot as a proc declaration, so
+           `*proc[callconv(WINCALL)](...)` parses the same way the declaration
+           does. Only the calling convention is meaningful on a type -- a type
+           is never external, and has nothing to lay out. */
+        if (parser_peek(p)->kind == Token_LBracket) {
+            DeclAttributes type_attrs = parse_decl_attributes(p, false);
+            if (type_attrs.callconv.data) t->name = type_attrs.callconv;
         }
 
         parser_expect(p, Token_LParen, "expected '(' after proc type");
@@ -1706,6 +2242,12 @@ static TypeExpr *parse_type(Parser *p) {
         } else {
             Token *count_tok = parser_expect(p, Token_Number, "expected array count");
             array->array_count = token_to_string8(p->arena, count_tok);
+            /* `[0]T` is a GNU extension, not ISO C, and clang takes it without a
+               word. Nothing in the tree uses one, and the C trick it exists for
+               -- a flexible array member -- has its own spelling. */
+            if (string8_equals_cstr(&array->array_count, "0")) {
+                parser_error_token(p, count_tok, "array length must be greater than zero");
+            }
         }
         parser_expect(p, Token_RBracket, "expected ']' after array count");
         array->elem = parse_type(p);
@@ -1742,7 +2284,10 @@ static TypeExpr *parse_type(Parser *p) {
     }
 
     TypeExpr *t = type_new(p->arena, Type_Name);
-    t->name = name;
+    /* One type, two spellings: normalising here rather than adding an
+       equivalence rule means nothing downstream has to know about both, and
+       `*const char` and `*const c8` cannot become incompatible types. */
+    t->name = string8_equals_cstr(&name, "char") ? string8_from_cstr(p->arena, "c8") : name;
     t->line = name_tok->line;
     t->col = name_tok->col;
     return t;
@@ -1859,11 +2404,22 @@ static Expr *parse_initializer_list_after_lbrace(Parser *p, Token *lb) {
     e->args = ptr_array_reserve(p->arena, 8);
     e->designators = ptr_array_reserve(p->arena, 8);
     e->designator_kinds = Vec_i32_reserve(p->arena, 8);
+    e->arg_directives = ptr_array_reserve(p->arena, 8);
     e->line = lb->line;
     e->col = lb->col;
+    Vec_string8 *pending = null;
     do {
         Expr *designator = null;
         InitDesignatorKind designator_kind = InitDesignator_None;
+        while (parser_peek(p)->kind == Token_Directive) {
+            Token *d = parser_next(p);
+            if (!pending) {
+                pending = memops_arena_push_struct(p->arena, Vec_string8);
+                *pending = Vec_string8_reserve(p->arena, 2);
+            }
+            Vec_string8_append(p->arena, pending, token_to_string8(p->arena, d));
+        }
+        if (parser_peek(p)->kind == Token_RBrace) break; // trailing comma, or only directives left
         if (parser_match(p, Token_LBracket)) {
             designator = parse_expr(p);
             designator_kind = InitDesignator_Index;
@@ -1881,8 +2437,12 @@ static Expr *parse_initializer_list_after_lbrace(Parser *p, Token *lb) {
         Expr *value = parse_expr(p);
         ptr_array_append(p->arena, &e->args, value);
         ptr_array_append(p->arena, &e->designators, designator);
+        ptr_array_append(p->arena, &e->arg_directives, pending);
+        pending = null;
         Vec_i32_append(p->arena, &e->designator_kinds, designator_kind);
-    } while (parser_match(p, Token_Comma) && parser_peek(p)->kind != Token_RBrace);
+    } while (parser_match(p, Token_Comma));
+    /* Anything still pending closes after the final element. */
+    ptr_array_append(p->arena, &e->arg_directives, pending);
     parser_expect(p, Token_RBrace, "expected '}' after initializer list");
     return e;
 }
@@ -1909,6 +2469,15 @@ static Expr *parse_primary(Parser *p) {
     if (parser_match(p, Token_LBrace)) {
         Token *lb = parser_prev(p);
         return parse_initializer_list_after_lbrace(p, lb);
+    }
+
+    if (parser_peek(p)->kind == Token_Keyword_True || parser_peek(p)->kind == Token_Keyword_False) {
+        Token *t = parser_next(p);
+        Expr *e = expr_new(p->arena, Expr_Number);
+        e->number = string8_from_cstr(p->arena, t->kind == Token_Keyword_True ? "1" : "0");
+        e->line = t->line;
+        e->col = t->col;
+        return parse_postfix(p, e);
     }
 
     if (parser_match(p, Token_Number)) {
@@ -2519,6 +3088,7 @@ static Stmt *parse_for_clause_stmt(Parser *p, bool allow_var_decl) {
         Stmt *s = stmt_new(p->arena, Stmt_Var);
         s->name = token_to_string8(p->arena, name_tok);
         s->type = parse_type(p);
+        s->align = parse_trailing_decl_attributes(p, s->type);
         s->line = name_tok->line;
         s->col = name_tok->col;
         parse_var_initializer(p, s, name_tok);
@@ -2551,6 +3121,17 @@ static Stmt *parse_for_clause_stmt(Parser *p, bool allow_var_decl) {
 }
 
 static Stmt *parse_stmt(Parser *p) {
+    /* A preprocessor line inside a body is a statement in its own right so that
+       it lands where it was written. Only in-body directives are lexed into
+       tokens; file-scope ones are still hoisted to the top of the generated C. */
+    if (parser_match(p, Token_Directive)) {
+        Token *tok = parser_prev(p);
+        Stmt *s = stmt_new(p->arena, Stmt_Directive);
+        s->name = token_to_string8(p->arena, tok);
+        s->line = tok->line;
+        s->col = tok->col;
+        return s;
+    }
     if (parser_match(p, Token_Keyword_Do)) {
         Token *do_tok = parser_prev(p);
         Stmt *s = stmt_new(p->arena, Stmt_DoWhile);
@@ -2767,6 +3348,7 @@ static Stmt *parse_stmt(Parser *p) {
             s->is_static = parser_match(p, Token_Keyword_Static);
             s->name = token_to_string8(p->arena, name_tok);
             s->type = parse_type(p);
+            s->align = parse_trailing_decl_attributes(p, s->type);
             s->line = name_tok->line;
             s->col = name_tok->col;
             parse_var_initializer(p, s, name_tok);
@@ -2804,37 +3386,29 @@ static Stmt *parse_stmt(Parser *p) {
     return null;
 }
 
-/* One attribute slot per declaration: `struct[external]`, `proc[external,
-   WINCALL]`, `enum[external]`.
 
-   The slot already existed on procs, holding a single calling-convention
-   identifier (`platform_add: proc[WINCALL](...)`). This generalises it to a
-   comma-separated list and gives structs and enums the same one.
+/* Attribute names are a closed set. Anything unrecognised is an error, not a
+   fallback: while an unknown name was quietly taken as a calling convention,
+   `struct[externl]` meant *not external* and the struct was emitted as a real
+   definition -- a typo that silently changed what the declaration meant.
 
-   The bracket is where `external` belongs, because it says something about the
-   *declaration* -- do not emit it, C already has it -- while the braces are
-   where fields and statements go. Putting it inside the body made
-   `FILE: struct = { external; }` read as a struct with one strange member, and
-   left procs and structs marking the same concept two different ways.
+   That fallback existed because the slot originally held nothing but a calling
+   convention. Now that attributes take arguments, a convention says so:
+   `proc[callconv(WINAPI)]`. Nothing has to be guessed. */
+static bool decl_attribute_is_integer_type(string8slice name) {
+    return string8slice_equals_cstr(name, "i8") || string8slice_equals_cstr(name, "i16") ||
+           string8slice_equals_cstr(name, "i32") || string8slice_equals_cstr(name, "i64") ||
+           string8slice_equals_cstr(name, "u8") || string8slice_equals_cstr(name, "u16") ||
+           string8slice_equals_cstr(name, "u32") || string8slice_equals_cstr(name, "u64");
+}
 
-   The old spellings still parse, so the tree can migrate a file at a time.
-
-   The rule for what may live here: an attribute may change how a declaration is
-   lowered; it may not change what the declaration means in I. See
-   docs/attributes.md. */
-typedef struct DeclAttributes {
-    bool is_external;
-    bool emit_external_proto;
-    bool no_layout_check;
-    string8 callconv;
-} DeclAttributes;
-
-static DeclAttributes parse_decl_attributes(Parser *p) {
+static DeclAttributes parse_decl_attributes(Parser *p, bool is_enum) {
     DeclAttributes attrs = {0};
     if (!parser_match(p, Token_LBracket)) return attrs;
     do {
         Token *tok = parser_expect(p, Token_Identifier, "expected attribute name");
         if (!tok) break;
+
         if (string8slice_equals_cstr(tok->text, "external")) {
             attrs.is_external = true;
         } else if (string8slice_equals_cstr(tok->text, "external_emit")) {
@@ -2842,13 +3416,32 @@ static DeclAttributes parse_decl_attributes(Parser *p) {
             attrs.emit_external_proto = true;
         } else if (string8slice_equals_cstr(tok->text, "no_layout_check")) {
             /* The record has no C type of that name at all -- ibind synthesises
-               one for a genuinely anonymous member, which exists only in I. Its
-               layout cannot be compared against something C cannot name. */
+               one for a genuinely anonymous member, which exists only in ilang.
+               Its layout cannot be compared against a type C cannot name. */
             attrs.no_layout_check = true;
+        } else if (string8slice_equals_cstr(tok->text, "packed")) {
+            attrs.packed = true;
+        } else if (string8slice_equals_cstr(tok->text, "align")) {
+            Token *n = null;
+            parser_expect(p, Token_LParen, "expected '(' after align");
+            n = parser_expect(p, Token_Number, "expected an alignment in align(N)");
+            if (n) attrs.align = token_to_string8(p->arena, n);
+            parser_expect(p, Token_RParen, "expected ')' after align(N)");
+        } else if (string8slice_equals_cstr(tok->text, "callconv")) {
+            Token *c = null;
+            parser_expect(p, Token_LParen, "expected '(' after callconv");
+            c = parser_expect(p, Token_Identifier, "expected a name in callconv(NAME)");
+            if (c) attrs.callconv = token_to_string8(p->arena, c);
+            parser_expect(p, Token_RParen, "expected ')' after callconv(NAME)");
+        } else if (is_enum && decl_attribute_is_integer_type(tok->text)) {
+            /* `enum[u32]`: the underlying type, which C otherwise leaves to the
+               implementation. Only meaningful on an enum, so only accepted
+               there -- on a struct the same spelling is a mistake. */
+            attrs.underlying = token_to_string8(p->arena, tok);
         } else {
-            /* Anything else is a calling convention, which is all this slot held
-               before it took a list, so `proc[WINCALL]` keeps working. */
-            attrs.callconv = token_to_string8(p->arena, tok);
+            parser_error_token(p, tok,
+                "unknown attribute; expected one of external, external_emit, "
+                "no_layout_check, packed, align(N), callconv(NAME)");
         }
     } while (parser_match(p, Token_Comma));
     parser_expect(p, Token_RBracket, "expected ']' after attributes");
@@ -2858,14 +3451,18 @@ static DeclAttributes parse_decl_attributes(Parser *p) {
 /* Reads fields up to the closing '}'. Shared by named structs and the anonymous
    struct/union members that C headers use, so both accept the same field forms. */
 static void parse_struct_fields(Parser *p, StructDecl *decl) {
+    Vec_string8 pending = Vec_string8_reserve(p->arena, 4);
     while (!parser_at_block_end(p)) {
+        if (parser_peek(p)->kind == Token_Directive) {
+            Token *d = parser_next(p);
+            Vec_string8_append(p->arena, &pending, token_to_string8(p->arena, d));
+            continue;
+        }
         if (parser_peek(p)->kind == Token_Identifier &&
             string8slice_equals_cstr(parser_peek(p)->text, "external") &&
             parser_peek_n(p, 1)->kind == Token_Semicolon) {
-            parser_next(p);
-            parser_next(p);
-            decl->is_external = true;
-            continue;
+            parser_error_token(p, parser_peek(p),
+                               "'external;' in a body is no longer accepted; write the attribute instead, as in 'X: struct[external] = {}'");
         }
 
         /* 'union = { ... }' / 'struct = { ... }' with no name is an anonymous member. */
@@ -2887,6 +3484,8 @@ static void parse_struct_fields(Parser *p, StructDecl *decl) {
 
             Field *f = memops_arena_push_struct(p->arena, Field);
             memset(f, 0, sizeof(Field));
+            f->pre_directives = pending;
+            pending = Vec_string8_reserve(p->arena, 4);
             f->anon = anon;
             f->line = kind_tok->line;
             f->col = kind_tok->col;
@@ -2898,8 +3497,11 @@ static void parse_struct_fields(Parser *p, StructDecl *decl) {
         parser_expect(p, Token_Colon, "expected ':' after field name");
         Field *f = memops_arena_push_struct(p->arena, Field);
         memset(f, 0, sizeof(Field));
+        f->pre_directives = pending;
+        pending = Vec_string8_reserve(p->arena, 4);
         f->name = token_to_string8(p->arena, field_tok);
         f->type = parse_type(p);
+        f->align = parse_trailing_decl_attributes(p, f->type);
         /* 'flags: u32 : 4;' gives the field an explicit bit width. */
         if (parser_match(p, Token_Colon)) {
             Token *width_tok = parser_expect(p, Token_Number, "expected bitfield width after ':'");
@@ -2915,6 +3517,8 @@ static void parse_struct_fields(Parser *p, StructDecl *decl) {
         ptr_array_append(p->arena, &decl->fields, f);
         parser_expect(p, Token_Semicolon, "expected ';' after field");
     }
+    /* A '#endif' closing the last field has no following member to ride on. */
+    decl->tail_directives = pending;
 }
 
 static StructDecl *parse_struct_decl(Parser *p, Token *name_tok, bool is_union) {
@@ -2927,6 +3531,12 @@ static StructDecl *parse_struct_decl(Parser *p, Token *name_tok, bool is_union) 
     decl->col = name_tok->col;
     decl->fields = ptr_array_reserve(p->arena, 8);
 
+    DeclAttributes attrs = parse_decl_attributes(p, false);
+    if (attrs.is_external) decl->is_external = true;
+    if (attrs.no_layout_check) decl->no_layout_check = true;
+    decl->packed = attrs.packed;
+    decl->align = attrs.align;
+
     if (parser_match(p, Token_LAngle)) {
         decl->type_params = Vec_string8_reserve(p->arena, 2);
         do {
@@ -2938,22 +3548,13 @@ static StructDecl *parse_struct_decl(Parser *p, Token *name_tok, bool is_union) 
         parser_expect_generic_close(p);
     }
 
-    DeclAttributes attrs = parse_decl_attributes(p);
-    if (attrs.is_external) decl->is_external = true;
-    if (attrs.no_layout_check) decl->no_layout_check = true;
-
     parser_expect(p, Token_Equal, is_union ? "expected '=' after union" : "expected '=' after struct");
     parser_expect(p, Token_LBrace, is_union ? "expected '{' in union" : "expected '{' in struct");
     if (parser_peek(p)->kind == Token_Identifier &&
         string8slice_equals_cstr(parser_peek(p)->text, "external") &&
-        parser_peek_n(p, 1)->kind == Token_Semicolon &&
-        parser_peek_n(p, 2)->kind == Token_RBrace) {
-        parser_next(p);
-        parser_next(p);
-        parser_next(p);
-        decl->is_external = true;
-        parser_match(p, Token_Semicolon);
-        return decl;
+        parser_peek_n(p, 1)->kind == Token_Semicolon) {
+        parser_error_token(p, parser_peek(p),
+                               "'external;' in a body is no longer accepted; write the attribute instead, as in 'X: struct[external] = {}'");
     }
     parse_struct_fields(p, decl);
     // optional ';' after struct decl
@@ -2970,6 +3571,11 @@ static AliasDecl *parse_alias_decl(Parser *p, Token *name_tok) {
     decl->col = name_tok->col;
     parser_expect(p, Token_Equal, "expected '=' after alias");
     decl->type = parse_type(p);
+    if (parser_peek(p)->kind == Token_LBracket) {
+        parser_error_token(p, parser_peek(p),
+                           "an alias takes no attribute; it names an existing type rather than "
+                           "declaring one, so there is nothing for the attribute to modify");
+    }
     parser_expect(p, Token_Semicolon, "expected ';' after alias");
     return decl;
 }
@@ -3069,23 +3675,30 @@ static EnumDecl *parse_enum_decl(Parser *p, Token *name_tok) {
     decl->col = name_tok->col;
     decl->items = ptr_array_reserve(p->arena, 8);
 
-    DeclAttributes enum_attrs = parse_decl_attributes(p);
+    DeclAttributes enum_attrs = parse_decl_attributes(p, true);
     if (enum_attrs.is_external) decl->is_external = true;
+    decl->underlying = enum_attrs.underlying;
 
     parser_expect(p, Token_Equal, "expected '=' after enum");
     parser_expect(p, Token_LBrace, "expected '{' in enum");
+    Vec_string8 pending = Vec_string8_reserve(p->arena, 4);
     while (!parser_at_block_end(p)) {
+        if (parser_peek(p)->kind == Token_Directive) {
+            Token *d = parser_next(p);
+            Vec_string8_append(p->arena, &pending, token_to_string8(p->arena, d));
+            continue;
+        }
         if (parser_peek(p)->kind == Token_Identifier &&
             string8slice_equals_cstr(parser_peek(p)->text, "external") &&
             parser_peek_n(p, 1)->kind == Token_Semicolon) {
-            parser_next(p);
-            parser_next(p);
-            decl->is_external = true;
-            continue;
+            parser_error_token(p, parser_peek(p),
+                               "'external;' in a body is no longer accepted; write the attribute instead, as in 'E: enum[external] = { A, }'");
         }
         Token *item_tok = parser_expect(p, Token_Identifier, "expected enum item name");
         EnumItem *item = memops_arena_push_struct(p->arena, EnumItem);
         memset(item, 0, sizeof(EnumItem));
+        item->pre_directives = pending;
+        pending = Vec_string8_reserve(p->arena, 4);
         item->name = token_to_string8(p->arena, item_tok);
         item->line = item_tok->line;
         item->col = item_tok->col;
@@ -3116,6 +3729,8 @@ static EnumDecl *parse_enum_decl(Parser *p, Token *name_tok) {
         break;
     }
     parser_match(p, Token_Semicolon);
+    /* A '#endif' closing the last item has no following member to ride on. */
+    decl->tail_directives = pending;
     enum_qualify_item_values(p->arena, decl);
     return decl;
 }
@@ -3129,6 +3744,13 @@ static ProcDecl *parse_proc_decl(Parser *p, Token *name_tok) {
     decl->col = name_tok->col;
     decl->params = ptr_array_reserve(p->arena, 8);
     decl->body = ptr_array_reserve(p->arena, 8);
+
+    DeclAttributes proc_attrs = parse_decl_attributes(p, false);
+    if (proc_attrs.callconv.data) decl->callconv = proc_attrs.callconv;
+    if (proc_attrs.is_external) {
+        decl->is_external = true;
+        decl->emit_external_proto = proc_attrs.emit_external_proto;
+    }
 
     if (parser_match(p, Token_LAngle)) {
         Token *first = parser_peek(p);
@@ -3160,13 +3782,6 @@ static ProcDecl *parse_proc_decl(Parser *p, Token *name_tok) {
         }
     }
 
-    DeclAttributes proc_attrs = parse_decl_attributes(p);
-    if (proc_attrs.callconv.data) decl->callconv = proc_attrs.callconv;
-    if (proc_attrs.is_external) {
-        decl->is_external = true;
-        decl->emit_external_proto = proc_attrs.emit_external_proto;
-    }
-
     parser_expect(p, Token_LParen, "expected '(' after proc");
     if (!parser_match(p, Token_RParen)) {
         do {
@@ -3179,6 +3794,11 @@ static ProcDecl *parse_proc_decl(Parser *p, Token *name_tok) {
             Param *param = memops_arena_push_struct(p->arena, Param);
             param->name = token_to_string8(p->arena, param_name);
             param->type = parse_type(p);
+            if (parser_peek(p)->kind == Token_LBracket) {
+                parser_error_token(p, parser_peek(p),
+                                   "a parameter takes no attribute; what a parameter wants is a "
+                                   "type qualifier, and those belong to the type");
+            }
             param->line = param_name->line;
             param->col = param_name->col;
             ptr_array_append(p->arena, &decl->params, param);
@@ -3195,14 +3815,9 @@ static ProcDecl *parse_proc_decl(Parser *p, Token *name_tok) {
     if (parser_peek(p)->kind == Token_Identifier &&
         (string8slice_equals_cstr(parser_peek(p)->text, "external") ||
          string8slice_equals_cstr(parser_peek(p)->text, "external_emit")) &&
-        parser_peek_n(p, 1)->kind == Token_Semicolon &&
-        parser_peek_n(p, 2)->kind == Token_RBrace) {
-        Token *external_tok = parser_next(p); // external/external_emit
-        parser_next(p); // ;
-        parser_next(p); // }
-        decl->is_external = true;
-        decl->emit_external_proto = string8slice_equals_cstr(external_tok->text, "external_emit");
-        parser_match(p, Token_Semicolon); // optional ';' after proc decl
+        parser_peek_n(p, 1)->kind == Token_Semicolon) {
+        parser_error_token(p, parser_peek(p),
+                               "'external;' in a body is no longer accepted; write the attribute instead, as in 'f: proc[external]()->i32 = {}'");
         return decl;
     }
     while (!parser_at_block_end(p)) {
@@ -3365,23 +3980,25 @@ static Program parse_program(Parser *p) {
         s->is_static = is_static;
         s->name = parsed_name;
         s->type = parse_type(p);
+        s->align = parse_trailing_decl_attributes(p, s->type);
         s->line = head_tok->line;
         s->col = head_tok->col;
         if (parser_match(p, Token_Equal)) {
             if (parser_peek(p)->kind == Token_Identifier &&
                 string8slice_equals_cstr(parser_peek(p)->text, "external") &&
                 parser_peek_n(p, 1)->kind == Token_Semicolon) {
-                parser_next(p);
-                s->is_external = true;
+                parser_error_token(p, parser_peek(p),
+                                   "'= external' is no longer accepted; a global with no "
+                                   "initializer is the one C owns, as in 'g: const T;'");
             } else if (parser_match(p, Token_Question)) {
                 s->is_uninitialized = true;
             } else {
                 s->expr = parse_expr(p);
             }
         } else {
-            parser_error_token(p, head_tok,
-                               "global declaration needs an initializer; use '= {}' to zero it "
-                               "or '= ?' to leave it uninitialized");
+            /* No initializer: this global is not ilang's to define. C owns it,
+               its header declares it, and nothing is emitted here. */
+            s->is_external = true;
         }
         parser_expect(p, Token_Semicolon, "expected ';' after global var");
         ptr_array_append(p->arena, &prog.globals, s);
@@ -3788,7 +4405,8 @@ static void semantic_add_import_symbols(Program *prog, Scope *base, Vec_string8 
         }
 
         Vec_Token tokens = {0};
-        lex_tokens(arena, input, &tokens);
+        Vec_string8 directives = {0};
+        lex_tokens(arena, input, &tokens, &directives);
 
         Parser parser = {0};
         parser.arena = arena;
@@ -3797,7 +4415,7 @@ static void semantic_add_import_symbols(Program *prog, Scope *base, Vec_string8 
         parser.index = 0;
 
         Program imported = parse_program(&parser);
-        imported.preprocessor_lines = collect_preprocessor_lines(arena, input);
+        imported.preprocessor_lines = directives;
         semantic_add_program_symbols(&imported, base, structs, arena);
     }
 }
@@ -3981,18 +4599,51 @@ static void semantic_error_control_flow(const char *keyword, const char *context
    generated C harder to read, which matters because it is meant to be read.
    See docs/compiler-hardening.md. */
 static bool ident_is_c_reserved(string8 name) {
-    static const char *reserved[] = {
-        "auto", "double", "extern", "float", "inline", "int", "long",
-        "register", "restrict", "short", "signed", "typedef", "unsigned",
-        "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic",
-        "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local",
+    /* Also ilang type spellings, so they cannot be mangled: the same token
+       would have to mean a type in one position and a renamed variable in
+       another. These stay rejected. */
+    static const char *ambiguous[] = {
+        "double", "float", "int", "long", "short", "signed", "unsigned",
     };
-    for (i32 i = 0; i < (i32)(sizeof(reserved) / sizeof(reserved[0])); i++) {
-        if (string8_equals_cstr(&name, reserved[i])) {
+    for (i32 i = 0; i < (i32)(sizeof(ambiguous) / sizeof(ambiguous[0])); i++) {
+        if (string8_equals_cstr(&name, ambiguous[i])) {
             return true;
         }
     }
     return false;
+}
+
+/* C keywords ilang has no other use for. A declaration may carry any of these
+   as a name; c_ident renames it on the way into the generated C. */
+static bool ident_needs_c_mangle(string8 name) {
+    static const char *mangled[] = {
+        "auto", "extern", "inline", "register", "restrict", "typedef",
+        "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic",
+        "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local",
+    };
+    for (i32 i = 0; i < (i32)(sizeof(mangled) / sizeof(mangled[0])); i++) {
+        if (string8_equals_cstr(&name, mangled[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The C spelling of an ilang identifier. Identity for everything except the
+   handful above, so the generated C stays readable -- which is the reason this
+   is a rename-on-collision rather than a blanket mangling of every name.
+
+   `_Static_assert` becomes `i_Static_assert`, not `i__Static_assert`: C
+   reserves every identifier containing a double underscore to the
+   implementation, so the prefix absorbs the leading one. */
+static void emit_c_ident(memops_arena *arena, string8 *out, string8 name);
+
+static string8 c_ident(memops_arena *arena, string8 name) {
+    if (!ident_needs_c_mangle(name)) return name;
+    string8 out = string8_reserve(arena, name.length + 2);
+    string8_append_cstr(arena, &out, name.data[0] == '_' ? "i" : "i_");
+    string8_append_bytes(arena, &out, name.data, name.length);
+    return out;
 }
 
 /* `sizeof` and `alignof` are builtins, not identifiers. Declaring a proc named
@@ -4004,7 +4655,27 @@ static bool ident_is_i_builtin(string8 name) {
            string8_equals_cstr(&name, "alignof");
 }
 
+/* The outputs of c_ident, spelled out rather than derived, so this needs no
+   arena to allocate a candidate for each comparison. Keep in step with the list
+   in ident_needs_c_mangle; decl_attributes-style tests cover the pairing. */
+static bool ident_is_c_mangle_target(string8 name) {
+    static const char *targets[] = {
+        "i_auto", "i_extern", "i_inline", "i_register", "i_restrict", "i_typedef",
+        "i_Alignas", "i_Alignof", "i_Atomic", "i_Bool", "i_Complex", "i_Generic",
+        "i_Imaginary", "i_Noreturn", "i_Static_assert", "i_Thread_local",
+    };
+    for (i32 i = 0; i < (i32)(sizeof(targets) / sizeof(targets[0])); i++) {
+        if (string8_equals_cstr(&name, targets[i])) return true;
+    }
+    return false;
+}
+
 static void semantic_check_ident_available(string8 name, i32 line, i32 col) {
+    if (ident_is_c_mangle_target(name)) {
+        semantic_error_name(
+            "identifier is reserved: it is the C spelling ilang gives a C keyword used as a name",
+            name, line, col);
+    }
     if (ident_is_i_builtin(name)) {
         semantic_error_name(
             "identifier is a builtin operator and cannot be used as a name",
@@ -4127,6 +4798,12 @@ static void semantic_check_stmt(Program *prog, Stmt *stmt, Scope *scope, Vec_str
         }
         return;
     }
+    if (stmt->kind == Stmt_Directive) {
+        /* Nothing to check: the text is handed to the C preprocessor verbatim.
+           ilang deliberately does not evaluate the condition, so both arms of an
+           inline '#ifdef' are parsed and checked, and neither is folded away. */
+        return;
+    }
     if (stmt->kind == Stmt_Goto) {
         return; // resolved against the proc-wide label set in semantic_check_proc
     }
@@ -4221,14 +4898,14 @@ static void semantic_check_proc(Program *prog, ProcDecl *proc, Scope *base_scope
     scope.locals = Vec_string8_reserve(arena, 32);
     scope.local_sites = ptr_array_reserve(arena, 32);
 
-    if (!proc->is_external) {
-        semantic_check_type(prog, proc->ret_type, known_types, &proc->type_params, proc->source_path);
-    }
+    /* External procs are checked too. Skipping them meant a C function could be
+       declared in terms of types that exist nowhere in ilang -- the signature
+       looked precise and enforced nothing, which is the same shape as the
+       undeclared-call hole: it reads like a declaration and is not one. */
+    semantic_check_type(prog, proc->ret_type, known_types, &proc->type_params, proc->source_path);
     for (i32 i = 0; i < proc->params.length; i++) {
         Param *param = (Param *)proc->params.data[i];
-        if (!proc->is_external) {
-            semantic_check_type(prog, param->type, known_types, &proc->type_params, proc->source_path);
-        }
+        semantic_check_type(prog, param->type, known_types, &proc->type_params, proc->source_path);
         semantic_check_ident_available(param->name, param->line, param->col);
         if (scope_has(&scope.locals, param->name)) {
             // locate previous parameter declaration
@@ -4333,8 +5010,15 @@ static bool semantic_builtin_type_name(string8 name) {
         return true;
     }
 
-    return string8_equals_cstr(&name, "bool") ||
-           string8_equals_cstr(&name, "char") ||
+    return string8_equals_cstr(&name, "c8") ||
+           string8_equals_cstr(&name, "b8") ||
+           string8_equals_cstr(&name, "b16") ||
+           string8_equals_cstr(&name, "b64") ||
+           string8_equals_cstr(&name, "intptr") ||
+           string8_equals_cstr(&name, "uintptr") ||
+           string8_equals_cstr(&name, "ptrdiff") ||
+           string8_equals_cstr(&name, "intmax") ||
+           string8_equals_cstr(&name, "uintmax") ||
            string8_equals_cstr(&name, "f32") ||
            string8_equals_cstr(&name, "f64") ||
            string8_equals_cstr(&name, "i8") ||
@@ -4409,8 +5093,15 @@ static bool semantic_builtin_type_name(string8 name) {
 }
 
 static bool semantic_intrinsic_type_name(string8 name) {
-    return string8_equals_cstr(&name, "bool") ||
-           string8_equals_cstr(&name, "char") ||
+    return string8_equals_cstr(&name, "c8") ||
+           string8_equals_cstr(&name, "b8") ||
+           string8_equals_cstr(&name, "b16") ||
+           string8_equals_cstr(&name, "b64") ||
+           string8_equals_cstr(&name, "intptr") ||
+           string8_equals_cstr(&name, "uintptr") ||
+           string8_equals_cstr(&name, "ptrdiff") ||
+           string8_equals_cstr(&name, "intmax") ||
+           string8_equals_cstr(&name, "uintmax") ||
            string8_equals_cstr(&name, "f32") ||
            string8_equals_cstr(&name, "f64") ||
            string8_equals_cstr(&name, "i8") ||
@@ -4531,6 +5222,300 @@ static SemanticTypeInfo semantic_find_type_info(Program *prog, string8 name) {
         }
     }
     return (SemanticTypeInfo){0};
+}
+
+
+/* A type that contains itself by value has no size, so C rejects the generated
+   record with `field has incomplete type`. ilang knows the field types well
+   enough to say so first, on the real declaration.
+
+   The walk follows anything that needs the type to be *complete* and stops at
+   anything that does not:
+
+     P: struct = { inner: P; }              direct
+     P: struct = { xs: [4]P; }              an array needs a complete element
+     A: struct = { b: B; } B { a: A; }      mutual, hence the visited set
+     P: struct = { v: PA; } PA: alias = P;  aliases are transparent
+     P: struct = { union = { inner: P; } }  anonymous members are members
+     Box: struct<T> = { v: Box<T>; }        matched by base name, see below
+
+   and leaves alone:
+
+     P: struct = { next: *P; }              a pointer needs only the name
+
+   Generics are matched on the declaration's base name rather than on an
+   instantiation. `Box<T>` holding a `Box<...>` by value is infinite whatever
+   the argument, while `Pair<Pair<i32, i32>, i32>` nests legitimately and is
+   never a self-reference in the declaration. */
+
+typedef struct TypeCycleWalk {
+    Program *prog;
+    Vec_string8 visiting;   // the chain, for the diagnostic
+    string8 root;
+    const char *root_path;  // used when the cycle is reported on the declaration itself
+    i32 root_line;
+    i32 root_col;
+} TypeCycleWalk;
+
+static void type_cycle_check_type(TypeCycleWalk *w, TypeExpr *type, StructDecl *owner, Field *field, memops_arena *arena);
+
+static void type_cycle_error(TypeCycleWalk *w, string8 name, StructDecl *owner, Field *field, memops_arena *arena) {
+    string8 chain = string8_reserve(arena, 64);
+    for (i32 i = 0; i < w->visiting.length; i++) {
+        string8_append_bytes(arena, &chain, w->visiting.data[i].data, w->visiting.data[i].length);
+        string8_append_cstr(arena, &chain, " -> ");
+    }
+    string8_append_bytes(arena, &chain, name.data, name.length);
+
+    i32 line = field ? field->line : (owner ? owner->line : w->root_line);
+    i32 col = field ? field->col : (owner ? owner->col : w->root_col);
+    const char *path = owner ? owner->source_path : w->root_path;
+    semantic_error_name_path(
+        "type contains itself by value, so it has no size; use a pointer to break the cycle",
+        chain, path, line, col);
+}
+
+/* Walks the members of one record, including anonymous ones, which live in the
+   owner's name space and so are part of the owner's layout. */
+static void type_cycle_check_struct(TypeCycleWalk *w, StructDecl *decl, memops_arena *arena) {
+    if (!decl) return;
+    for (i32 i = 0; i < decl->fields.length; i++) {
+        Field *f = (Field *)decl->fields.data[i];
+        if (f->anon) {
+            type_cycle_check_struct(w, f->anon, arena);
+            continue;
+        }
+        type_cycle_check_type(w, f->type, decl, f, arena);
+    }
+}
+
+static void type_cycle_check_named(TypeCycleWalk *w, string8 name, StructDecl *owner, Field *field, memops_arena *arena) {
+    if (string8_equals(&name, &w->root)) {
+        type_cycle_error(w, name, owner, field, arena);
+        return;
+    }
+    for (i32 i = 0; i < w->visiting.length; i++) {
+        if (string8_equals(&w->visiting.data[i], &name)) return; // already on the chain, reported at its own root
+    }
+    if (w->visiting.length > 64) return; // pathological nesting; the depth alone is the bug
+
+    Vec_string8_append(arena, &w->visiting, name);
+
+    for (i32 i = 0; i < w->prog->aliases.length; i++) {
+        AliasDecl *a = (AliasDecl *)w->prog->aliases.data[i];
+        if (string8_equals(&a->name, &name)) {
+            type_cycle_check_type(w, a->type, owner, field, arena);
+            w->visiting.length--;
+            return;
+        }
+    }
+    for (i32 i = 0; i < w->prog->structs.length; i++) {
+        StructDecl *d = (StructDecl *)w->prog->structs.data[i];
+        if (string8_equals(&d->name, &name)) {
+            type_cycle_check_struct(w, d, arena);
+            break;
+        }
+    }
+    w->visiting.length--;
+}
+
+static void type_cycle_check_type(TypeCycleWalk *w, TypeExpr *type, StructDecl *owner, Field *field, memops_arena *arena) {
+    if (!type) return;
+    switch (type->kind) {
+        case Type_Ptr:
+            return;  // a pointer needs the name, not the layout
+        case Type_Proc:
+            return;  // a proc type is a pointer's worth of nothing here
+        case Type_Array:
+            type_cycle_check_type(w, type->elem, owner, field, arena);
+            return;
+        case Type_Name:
+        case Type_Generic:
+            /* The base name only. Walking the type *arguments* would be
+               unsound without substituting them into the generic's fields:
+               `P: struct = { items: Vec<P>; }` is legal whenever Vec holds its
+               elements behind a pointer, and flagging it would be a false
+               positive on correct code. Missing the case where a generic does
+               hold its argument by value is a false negative, which is where
+               this already was. */
+            type_cycle_check_named(w, type->name, owner, field, arena);
+            return;
+    }
+}
+
+/* Entry point: every record and every alias is its own root, so a cycle is
+   reported once per declaration that takes part in it rather than once. */
+static void semantic_check_type_cycles(Program *prog, memops_arena *arena) {
+    for (i32 i = 0; i < prog->structs.length; i++) {
+        StructDecl *decl = (StructDecl *)prog->structs.data[i];
+        TypeCycleWalk w = {0};
+        w.prog = prog;
+        w.root = decl->name;
+        w.visiting = Vec_string8_reserve(arena, 8);
+        type_cycle_check_struct(&w, decl, arena);
+    }
+    for (i32 i = 0; i < prog->aliases.length; i++) {
+        AliasDecl *decl = (AliasDecl *)prog->aliases.data[i];
+        TypeCycleWalk w = {0};
+        w.prog = prog;
+        w.root = decl->name;
+        w.root_path = decl->source_path;
+        w.root_line = decl->line;
+        w.root_col = decl->col;
+        w.visiting = Vec_string8_reserve(arena, 8);
+        type_cycle_check_type(&w, decl->type, null, null, arena);
+    }
+}
+
+
+/* An enum member that does not fit its underlying type is silently wrong: it is
+   accepted by ilang, accepted by clang at every default warning level, and then
+   reads as one number through i32 and another through u32. Stating the
+   underlying type (2.6) is what finally gave this something to check against.
+
+   Deliberately partial. Values that are plain integer literals or implicit and
+   sequential are checked -- 435 of the 442 members across njinn, std and the
+   tests. The remaining 7 are constant expressions (`1 shl 2`, `~0`, references
+   to earlier members), and evaluating those needs a constant evaluator ilang
+   does not have. Once a member's value is unknown, every later implicit value
+   is unknown too, so the walk stops rather than guessing.
+
+   The generated C carries a pragma that asks clang for the same check, which
+   does cover the expression cases; see emit_enum_range_pragma. This half exists
+   so the common case is caught by ilang, on the ilang line, without waiting for
+   a C compile. */
+typedef struct EnumRange {
+    i64 min;
+    u64 max;
+    bool is_signed;
+} EnumRange;
+
+static bool enum_underlying_range(string8 underlying, EnumRange *out) {
+    struct { const char *name; i64 min; u64 max; bool is_signed; } table[] = {
+        {"i8",    -128LL,                  127ULL,                  true},
+        {"i16",   -32768LL,                32767ULL,                true},
+        {"i32",   -2147483648LL,           2147483647ULL,           true},
+        {"i64",   (-9223372036854775807LL - 1), 9223372036854775807ULL, true},
+        {"u8",    0,                       255ULL,                  false},
+        {"u16",   0,                       65535ULL,                false},
+        {"u32",   0,                       4294967295ULL,           false},
+        {"u64",   0,                       18446744073709551615ULL, false},
+    };
+    /* An unattributed enum is i32; see shape.md 2.6. */
+    const char *name = (underlying.data && underlying.length > 0) ? null : "i32";
+    for (i32 i = 0; i < (i32)(sizeof(table) / sizeof(table[0])); i++) {
+        bool hit = name ? (strcmp(name, table[i].name) == 0)
+                        : string8_equals_cstr(&underlying, table[i].name);
+        if (hit) {
+            out->min = table[i].min;
+            out->max = table[i].max;
+            out->is_signed = table[i].is_signed;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Parses a bare decimal or hex enum value. Returns false for anything else --
+   a sibling reference, a qualified name, or a token this does not understand. */
+static bool enum_literal_value(string8 text, i64 *out) {
+    if (!text.data || text.length == 0) return false;
+    u64 i = 0;
+    bool negative = false;
+    if (text.data[0] == '-') {
+        negative = true;
+        i = 1;
+    } else if (text.data[0] == '+') {
+        i = 1;
+    }
+    if (i >= text.length) return false;
+
+    u64 value = 0;
+    if ((text.length - i) > 2 && text.data[i] == '0' &&
+        (text.data[i + 1] == 'x' || text.data[i + 1] == 'X')) {
+        for (u64 j = i + 2; j < text.length; j++) {
+            u8 c = text.data[j];
+            u64 digit;
+            if (c >= '0' && c <= '9') digit = (u64)(c - '0');
+            else if (c >= 'a' && c <= 'f') digit = (u64)(c - 'a') + 10;
+            else if (c >= 'A' && c <= 'F') digit = (u64)(c - 'A') + 10;
+            else return false;
+            if (value > (0xFFFFFFFFFFFFFFFFULL - digit) / 16) return false; // overflows u64 itself
+            value = value * 16 + digit;
+        }
+    } else {
+        for (u64 j = i; j < text.length; j++) {
+            u8 c = text.data[j];
+            if (c < '0' || c > '9') return false;
+            u64 digit = (u64)(c - '0');
+            if (value > (0xFFFFFFFFFFFFFFFFULL - digit) / 10) return false;
+            value = value * 10 + digit;
+        }
+    }
+    /* Values above i64's range are out of every underlying type's range except
+       u64's, and are reported by the caller through the unsigned bound. */
+    if (value > 9223372036854775807ULL) return false;
+    *out = negative ? -(i64)value : (i64)value;
+    return true;
+}
+
+static void semantic_check_enum_ranges(Program *prog) {
+    for (i32 i = 0; i < prog->enums.length; i++) {
+        EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
+        if (decl->is_external) continue; // C owns the definition and its values
+
+        EnumRange range = {0};
+        if (!enum_underlying_range(decl->underlying, &range)) continue;
+
+        i64 next = 0;
+        bool next_known = true;
+        for (i32 j = 0; j < decl->items.length; j++) {
+            EnumItem *item = (EnumItem *)decl->items.data[j];
+            i64 value = 0;
+            if (item->value_expr) {
+                /* A leading '-' lexes as its own token, so every negative value
+                   arrives as a unary minus over a number rather than as a bare
+                   literal. Those are worth reading -- negative members are
+                   supported and reflection round-trips them. Anything else is
+                   a constant expression this cannot evaluate. */
+                Expr *e = item->value_expr;
+                i64 magnitude = 0;
+                if (e->kind == Expr_Unary && e->op == Token_Minus && e->inner &&
+                    e->inner->kind == Expr_Number &&
+                    enum_literal_value(e->inner->number, &magnitude)) {
+                    value = -magnitude;
+                    next_known = true;
+                } else {
+                    next_known = false;   // and so is every implicit value after it
+                    continue;
+                }
+            } else if (item->value.data && item->value.length > 0) {
+                if (!enum_literal_value(item->value, &value)) {
+                    next_known = false;
+                    continue;
+                }
+                next_known = true;
+            } else {
+                if (!next_known) continue;
+                value = next;
+            }
+            next = value + 1;
+
+            bool below = value < range.min;
+            bool above = range.is_signed ? (value > (i64)range.max)
+                                         : (value < 0 || (u64)value > range.max);
+            if (below || above) {
+                bool stated = decl->underlying.data && decl->underlying.length > 0;
+                char detail[256];
+                snprintf(detail, sizeof(detail),
+                         "enum member does not fit its underlying type '%.*s'",
+                         stated ? (int)decl->underlying.length : 3,
+                         stated ? (const char *)decl->underlying.data : "i32");
+                semantic_error_name_path(detail, item->name, decl->source_path,
+                                         item->line, item->col);
+            }
+        }
+    }
 }
 
 static void semantic_note_type_decl(SemanticTypeInfo info) {
@@ -4982,6 +5967,7 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
 
     for (i32 i = 0; i < prog->aliases.length; i++) {
         AliasDecl *decl = (AliasDecl *)prog->aliases.data[i];
+        semantic_check_ident_available(decl->name, decl->line, decl->col);
         SemanticDeclSite *prev = semantic_decl_site_find(&type_sites, decl->name);
         if (prev) {
             semantic_error_name_dup_path("duplicate type alias", decl->name, decl->source_path, decl->import_chain, decl->line, decl->col, prev->path, prev->import_chain, prev->line, prev->col);
@@ -5009,6 +5995,7 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
         semantic_collect_named_fields(arena, decl, &named_fields);
         for (i32 j = 0; j < named_fields.length; j++) {
             Field *field = (Field *)named_fields.data[j];
+            semantic_check_ident_available(field->name, field->line, field->col);
             for (i32 k = 0; k < j; k++) {
                 Field *prev = (Field *)named_fields.data[k];
                 if (!string8_equals(&prev->name, &field->name)) continue;
@@ -5048,6 +6035,7 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
 
     for (i32 i = 0; i < prog->enums.length; i++) {
         EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
+        semantic_check_ident_available(decl->name, decl->line, decl->col);
         SemanticDeclSite *prev = semantic_decl_site_find(&type_sites, decl->name);
         if (prev) {
             semantic_error_name_dup_path("duplicate enum declaration", decl->name, decl->source_path, decl->import_chain, decl->line, decl->col, prev->path, prev->import_chain, prev->line, prev->col);
@@ -5096,7 +6084,12 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
         }
     }
 
-    semantic_collect_program_external_type_names(prog, &structs, arena);
+    /* External signatures no longer register their own type names. Walking them
+       and adding whatever they mentioned to known_types meant an external
+       declaration *declared its types by using them*: a signature could name a
+       type that exists nowhere and still check, which is the undeclared-call
+       hole wearing a different hat. Foreign types are declared like any other
+       now -- `X: struct[external] = {}` for an opaque one. */
     semantic_resolve_proc_angle_types(prog, &structs, arena);
 
     for (i32 i = 0; i < prog->procs.length; i++) {
@@ -5118,6 +6111,7 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
 
     for (i32 i = 0; i < prog->globals.length; i++) {
         Stmt *decl = (Stmt *)prog->globals.data[i];
+        semantic_check_ident_available(decl->name, decl->line, decl->col);
         SemanticDeclSite *prev = semantic_decl_site_find(&global_sites, decl->name);
         if (prev) {
             semantic_error_name_dup_path("duplicate global declaration", decl->name, decl->source_path, decl->import_chain, decl->line, decl->col, prev->path, prev->import_chain, prev->line, prev->col);
@@ -5126,7 +6120,18 @@ static void semantic_check_program(Program *prog, memops_arena *arena) {
         semantic_decl_site_add(arena, &global_sites, decl->name, decl->source_path, decl->import_chain, decl->line, decl->col);
     }
 
-    semantic_collect_program_external_type_names(prog, &structs, arena);
+    /* Now that every struct and alias is registered, a record that contains
+       itself by value can be reported here rather than by clang, which sees it
+       as `field has incomplete type` in code the author never wrote. */
+    semantic_check_type_cycles(prog, arena);
+    semantic_check_enum_ranges(prog);
+
+    /* External signatures no longer register their own type names. Walking them
+       and adding whatever they mentioned to known_types meant an external
+       declaration *declared its types by using them*: a signature could name a
+       type that exists nowhere and still check, which is the undeclared-call
+       hole wearing a different hat. Foreign types are declared like any other
+       now -- `X: struct[external] = {}` for an opaque one. */
 
     for (i32 i = 0; i < prog->aliases.length; i++) {
         AliasDecl *decl = (AliasDecl *)prog->aliases.data[i];
@@ -5477,7 +6482,7 @@ static void emit_type(memops_arena *arena, string8 *out, TypeExpr *type, TypeSub
             return;
         }
         emit_type_qualifiers(arena, out, type);
-        emit_string8(arena, out, reflect_runtime_c_name(arena, type->name));
+        emit_string8(arena, out, c_ident(arena, reflect_runtime_c_name(arena, type->name)));
         return;
     }
     if (type->kind == Type_Ptr) {
@@ -5596,7 +6601,7 @@ static void format_type_i(memops_arena *arena, string8 *out, TypeExpr *type, Typ
             format_type_i(arena, out, substituted, (TypeSub){0});
             return;
         }
-        emit_string8(arena, out, type->name);
+        emit_c_ident(arena, out, type->name);
         return;
     }
     if (type->kind == Type_Ptr) {
@@ -5605,7 +6610,7 @@ static void format_type_i(memops_arena *arena, string8 *out, TypeExpr *type, Typ
         return;
     }
     if (type->kind == Type_Generic) {
-        emit_string8(arena, out, type->name);
+        emit_c_ident(arena, out, type->name);
         emit_cstr(arena, out, "<");
         for (i32 i = 0; i < type->args.length; i++) {
             if (i > 0) emit_cstr(arena, out, ", ");
@@ -7500,25 +8505,25 @@ static TypeExpr *reflect_builtin_field_type(TypeExpr *base_type, string8 field_n
     string8 base_name = base_type->name;
 
     if (string8_equals_cstr(&base_name, "reflect_field")) {
-        if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "char");
-        if (string8_equals_cstr(&field_name, "type")) return type_ptr_to_const_name(arena, "char");
-        if (string8_equals_cstr(&field_name, "attrs")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "c8");
+        if (string8_equals_cstr(&field_name, "type")) return type_ptr_to_const_name(arena, "c8");
+        if (string8_equals_cstr(&field_name, "attrs")) return type_ptr_to_const_name(arena, "c8");
         if (string8_equals_cstr(&field_name, "offset")) return type_name_expr(arena, "u64");
         if (string8_equals_cstr(&field_name, "size")) return type_name_expr(arena, "u64");
         if (string8_equals_cstr(&field_name, "align")) return type_name_expr(arena, "u64");
         if (string8_equals_cstr(&field_name, "kind")) return type_name_expr(arena, "i32");
         if (string8_equals_cstr(&field_name, "array_count")) return type_name_expr(arena, "u64");
         if (string8_equals_cstr(&field_name, "pointer_depth")) return type_name_expr(arena, "u64");
-        if (string8_equals_cstr(&field_name, "base_type")) return type_ptr_to_const_name(arena, "char");
-        if (string8_equals_cstr(&field_name, "elem_type")) return type_ptr_to_const_name(arena, "char");
-        if (string8_equals_cstr(&field_name, "generic_arg_type")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "base_type")) return type_ptr_to_const_name(arena, "c8");
+        if (string8_equals_cstr(&field_name, "elem_type")) return type_ptr_to_const_name(arena, "c8");
+        if (string8_equals_cstr(&field_name, "generic_arg_type")) return type_ptr_to_const_name(arena, "c8");
         if (string8_equals_cstr(&field_name, "is_const")) return type_name_expr(arena, "u64");
         if (string8_equals_cstr(&field_name, "info")) return type_ptr_to(arena, type_name_expr_const(arena, "reflect"));
         return null;
     }
 
     if (string8_equals_cstr(&base_name, "reflect_value")) {
-        if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "c8");
         if (string8_equals_cstr(&field_name, "value")) return type_name_expr(arena, "i32");
         return null;
     }
@@ -7533,7 +8538,7 @@ static TypeExpr *reflect_builtin_field_type(TypeExpr *base_type, string8 field_n
     }
 
     if (string8_equals_cstr(&base_name, "reflect")) {
-        if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "char");
+        if (string8_equals_cstr(&field_name, "name")) return type_ptr_to_const_name(arena, "c8");
         if (string8_equals_cstr(&field_name, "size")) return type_name_expr(arena, "u64");
         if (string8_equals_cstr(&field_name, "align")) return type_name_expr(arena, "u64");
         if (string8_equals_cstr(&field_name, "kind")) return type_name_expr(arena, "i32");
@@ -7901,7 +8906,7 @@ static string8 enum_item_c_name(memops_arena *arena, EnumDecl *decl, EnumItem *i
        their real C names. Prefixing them would invent a symbol that header never
        declared. Only enums I emits itself get the generated prefix. */
     if (decl->is_external) return item->name;
-    return concat_name2(arena, decl->name, "_", item->name);
+    return concat_name2(arena, c_ident(arena, decl->name), "_", c_ident(arena, item->name));
 }
 
 /* Rewrites `[Enum.Member]` array counts to the member's C name, now that every
@@ -8088,13 +9093,13 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, Program *prog, memop
         return type_name_expr(arena, "i32");
     }
     if (e->kind == Expr_String) {
-        TypeExpr *char_t = type_name_expr(arena, "char");
+        TypeExpr *char_t = type_name_expr(arena, "c8");
         TypeExpr *ptr_t = type_new(arena, Type_Ptr);
         ptr_t->elem = char_t;
         return ptr_t;
     }
     if (e->kind == Expr_Char) {
-        return type_name_expr(arena, "char");
+        return type_name_expr(arena, "c8");
     }
     if (e->kind == Expr_SizeofType || e->kind == Expr_AlignofType) {
         return type_name_expr(arena, "usize");
@@ -8244,6 +9249,15 @@ static bool type_is_integer_name(string8 name) {
            string8_equals_cstr(&name, "i16") ||
            string8_equals_cstr(&name, "i32") ||
            string8_equals_cstr(&name, "i64") ||
+           string8_equals_cstr(&name, "c8") ||
+           string8_equals_cstr(&name, "b8") ||
+           string8_equals_cstr(&name, "b16") ||
+           string8_equals_cstr(&name, "b64") ||
+           string8_equals_cstr(&name, "intptr") ||
+           string8_equals_cstr(&name, "uintptr") ||
+           string8_equals_cstr(&name, "ptrdiff") ||
+           string8_equals_cstr(&name, "intmax") ||
+           string8_equals_cstr(&name, "uintmax") ||
            string8_equals_cstr(&name, "b32");
 }
 
@@ -8272,9 +9286,11 @@ static bool type_is_float(TypeExpr *type) {
 }
 
 static bool type_is_boolish(TypeExpr *type) {
-    return type &&
-           type->kind == Type_Name &&
-           (string8_equals_cstr(&type->name, "bool") || string8_equals_cstr(&type->name, "b32"));
+    if (!type || type->kind != Type_Name) return false;
+    return string8_equals_cstr(&type->name, "b32") ||  // the default
+           string8_equals_cstr(&type->name, "b8") ||
+           string8_equals_cstr(&type->name, "b16") ||
+           string8_equals_cstr(&type->name, "b64");
 }
 
 static bool type_is_void_type(Program *prog, TypeExpr *type) {
@@ -10050,8 +11066,15 @@ static bool type_never_has_fields(TypeExpr *type) {
            string8_equals_cstr(&n, "f64") ||
            string8_equals_cstr(&n, "usize") ||
            string8_equals_cstr(&n, "b32") ||
-           string8_equals_cstr(&n, "bool") ||
-           string8_equals_cstr(&n, "char") ||
+           string8_equals_cstr(&n, "c8") ||
+           string8_equals_cstr(&n, "b8") ||
+           string8_equals_cstr(&n, "b16") ||
+           string8_equals_cstr(&n, "b64") ||
+           string8_equals_cstr(&n, "intptr") ||
+           string8_equals_cstr(&n, "uintptr") ||
+           string8_equals_cstr(&n, "ptrdiff") ||
+           string8_equals_cstr(&n, "intmax") ||
+           string8_equals_cstr(&n, "uintmax") ||
            string8_equals_cstr(&n, "void");
 }
 
@@ -11353,7 +12376,7 @@ static const char *printfmt_spec_for_type(Program *prog, TypeExpr *type) {
     type = resolve_alias_type(prog, type);
     if (type->kind == Type_Ptr) {
         TypeExpr *elem = type->elem ? resolve_alias_type(prog, type->elem) : null;
-        if (elem && elem->kind == Type_Name && string8_equals_cstr(&elem->name, "char")) {
+        if (elem && elem->kind == Type_Name && string8_equals_cstr(&elem->name, "c8")) {
             return "%s";
         }
         return null;
@@ -11371,7 +12394,16 @@ static const char *printfmt_spec_for_type(Program *prog, TypeExpr *type) {
     if (string8_equals_cstr(&n, "usize")) return "%zu";
     if (string8_equals_cstr(&n, "f32")) return "%f";
     if (string8_equals_cstr(&n, "f64")) return "%f";
-    if (string8_equals_cstr(&n, "char")) return "%c";
+    if (string8_equals_cstr(&n, "c8")) return "%c";
+    if (string8_equals_cstr(&n, "b8")) return "%d";
+    if (string8_equals_cstr(&n, "b16")) return "%d";
+    if (string8_equals_cstr(&n, "b32")) return "%d";
+    if (string8_equals_cstr(&n, "b64")) return "%lld";
+    if (string8_equals_cstr(&n, "intptr")) return "%lld";
+    if (string8_equals_cstr(&n, "uintptr")) return "%llu";
+    if (string8_equals_cstr(&n, "ptrdiff")) return "%lld";
+    if (string8_equals_cstr(&n, "intmax")) return "%lld";
+    if (string8_equals_cstr(&n, "uintmax")) return "%llu";
     return null;
 }
 
@@ -11678,6 +12710,7 @@ static void rewrite_printfmt_formats(Program *prog, memops_arena *arena) {
     }
 }
 
+static void emit_pre_directives(memops_arena *arena, string8 *out, Vec_string8 *lines);
 static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, string8 generic_name);
 static void emit_expr_value(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, string8 generic_name);
 static void emit_expr_condition(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, string8 generic_name);
@@ -11725,7 +12758,7 @@ static void emit_decl_array_suffix(memops_arena *arena, string8 *out, TypeExpr *
 static void emit_decl(memops_arena *arena, string8 *out, TypeExpr *type, string8 name, TypeSub sub) {
     /* The reflect runtime's I-side constants are declared here as well as read,
        so the declaration has to agree with the reads. */
-    name = reflect_runtime_c_name(arena, name);
+    name = c_ident(arena, reflect_runtime_c_name(arena, name));
     TypeExpr *proc_type = null;
     if (type && type->kind == Type_Proc) {
         proc_type = type;
@@ -11737,7 +12770,7 @@ static void emit_decl(memops_arena *arena, string8 *out, TypeExpr *type, string8
         else emit_cstr(arena, out, "void");
         emit_cstr(arena, out, " (");
         if (proc_type->name.data) {
-            emit_string8(arena, out, proc_type->name);
+            emit_c_ident(arena, out, proc_type->name);
             emit_cstr(arena, out, " ");
         }
         emit_cstr(arena, out, "*");
@@ -11905,14 +12938,21 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
         return;
     }
     if (e->kind == Expr_InitList) {
+        bool guarded = false;
+        for (i32 i = 0; i < e->arg_directives.length; i++) {
+            if (e->arg_directives.data[i]) guarded = true;
+        }
         emit_cstr(arena, out, "{");
         for (i32 i = 0; i < e->args.length; i++) {
-            if (i > 0) emit_cstr(arena, out, ", ");
+            if (i < e->arg_directives.length) {
+                emit_pre_directives(arena, out, (Vec_string8 *)e->arg_directives.data[i]);
+            }
+            if (!guarded && i > 0) emit_cstr(arena, out, ", ");
             Expr *designator = (Expr *)e->designators.data[i];
             if (designator) {
                 if (e->designator_kinds.data[i] == InitDesignator_Field) {
                     emit_cstr(arena, out, ".");
-                    emit_string8(arena, out, designator->name);
+                    emit_c_ident(arena, out, designator->name);
                     emit_cstr(arena, out, " = ");
                 } else {
                     emit_cstr(arena, out, "[");
@@ -11921,6 +12961,10 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
                 }
             }
             emit_expr(arena, out, (Expr *)e->args.data[i], sub, generic_name);
+            if (guarded) emit_cstr(arena, out, ", ");
+        }
+        if (e->args.length < e->arg_directives.length) {
+            emit_pre_directives(arena, out, (Vec_string8 *)e->arg_directives.data[e->args.length]);
         }
         emit_cstr(arena, out, "}");
         return;
@@ -11938,7 +12982,7 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
             emit_cstr(arena, out, "0");
             return;
         }
-        emit_string8(arena, out, reflect_runtime_c_name(arena, e->name));
+        emit_string8(arena, out, c_ident(arena, reflect_runtime_c_name(arena, e->name)));
         return;
     }
     if (e->kind == Expr_Cast) {
@@ -11972,7 +13016,7 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
     if (e->kind == Expr_Field) {
         emit_expr(arena, out, e->base, sub, generic_name);
         emit_cstr(arena, out, ".");
-        emit_string8(arena, out, e->name);
+        emit_c_ident(arena, out, e->name);
         return;
     }
     if (e->kind == Expr_Binary) {
@@ -12018,12 +13062,12 @@ static void emit_expr(memops_arena *arena, string8 *out, Expr *e, TypeSub sub, s
             string8 mangle = type_mangle(arena, arg, sub);
             emit_mono_proc_name(arena, out, e->name, mangle);
         } else if (generic_name.data && string8_equals_name(e->name, generic_name) && sub.has) {
-            emit_string8(arena, out, e->name);
+            emit_c_ident(arena, out, e->name);
             emit_cstr(arena, out, "_");
             string8 mangle = type_mangle(arena, type_sub_first_arg(sub), (TypeSub){0});
             emit_string8(arena, out, mangle);
         } else {
-            emit_string8(arena, out, reflect_runtime_c_name(arena, e->name));
+            emit_string8(arena, out, c_ident(arena, reflect_runtime_c_name(arena, e->name)));
         }
 
         emit_cstr(arena, out, "(");
@@ -12040,6 +13084,11 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
     if (!s) return;
     emit_line_directive_path(arena, out, s->source_path, s->line);
     if (s->kind == Stmt_Var) {
+        if (s->align.data && s->align.length > 0) {
+            emit_cstr(arena, out, "_Alignas(");
+            emit_string8(arena, out, s->align);
+            emit_cstr(arena, out, ") ");
+        }
         if (s->is_static) emit_cstr(arena, out, "static ");
         emit_decl(arena, out, s->type, s->name, sub);
         /* '= ?' lowers to a plain C declaration, so it costs exactly what the
@@ -12060,14 +13109,21 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
         emit_cstr(arena, out, ";\n");
         return;
     }
+    if (s->kind == Stmt_Directive) {
+        /* Verbatim, and on a line of its own -- the caller has already indented,
+           which C allows before '#', but the directive must still end the line. */
+        emit_c_ident(arena, out, s->name);
+        emit_cstr(arena, out, "\n");
+        return;
+    }
     if (s->kind == Stmt_Goto) {
         emit_cstr(arena, out, "goto ");
-        emit_string8(arena, out, s->name);
+        emit_c_ident(arena, out, s->name);
         emit_cstr(arena, out, ";\n");
         return;
     }
     if (s->kind == Stmt_Label) {
-        emit_string8(arena, out, s->name);
+        emit_c_ident(arena, out, s->name);
         emit_cstr(arena, out, ": {\n");
         for (i32 i = 0; i < s->while_body.length; i++) {
             emit_cstr(arena, out, "    ");
@@ -12078,7 +13134,7 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
     }
     if (s->kind == Stmt_Assign) {
         if (s->lhs) emit_expr(arena, out, s->lhs, sub, generic_name);
-        else emit_string8(arena, out, s->name);
+        else emit_c_ident(arena, out, s->name);
         emit_assign_op(arena, out, s->assign_op);
         emit_expr_value(arena, out, s->expr, sub, generic_name);
         emit_cstr(arena, out, ";\n");
@@ -12201,6 +13257,19 @@ static void emit_stmt(memops_arena *arena, string8 *out, Stmt *s, TypeSub sub, s
     }
 }
 
+static void emit_c_ident(memops_arena *arena, string8 *out, string8 name) {
+    emit_string8(arena, out, c_ident(arena, name));
+}
+
+static void emit_pre_directives(memops_arena *arena, string8 *out, Vec_string8 *lines) {
+    if (!lines) return;
+    for (i32 i = 0; i < lines->length; i++) {
+        emit_cstr(arena, out, "\n");
+        emit_string8(arena, out, lines->data[i]);
+        emit_cstr(arena, out, "\n");
+    }
+}
+
 static void emit_struct_fields(
     memops_arena *arena,
     string8 *out,
@@ -12210,8 +13279,14 @@ static void emit_struct_fields(
 ) {
     for (i32 i = 0; i < decl->fields.length; i++) {
         Field *f = (Field *)decl->fields.data[i];
+        emit_pre_directives(arena, out, &f->pre_directives);
         emit_line_directive_path(arena, out, decl->source_path, f->line);
         emit_cstr(arena, out, indent);
+        if (f->align.data && f->align.length > 0) {
+            emit_cstr(arena, out, "_Alignas(");
+            emit_string8(arena, out, f->align);
+            emit_cstr(arena, out, ") ");
+        }
         if (f->anon) {
             emit_cstr(arena, out, f->anon->is_union ? "union {\n" : "struct {\n");
             emit_struct_fields(arena, out, f->anon, sub, "        ");
@@ -12226,15 +13301,48 @@ static void emit_struct_fields(
         }
         emit_cstr(arena, out, ";\n");
     }
+    emit_pre_directives(arena, out, &decl->tail_directives);
 }
 
+/* `packed` becomes a pragma pair around the definition and `align(N)` an
+   attribute on the tag. Both spellings are accepted by clang and clang-cl,
+   which is the whole toolchain this backend targets. The layout checks in
+   emit_struct_layout_check compare the result against C either way, so a
+   declared layout that these do not actually produce still fails the build. */
 static void emit_struct_decl(memops_arena *arena, string8 *out, StructDecl *decl) {
     emit_line_directive_path(arena, out, decl->source_path, decl->line);
-    emit_cstr(arena, out, decl->is_union ? "uniondef(" : "structdef(");
-    emit_string8(arena, out, decl->name);
-    emit_cstr(arena, out, ") {\n");
+    if (decl->packed) {
+        emit_cstr(arena, out, "#pragma pack(push, 1)\n");
+    }
+    if (decl->align.data && decl->align.length > 0) {
+        /* The alignment attribute has to sit between `struct` and the tag, and
+           structdef() has already pasted those together by the time it is
+           expanded. So an aligned record spells out what that macro would have
+           produced, with the attribute in the one place C accepts it. */
+        emit_cstr(arena, out, "typedef ");
+        emit_cstr(arena, out, decl->is_union ? "union " : "struct ");
+        emit_c_ident(arena, out, decl->name);
+        emit_cstr(arena, out, " ");
+        emit_c_ident(arena, out, decl->name);
+        emit_cstr(arena, out, ";\n");
+        emit_cstr(arena, out, decl->is_union ? "union " : "struct ");
+        emit_cstr(arena, out, "__attribute__((aligned(");
+        emit_string8(arena, out, decl->align);
+        emit_cstr(arena, out, "))) ");
+        emit_c_ident(arena, out, decl->name);
+        emit_cstr(arena, out, " ");
+    } else {
+        emit_cstr(arena, out, decl->is_union ? "uniondef(" : "structdef(");
+        emit_c_ident(arena, out, decl->name);
+        emit_cstr(arena, out, ") ");
+    }
+    emit_cstr(arena, out, "{\n");
     emit_struct_fields(arena, out, decl, (TypeSub){0}, "    ");
-    emit_cstr(arena, out, "};\n\n");
+    emit_cstr(arena, out, "};\n");
+    if (decl->packed) {
+        emit_cstr(arena, out, "#pragma pack(pop)\n");
+    }
+    emit_cstr(arena, out, "\n");
 }
 
 static void emit_alias_decl(memops_arena *arena, string8 *out, AliasDecl *decl) {
@@ -12248,15 +13356,31 @@ static void emit_enum_decl(memops_arena *arena, string8 *out, EnumDecl *decl) {
     if (decl->is_external) return;
     emit_line_directive_path(arena, out, decl->source_path, decl->line);
     emit_cstr(arena, out, "typedef enum ");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
+    /* C leaves an enum's underlying type to the implementation, which is what
+       made shape.md 2.6 a question at all. Stating it pins the width and the
+       signedness, so a member that does not fit is a C error here instead of a
+       value that reads differently depending on how it is cast. */
+    emit_cstr(arena, out, " : ");
+    if (decl->underlying.data && decl->underlying.length > 0) {
+        emit_string8(arena, out, decl->underlying);
+    } else {
+        /* An unattributed enum is i32. Previously nothing was stated and C
+           picked, so the width was whatever the implementation felt like and
+           `enum[u32]` was the only way to know what it was. Stating the
+           default makes the attribute a change of mind rather than the only
+           source of truth. */
+        emit_cstr(arena, out, "i32");
+    }
     emit_cstr(arena, out, " {\n");
     for (i32 i = 0; i < decl->items.length; i++) {
         EnumItem *item = (EnumItem *)decl->items.data[i];
+        emit_pre_directives(arena, out, &item->pre_directives);
         emit_line_directive_path(arena, out, decl->source_path, item->line);
         emit_cstr(arena, out, "    ");
-        emit_string8(arena, out, decl->name);
+        emit_c_ident(arena, out, decl->name);
         emit_cstr(arena, out, "_");
-        emit_string8(arena, out, item->name);
+        emit_c_ident(arena, out, item->name);
         if (item->value_expr) {
             emit_cstr(arena, out, " = ");
             emit_expr(arena, out, item->value_expr, (TypeSub){0}, (string8){0});
@@ -12266,8 +13390,9 @@ static void emit_enum_decl(memops_arena *arena, string8 *out, EnumDecl *decl) {
         }
         emit_cstr(arena, out, ",\n");
     }
+    emit_pre_directives(arena, out, &decl->tail_directives);
     emit_cstr(arena, out, "} ");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, ";\n\n");
 }
 
@@ -12289,11 +13414,11 @@ static void emit_struct_monomorph_comment(memops_arena *arena, string8 *out, Str
     emit_generated_line_directive(arena, out);
     emit_cstr(arena, out, "/* I monomorph: ");
     emit_cstr(arena, out, decl->is_union ? "union " : "struct ");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "<");
     emit_struct_type_params(arena, out, decl);
     emit_cstr(arena, out, "> -> ");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "_");
     emit_string8(arena, out, type_mangled);
     emit_cstr(arena, out, "; declared at ");
@@ -12311,7 +13436,7 @@ static void emit_struct_decl_mono(memops_arena *arena, string8 *out, StructDecl 
     emit_struct_monomorph_comment(arena, out, decl, type_mangled);
     emit_line_directive_path(arena, out, decl->source_path, decl->line);
     emit_cstr(arena, out, decl->is_union ? "uniondef(" : "structdef(");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "_");
     emit_string8(arena, out, type_mangled);
     emit_cstr(arena, out, ") {\n");
@@ -12476,7 +13601,7 @@ static void emit_proc_decl(memops_arena *arena, string8 *out, ProcDecl *decl) {
         emit_string8(arena, out, decl->callconv);
         emit_cstr(arena, out, " ");
     }
-    emit_string8(arena, out, reflect_runtime_c_name(arena, decl->name));
+    emit_string8(arena, out, c_ident(arena, reflect_runtime_c_name(arena, decl->name)));
     emit_cstr(arena, out, "(");
     emit_proc_params(arena, out, decl, (TypeSub){0});
     emit_cstr(arena, out, ") {\n");
@@ -12497,7 +13622,7 @@ static void emit_proc_proto(memops_arena *arena, string8 *out, ProcDecl *decl) {
         emit_string8(arena, out, decl->callconv);
         emit_cstr(arena, out, " ");
     }
-    emit_string8(arena, out, reflect_runtime_c_name(arena, decl->name));
+    emit_string8(arena, out, c_ident(arena, reflect_runtime_c_name(arena, decl->name)));
     emit_cstr(arena, out, "(");
     emit_proc_params(arena, out, decl, (TypeSub){0});
     emit_cstr(arena, out, ");\n");
@@ -12725,7 +13850,7 @@ static void emit_proc_monomorph_comment(
         emit_cstr(arena, out, ">");
         emit_string8(arena, out, member);
     } else {
-        emit_string8(arena, out, decl->name);
+        emit_c_ident(arena, out, decl->name);
         emit_cstr(arena, out, "<");
         emit_proc_type_params(arena, out, decl);
         emit_cstr(arena, out, ">");
@@ -12798,15 +13923,6 @@ static void emit_reflect_info_link(memops_arena *arena, string8 *out, Program *p
     emit_cstr(arena, out, "0");
 }
 
-static i32 reflect_field_count(StructDecl *decl) {
-    i32 count = 0;
-    for (i32 i = 0; i < decl->fields.length; i++) {
-        Field *f = (Field *)decl->fields.data[i];
-        count += f->anon ? reflect_field_count(f->anon) : 1;
-    }
-    return count;
-}
-
 static void emit_struct_reflection_fields(
     memops_arena *arena,
     string8 *out,
@@ -12817,6 +13933,7 @@ static void emit_struct_reflection_fields(
 ) {
     for (i32 i = 0; i < decl->fields.length; i++) {
         Field *f = (Field *)decl->fields.data[i];
+        emit_pre_directives(arena, out, &f->pre_directives);
         if (f->anon) {
             emit_struct_reflection_fields(arena, out, prog, f->anon, concrete_name, sub);
             continue;
@@ -12836,15 +13953,15 @@ static void emit_struct_reflection_fields(
             emit_cstr(arena, out, ", (u64)offsetof(");
             emit_string8(arena, out, concrete_name);
             emit_cstr(arena, out, ", ");
-            emit_string8(arena, out, f->name);
+            emit_c_ident(arena, out, f->name);
             emit_cstr(arena, out, "), (u64)sizeof(((");
             emit_string8(arena, out, concrete_name);
             emit_cstr(arena, out, " *)0)->");
-            emit_string8(arena, out, f->name);
+            emit_c_ident(arena, out, f->name);
             emit_cstr(arena, out, "), (u64)__alignof__((( ");
             emit_string8(arena, out, concrete_name);
             emit_cstr(arena, out, " *)0)->");
-            emit_string8(arena, out, f->name);
+            emit_c_ident(arena, out, f->name);
             emit_cstr(arena, out, "), ");
         }
         emit_cstr(arena, out, reflect_type_kind_name(field_type));
@@ -12866,6 +13983,7 @@ static void emit_struct_reflection_fields(
         emit_reflect_info_link(arena, out, prog, field_type);
         emit_cstr(arena, out, "},\n");
     }
+    emit_pre_directives(arena, out, &decl->tail_directives);
 }
 
 /* A union reports as its own kind rather than as a struct with a flag, so a
@@ -12928,7 +14046,7 @@ static void emit_struct_layout_check(memops_arena *arena, string8 *out, Program 
 
     /* The reflect runtime's records are spelled `i_reflect_field` and friends in
        C while I keeps the short name, so the check has to name the C one. */
-    string8 c_name = reflect_runtime_c_name(arena, decl->name);
+    string8 c_name = c_ident(arena, reflect_runtime_c_name(arena, decl->name));
     string8 shadow = concat_name2(arena, string8_from_cstr(arena, "i_layout"), "_", decl->name);
 
     emit_cstr(arena, out, "typedef ");
@@ -12943,7 +14061,7 @@ static void emit_struct_layout_check(memops_arena *arena, string8 *out, Program 
     emit_cstr(arena, out, ") == sizeof(");
     emit_string8(arena, out, shadow);
     emit_cstr(arena, out, "), \"external layout mismatch: ");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, " size\");\n");
 
     emit_cstr(arena, out, "_Static_assert(_Alignof(");
@@ -12951,39 +14069,41 @@ static void emit_struct_layout_check(memops_arena *arena, string8 *out, Program 
     emit_cstr(arena, out, ") == _Alignof(");
     emit_string8(arena, out, shadow);
     emit_cstr(arena, out, "), \"external layout mismatch: ");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, " alignment\");\n");
 
     for (i32 i = 0; i < decl->fields.length; i++) {
         Field *f = (Field *)decl->fields.data[i];
+        emit_pre_directives(arena, out, &f->pre_directives);
         emit_cstr(arena, out, "_Static_assert(offsetof(");
         emit_string8(arena, out, c_name);
         emit_cstr(arena, out, ", ");
-        emit_string8(arena, out, f->name);
+        emit_c_ident(arena, out, f->name);
         emit_cstr(arena, out, ") == offsetof(");
         emit_string8(arena, out, shadow);
         emit_cstr(arena, out, ", ");
-        emit_string8(arena, out, f->name);
+        emit_c_ident(arena, out, f->name);
         emit_cstr(arena, out, "), \"external layout mismatch: ");
-        emit_string8(arena, out, decl->name);
+        emit_c_ident(arena, out, decl->name);
         emit_cstr(arena, out, ".");
-        emit_string8(arena, out, f->name);
+        emit_c_ident(arena, out, f->name);
         emit_cstr(arena, out, " offset\");\n");
 
         emit_cstr(arena, out, "_Static_assert(sizeof(((");
         emit_string8(arena, out, c_name);
         emit_cstr(arena, out, " *)0)->");
-        emit_string8(arena, out, f->name);
+        emit_c_ident(arena, out, f->name);
         emit_cstr(arena, out, ") == sizeof(((");
         emit_string8(arena, out, shadow);
         emit_cstr(arena, out, " *)0)->");
-        emit_string8(arena, out, f->name);
+        emit_c_ident(arena, out, f->name);
         emit_cstr(arena, out, "), \"external layout mismatch: ");
-        emit_string8(arena, out, decl->name);
+        emit_c_ident(arena, out, decl->name);
         emit_cstr(arena, out, ".");
-        emit_string8(arena, out, f->name);
+        emit_c_ident(arena, out, f->name);
         emit_cstr(arena, out, " type\");\n");
     }
+    emit_pre_directives(arena, out, &decl->tail_directives);
     emit_cstr(arena, out, "\n");
 }
 
@@ -13029,9 +14149,11 @@ static void emit_struct_reflection(
     emit_cstr(arena, out, "), ");
     emit_cstr(arena, out, decl->is_union ? "I_Reflect_Union" : "I_Reflect_Struct");
     emit_cstr(arena, out, ", ");
-    char count_buf[32];
-    snprintf(count_buf, sizeof(count_buf), "%llu", (unsigned long long)reflect_field_count(decl));
-    emit_cstr(arena, out, count_buf);
+    emit_cstr(arena, out, "(u64)(sizeof(i_reflect_fields_");
+    emit_string8(arena, out, concrete_name);
+    emit_cstr(arena, out, ") / sizeof(i_reflect_fields_");
+    emit_string8(arena, out, concrete_name);
+    emit_cstr(arena, out, "[0]))");
     emit_cstr(arena, out, ", {.fields = i_reflect_fields_");
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "}};\n\n");
@@ -13046,14 +14168,14 @@ static void emit_reflect_table_fwd_decls(memops_arena *arena, Program *prog, str
         EnumDecl *decl = (EnumDecl *)prog->enums.data[i];
         if (decl->is_external) continue;
         emit_cstr(arena, out, "extern const i_reflect ");
-        emit_string8(arena, out, decl->name);
+        emit_c_ident(arena, out, decl->name);
         emit_cstr(arena, out, "_reflect;\n");
     }
     for (i32 i = 0; i < prog->structs.length; i++) {
         StructDecl *decl = (StructDecl *)prog->structs.data[i];
         if (decl->is_generic || decl->is_external) continue;
         emit_cstr(arena, out, "extern const i_reflect ");
-        emit_string8(arena, out, decl->name);
+        emit_c_ident(arena, out, decl->name);
         emit_cstr(arena, out, "_reflect;\n");
     }
     for (i32 i = 0; i < prog->structs.length; i++) {
@@ -13063,7 +14185,7 @@ static void emit_reflect_table_fwd_decls(memops_arena *arena, Program *prog, str
         collect_generic_struct_instances(prog, decl, &instances, arena);
         for (i32 j = 0; j < instances.length; j++) {
             emit_cstr(arena, out, "extern const i_reflect ");
-            emit_string8(arena, out, decl->name);
+            emit_c_ident(arena, out, decl->name);
             emit_cstr(arena, out, "_");
             emit_string8(arena, out, instances.data[j]);
             emit_cstr(arena, out, "_reflect;\n");
@@ -13088,46 +14210,50 @@ static void emit_enum_reflection(memops_arena *arena, string8 *out, EnumDecl *de
     if (decl->is_external) return;
     emit_generated_line_directive(arena, out);
     emit_cstr(arena, out, "static const i_reflect_value i_reflect_values_");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "[] = {\n");
     for (i32 i = 0; i < decl->items.length; i++) {
         EnumItem *item = (EnumItem *)decl->items.data[i];
+        emit_pre_directives(arena, out, &item->pre_directives);
         emit_cstr(arena, out, "    {");
         emit_string8_as_c_string(arena, out, item->name);
         emit_cstr(arena, out, ", ");
-        emit_string8(arena, out, decl->name);
+        emit_c_ident(arena, out, decl->name);
         emit_cstr(arena, out, "_");
-        emit_string8(arena, out, item->name);
+        emit_c_ident(arena, out, item->name);
         emit_cstr(arena, out, "},\n");
     }
+    emit_pre_directives(arena, out, &decl->tail_directives);
     emit_cstr(arena, out, "};\n");
     emit_cstr(arena, out, "const i_reflect ");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "_reflect = {");
     emit_string8_as_c_string(arena, out, decl->name);
     emit_cstr(arena, out, ", (u64)sizeof(");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "), ");
     emit_cstr(arena, out, "(u64)__alignof__(");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "), I_Reflect_Enum, ");
-    char count_buf[32];
-    snprintf(count_buf, sizeof(count_buf), "%llu", (unsigned long long)decl->items.length);
-    emit_cstr(arena, out, count_buf);
+    emit_cstr(arena, out, "(u64)(sizeof(i_reflect_values_");
+    emit_c_ident(arena, out, decl->name);
+    emit_cstr(arena, out, ") / sizeof(i_reflect_values_");
+    emit_c_ident(arena, out, decl->name);
+    emit_cstr(arena, out, "[0]))");
     emit_cstr(arena, out, ", {.values = i_reflect_values_");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "}};\n\n");
 }
 
 static void emit_enum_reflection_extern(memops_arena *arena, string8 *out, EnumDecl *decl) {
     emit_generated_line_directive(arena, out);
     emit_cstr(arena, out, "extern const i_reflect ");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "_reflect;\n");
     emit_cstr(arena, out, "#define ");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "_reflected ");
-    emit_string8(arena, out, decl->name);
+    emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "_reflect\n");
 }
 
@@ -13141,13 +14267,13 @@ static void emit_native_monomorph_umbrella_includes(memops_arena *arena, Program
         if (instances.length == 0) continue;
 
         emit_cstr(arena, out, "#include \"");
-        emit_string8(arena, out, decl->name);
+        emit_c_ident(arena, out, decl->name);
         emit_cstr(arena, out, ".h\"\n");
     }
 }
 
 static void emit_generated_file_banner(memops_arena *arena, string8 *out, const char *kind) {
-    emit_cstr(arena, out, "/* Generated by I from ");
+    emit_cstr(arena, out, "/* Generated by ilang from ");
     emit_cstr(arena, out, g_source_path ? g_source_path : "<input>");
     emit_cstr(arena, out, " (");
     emit_cstr(arena, out, kind);
@@ -13165,6 +14291,15 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
     if (prog->preprocessor_lines.length > 0) {
         emit_cstr(arena, out, "\n");
     }
+    /* ilang checks enum ranges itself, but only where the value is a literal
+       or an implicit sequential; a constant expression needs an evaluator it
+       does not have. clang has the whole check, and #line puts it on the real
+       .i line, so it is borrowed here -- the same trade the external layout
+       asserts already make. Placed after the includes so it governs the enums
+       ilang emits rather than whatever a third-party header contains. */
+    emit_cstr(arena, out, "#if defined(__clang__)\n");
+    emit_cstr(arena, out, "#pragma clang diagnostic error \"-Wmicrosoft-enum-value\"\n");
+    emit_cstr(arena, out, "#endif\n\n");
     for (i32 i = 0; i < prog->defines.length; i++) {
         string8 macro_lit = prog->defines.data[i];
         string8 macro = macro_lit;
@@ -13261,9 +14396,9 @@ static void emit_program(memops_arena *arena, Program *prog, string8 *out) {
         Stmt *s = (Stmt *)prog->globals.data[i];
         emit_line_directive_path(arena, out, s->source_path, s->line);
         if (s->is_external) {
-            emit_cstr(arena, out, "extern ");
-            emit_decl(arena, out, s->type, s->name, (TypeSub){0});
-            emit_cstr(arena, out, ";\n");
+            /* C owns the definition and its own header declares it; anything
+               emitted here would be a second declaration with a linkage of
+               ilang's choosing rather than C's. See docs/attributes.md. */
             continue;
         }
         emit_stmt(arena, out, s, (TypeSub){0}, (string8){0});
@@ -13542,9 +14677,9 @@ static void emit_module_source(memops_arena *arena, Program *prog, string8 modul
         if (!decl_in_module(g->source_path, module)) continue;
         emit_line_directive_path(arena, out, g->source_path, g->line);
         if (g->is_external) {
-            emit_cstr(arena, out, "extern ");
-            emit_decl(arena, out, g->type, g->name, (TypeSub){0});
-            emit_cstr(arena, out, ";\n");
+            /* C owns the definition and its own header declares it; anything
+               emitted here would be a second declaration with a linkage of
+               ilang's choosing rather than C's. See docs/attributes.md. */
             continue;
         }
         emit_stmt(arena, out, g, (TypeSub){0}, (string8){0});
@@ -13805,41 +14940,7 @@ static bool preprocessor_line_is_c_directive(u8 *line, u64 length) {
     return false;
 }
 
-typedef enum PreprocessorConditional {
-    Preproc_NotConditional = 0,
-    Preproc_If,    // if, ifdef, ifndef
-    Preproc_Elif,
-    Preproc_Else,
-    Preproc_Endif,
-} PreprocessorConditional;
 
-static PreprocessorConditional preprocessor_conditional_kind(u8 *line, u64 length) {
-    u64 i = 0;
-    while (i < length && (line[i] == ' ' || line[i] == '\t')) i++;
-    if (i >= length || line[i] != '#') return Preproc_NotConditional;
-    i++;
-    while (i < length && (line[i] == ' ' || line[i] == '\t')) i++;
-
-    struct { const char *name; PreprocessorConditional kind; } table[] = {
-        {"ifdef", Preproc_If},
-        {"ifndef", Preproc_If},
-        {"if", Preproc_If},
-        {"elif", Preproc_Elif},
-        {"else", Preproc_Else},
-        {"endif", Preproc_Endif},
-    };
-    for (i32 d = 0; d < (i32)(sizeof(table) / sizeof(table[0])); d++) {
-        u64 name_len = (u64)strlen(table[d].name);
-        if (i + name_len > length) continue;
-        if (strncmp((const char *)(line + i), table[d].name, name_len) != 0) continue;
-        u64 end = i + name_len;
-        if (end == length || line[end] == ' ' || line[end] == '\t' || line[end] == '\r' ||
-            line[end] == '(' || line[end] == '!') {
-            return table[d].kind;
-        }
-    }
-    return Preproc_NotConditional;
-}
 
 static void preprocessor_error(i32 line, const char *message) {
     if (g_diag_json) {
@@ -13851,74 +14952,8 @@ static void preprocessor_error(i32 line, const char *message) {
     diag_record_error();
 }
 
-/* Passthrough directives reach the generated C untouched, so an unbalanced
-   conditional would surface as a C error pointing at emitted code. Checking the
-   balance here reports it against the .i line that actually caused it. */
-static void validate_preprocessor_balance(string8 src) {
-    i32 open_lines[64];
-    i32 depth = 0;
-    bool overflowed = false;
-    i32 line_no = 0;
-    u8 *p = src.data;
-    u8 *end = src.data + src.length;
-    while (p < end) {
-        u8 *line_start = p;
-        while (p < end && *p != '\n') p++;
-        u8 *line_end = p;
-        if (line_end > line_start && line_end[-1] == '\r') line_end--;
-        line_no++;
 
-        switch (preprocessor_conditional_kind(line_start, (u64)(line_end - line_start))) {
-            case Preproc_If:
-                if (depth < (i32)(sizeof(open_lines) / sizeof(open_lines[0]))) {
-                    open_lines[depth] = line_no;
-                } else {
-                    overflowed = true;
-                }
-                depth++;
-                break;
-            case Preproc_Elif:
-                if (depth == 0) preprocessor_error(line_no, "'#elif' without a matching '#if'");
-                break;
-            case Preproc_Else:
-                if (depth == 0) preprocessor_error(line_no, "'#else' without a matching '#if'");
-                break;
-            case Preproc_Endif:
-                if (depth == 0) preprocessor_error(line_no, "'#endif' without a matching '#if'");
-                else depth--;
-                break;
-            case Preproc_NotConditional:
-                break;
-        }
-        if (p < end && *p == '\n') p++;
-    }
 
-    for (i32 i = depth; i > 0; i--) {
-        if (overflowed || i > (i32)(sizeof(open_lines) / sizeof(open_lines[0]))) continue;
-        preprocessor_error(open_lines[i - 1], "unterminated '#if': missing '#endif'");
-    }
-}
-
-static Vec_string8 collect_preprocessor_lines(memops_arena *arena, string8 src) {
-    validate_preprocessor_balance(src);
-    Vec_string8 lines = Vec_string8_reserve(arena, 8);
-    u8 *p = src.data;
-    u8 *end = src.data + src.length;
-    while (p < end) {
-        u8 *line_start = p;
-        while (p < end && *p != '\n') p++;
-        u8 *line_end = p;
-        if (line_end > line_start && line_end[-1] == '\r') {
-            line_end--;
-        }
-        u64 line_length = (u64)(line_end - line_start);
-        if (preprocessor_line_is_c_directive(line_start, line_length)) {
-            Vec_string8_append(arena, &lines, string8_copy_from_slice(arena, line_start, line_length));
-        }
-        if (p < end && *p == '\n') p++;
-    }
-    return lines;
-}
 
 static void program_init_lists(memops_arena *arena, Program *prog) {
     memset(prog, 0, sizeof(*prog));
@@ -13999,8 +15034,9 @@ static Program parse_i_file(memops_arena *arena, const char *path) {
     g_source_path = path;
 
     Vec_Token tokens = {0};
+    Vec_string8 directives = {0};
     profile_step = profile_now_ms();
-    lex_tokens(arena, input, &tokens);
+    lex_tokens(arena, input, &tokens, &directives);
     if (g_profile) g_profile_import_lex_ms += profile_now_ms() - profile_step;
 
     Parser parser = {0};
@@ -14011,7 +15047,7 @@ static Program parse_i_file(memops_arena *arena, const char *path) {
 
     profile_step = profile_now_ms();
     Program prog = parse_program(&parser);
-    prog.preprocessor_lines = collect_preprocessor_lines(arena, input);
+    prog.preprocessor_lines = directives;
     if (g_profile) {
         g_profile_import_parse_ms += profile_now_ms() - profile_step;
         g_profile_import_parse_count += 1;
@@ -14363,7 +15399,9 @@ static bool program_has_alias(Program *prog, string8 name) {
 static bool c_type_name_needs_structdecl(Program *prog, string8 name) {
     static const char *skip[] = {
         "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-        "f32", "f64", "usize", "b32", "bool", "void", "char",
+        "f32", "f64", "usize", "void",
+        "c8", "b8", "b16", "b32", "b64",
+        "intptr", "uintptr", "ptrdiff", "intmax", "uintmax",
         "float", "double", "int", "long", "short"
     };
     for (i32 i = 0; i < (i32)(sizeof(skip) / sizeof(skip[0])); i++) {
@@ -14377,7 +15415,7 @@ static void emit_monomorph_arg_forward_decl(memops_arena *arena, Program *prog, 
     if (!arg || arg->kind != Type_Name) return;
     if (!c_type_name_needs_structdecl(prog, arg->name)) return;
     emit_cstr(arena, out, "structdecl(");
-    emit_string8(arena, out, arg->name);
+    emit_c_ident(arena, out, arg->name);
     emit_cstr(arena, out, ");\n\n");
 }
 
@@ -14948,10 +15986,15 @@ i32 main(i32 argc, char *argv[]) {
         printf("i: error: failed to read %s\n", input_from_stdin ? "stdin" : input_path);
         return 1;
     }
+    /* Before anything is lexed: every conditional, in every file, sees the same
+       set of unconditional defines. */
+    preproc_build_seed(&arena, canonical_input_path);
+
     profile_mark("read entry", &profile_last, profile_start);
 
     Vec_Token tokens = {0};
-    lex_tokens(&arena, input, &tokens);
+    Vec_string8 directives = {0};
+    lex_tokens(&arena, input, &tokens, &directives);
     profile_mark("lex entry", &profile_last, profile_start);
 
     Parser parser = {0};
@@ -14961,7 +16004,7 @@ i32 main(i32 argc, char *argv[]) {
     parser.index = 0;
 
     Program prog = parse_program(&parser);
-    prog.preprocessor_lines = collect_preprocessor_lines(&arena, input);
+    prog.preprocessor_lines = directives;
     profile_mark("parse entry", &profile_last, profile_start);
     Vec_string8 visited_imports = Vec_string8_reserve(&arena, 8);
     Vec_string8 import_stack = Vec_string8_reserve(&arena, 8);

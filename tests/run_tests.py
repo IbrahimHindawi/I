@@ -122,7 +122,7 @@ main:proc()->i32={
         name="comments",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 // top-level line comment
 /* top-level block comment */
@@ -148,7 +148,7 @@ main:proc()->i32 = {
         name="enum_dot_members",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 Kind:enum = {
     None,
@@ -355,7 +355,7 @@ main:proc()->i32 = {
         name="generic_delayed_numeric_algorithms",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 add:proc<T>(x:T, y:T)->T = {
     return x + y;
@@ -800,7 +800,7 @@ main:proc()->i32={
         name="reflect_angle_syntax",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 Payload:struct = {
     x:i32;
@@ -819,7 +819,7 @@ main:proc()->i32 = {
         name="boring_c_surface",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 #define WINCALL
 #define TWICE(x) ((x) * 2)
 
@@ -833,7 +833,7 @@ Node:struct = {
     parent:*Node;
 }
 
-platform_add:proc[WINCALL](a:i32, b:i32)->i32 = {
+platform_add:proc[callconv(WINCALL)](a:i32, b:i32)->i32 = {
     return a + b;
 }
 
@@ -898,11 +898,11 @@ main:proc()->i32={
         name="gin_c_surface",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 #define WINCALL
 
 I32:alias = i32;
-Binary:alias = proc[WINCALL](a:i32, b:i32)->i32;
+Binary:alias = proc[callconv(WINCALL)](a:i32, b:i32)->i32;
 
 Value:union = {
     i:I32;
@@ -914,7 +914,7 @@ Mode:enum = {
     Ready,
 }
 
-add:proc[WINCALL](a:i32, b:i32)->i32 = {
+add:proc[callconv(WINCALL)](a:i32, b:i32)->i32 = {
     return a + b;
 }
 
@@ -946,7 +946,7 @@ main:proc()->i32 = {
             "do {",
             " ? ",
             "choose(i32 a, ...)",
-            'const char * label = "hello";',
+            'const c8 * label = "hello";',
             "Mode_Ready",
         ),
         header_contains=("typedef i32 I32;", "typedef i32 (WINCALL *Binary)(i32 a, i32 b);", "uniondef(Value)"),
@@ -955,14 +955,14 @@ main:proc()->i32 = {
         name="external_c_array_alias_generic_specialization",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 cinclude "external_c_array_alias_generic_specialization_types.h"
 
 vec2:alias = [2]f32;
 vec3:alias = [3]f32;
 
-touch_vec2:proc(v:vec2)->void = { external; }
-touch_vec3:proc(v:vec3)->void = { external; }
+touch_vec2: proc[external](v:vec2)->void = {}
+touch_vec3: proc[external](v:vec3)->void = {}
 
 json_read:proc<vec2>(out:vec2)->i32 = {
     out[0] = 2.0f;
@@ -1052,7 +1052,7 @@ main:proc()->i32 = {
         name="initializer_lists",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 Pair:struct = {
     a:i32;
@@ -1084,7 +1084,7 @@ main:proc()->i32 = {
         name="typed_compound_initializers",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 Payload:struct = {
     x:i32;
@@ -1125,7 +1125,7 @@ main:proc()->i32 = {
         name="generic_value_struct_order_and_bare_init_arg",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 Box:struct<T> = {
     value:T;
@@ -1157,7 +1157,7 @@ main:proc()->i32 = {
         name="postfix_address_deref",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 Node:struct = {
     value:i32;
@@ -1190,7 +1190,7 @@ main:proc()->i32 = {
         name="function_pointer_types",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 Callback:alias = *proc(x:i32, label:*const char)->i32;
 
@@ -1215,31 +1215,33 @@ main:proc()->i32 = {
 }
 ''',
         expected_stdout="227 66\n",
-        generated_contains=("typedef i32 (*Callback)(i32 x, const char * label);", "Callback cb;", "i32 call_twice(Callback cb)"),
-        header_contains=("typedef i32 (*Callback)(i32 x, const char * label);", "Callback cb;"),
+        generated_contains=("typedef i32 (*Callback)(i32 x, const c8 * label);", "Callback cb;", "i32 call_twice(Callback cb)"),
+        header_contains=("typedef i32 (*Callback)(i32 x, const c8 * label);", "Callback cb;"),
     ),
     Case(
         name="external_globals",
         source=r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 State:struct = {
     value:i32;
 }
 
-g_state:State = external;
+g_state:State;
 
 main:proc()->i32 = {
     return 0;
 }
 ''',
         expected_stdout="",
-        generated_contains=(
-            "extern State g_state;",
-            "i32 main(void)",
-        ),
-        header_contains=("extern State g_state;",),
+        # `external` is not C's `extern`. It says C owns the definition, so
+        # ilang emits nothing at all -- the same as struct[external] and
+        # proc[external]. Emitting `extern State g_state;` would assert external
+        # linkage over a definition C may well have made `static`, which is a
+        # linkage decision that is not ilang's to make.
+        generated_contains=("i32 main(void)",),
+        generated_missing=("extern State g_state;", "State g_state;"),
     ),
 )
 
@@ -1261,7 +1263,7 @@ shared_sum:proc(p:*SharedPayload)->i32 = {
 
 
 MODULE_APP_SOURCE = r'''
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 cinclude "stdio.h"
 import "module.i"
 
@@ -3004,10 +3006,16 @@ main:proc()->i32 = {
             return 1
     print("ok sizeof_operand")
 
-    # `sizeof` is a builtin, not an identifier. Declaring one passed `i: checked`
-    # and then emitted `i32 sizeof(i32 n);` or `structdef(sizeof)`, which clang
-    # rejects as a syntax error. Proc and struct names were not checked against
-    # the reserved list at all, so `typedef` slipped through the same way.
+    # `sizeof` is a builtin, not an identifier -- declaring one emitted
+    # `i32 sizeof(i32 n);` or `structdef(sizeof)`, which clang rejects.
+    #
+    # C keywords are a different case and are handled differently now. Banning
+    # them meant chasing declaration positions one at a time -- locals, then
+    # params, then procs, then structs -- and globals, fields, enum names and
+    # aliases were still open after four rounds. They are mangled on emission
+    # instead, which closes the class at the single point every identifier
+    # passes through. `int`, `long` and friends stay banned: those are also
+    # ilang type spellings, so mangling would make one token mean two things.
     reserved_i = TEST_DIR / "sizeof_reserved.i"
     for src, label in (
         ("sizeof:proc(n: i32)->i32 = { return n; }\n"
@@ -3017,10 +3025,12 @@ main:proc()->i32 = {
          "main:proc()->i32 = { return 0; }\n", "struct named sizeof"),
         ("alignof:proc()->i32 = { return 1; }\n"
          "main:proc()->i32 = { return 0; }\n", "proc named alignof"),
-        ("typedef:proc()->i32 = { return 1; }\n"
-         "main:proc()->i32 = { return 0; }\n", "proc named typedef"),
-        ("typedef:struct = { x: i32; }\n"
-         "main:proc()->i32 = { return 0; }\n", "struct named typedef"),
+        # The ambiguous group, in the four positions that used to be unchecked.
+        ("long: i32 = 1;\nmain:proc()->i32 = { return long; }\n", "global named long"),
+        ("P: struct = { float: i32; }\n"
+         "main:proc()->i32 = { p: P = {}; return p.float; }\n", "field named float"),
+        ("int: enum = { A, }\nmain:proc()->i32 = { return cast(int.A, i32); }\n", "enum named int"),
+        ("short: alias = i32;\nmain:proc()->i32 = { v: short = 1; return v; }\n", "alias named short"),
     ):
         reserved_i.write_text(src, encoding="utf-8", newline="\n")
         res = run([str(I_EXE), "check", str(reserved_i)])
@@ -3028,6 +3038,83 @@ main:proc()->i32 = {
             print(f"sizeof_reserved: {label!r} should be rejected")
             print(res.stdout)
             return 1
+
+    # Every position a name can be declared in, each carrying a C keyword, all
+    # in one program so a mangled declaration and its uses have to agree. It is
+    # run, not just compiled: a mangling that renamed the declaration but not
+    # the reference would fail to link rather than return the wrong answer, but
+    # one that renamed an enum tag and not its members would build and misbehave.
+    reserved_c = TEST_DIR / "sizeof_reserved.c"
+    reserved_exe = TEST_DIR / "sizeof_reserved.exe"
+    reserved_i.write_text(
+        "typedef: i32 = 1;\n"
+        "P: struct = { register: i32; }\n"
+        "Colour: enum = { auto, extern, }\n"
+        "inline: alias = i32;\n"
+        "restrict: proc(n: inline)->i32 = { return n; }\n"
+        "main:proc()->i32 = {\n"
+        "    _Static_assert: i32 = 8;\n"
+        "    p: P = {};\n"
+        "    p.register = 4;\n"
+        "    return typedef + p.register + cast(Colour.extern, i32) + "
+        "restrict(2) + _Static_assert;\n"
+        "}\n",
+        encoding="utf-8", newline="\n")
+    gen = run([str(I_EXE), "compile", str(reserved_i), "-o", str(reserved_c), "--no-header"])
+    if gen.returncode != 0:
+        print("sizeof_reserved: C keywords should be legal names now")
+        print(gen.stdout)
+        return 1
+    built = run(["clang.exe", str(reserved_c), "-I", "src", "-I", "src/std", "-o", str(reserved_exe)])
+    if built.returncode != 0:
+        print("sizeof_reserved: mangled names did not produce valid C")
+        print(built.stdout)
+        return 1
+    ran = run([str(reserved_exe)])
+    # 1 + 4 + 1 + 2 + 8
+    if ran.returncode != 16:
+        print(f"sizeof_reserved: expected 16, got {ran.returncode}")
+        return 1
+    text = reserved_c.read_text(encoding="utf-8")
+    # A double underscore is reserved to the implementation, so the prefix
+    # absorbs the leading one rather than producing `i__Static_assert`.
+    if "i_Static_assert" not in text or "i__Static_assert" in text:
+        print("sizeof_reserved: a leading underscore must not become a double underscore")
+        return 1
+
+    # Mangling invents a C name, and a program may already have declared it --
+    # two ilang names, one C name, which is the very failure the mangling
+    # removes. The names a mangle can produce are reserved so the rename stays
+    # injective. All four declaration kinds, since each has its own C namespace.
+    for src, label in (
+        ("typedef: i32 = 1;\ni_typedef: i32 = 2;\n"
+         "main:proc()->i32 = { return typedef + i_typedef; }\n", "globals"),
+        ("register: proc()->i32 = { return 1; }\n"
+         "i_register: proc()->i32 = { return 2; }\n"
+         "main:proc()->i32 = { return register() + i_register(); }\n", "procs"),
+        ("auto: struct = { x: i32; }\ni_auto: struct = { y: i32; }\n"
+         "main:proc()->i32 = { a: auto = {}; b: i_auto = {}; return a.x + b.y; }\n", "types"),
+        ("P: struct = { typedef: i32; i_typedef: i32; }\n"
+         "main:proc()->i32 = { p: P = {}; return p.typedef + p.i_typedef; }\n", "fields"),
+    ):
+        reserved_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(reserved_i)])
+        if res.returncode == 0 or "identifier is reserved" not in res.stdout:
+            print(f"sizeof_reserved: colliding {label} should be rejected")
+            print(res.stdout)
+            return 1
+
+    # Only the 16 names a mangle actually produces; `i_` is not a reserved
+    # prefix, and reserving it would be a much larger tax than the problem.
+    reserved_i.write_text(
+        "i_helper: i32 = 5;\nmain:proc()->i32 = { return i_helper; }\n",
+        encoding="utf-8", newline="\n")
+    res = run([str(I_EXE), "check", str(reserved_i)])
+    if res.returncode != 0:
+        print("sizeof_reserved: an ordinary i_ name must stay legal")
+        print(res.stdout)
+        return 1
+
     print("ok sizeof_reserved")
 
     # A call to a name that resolves to nothing used to be accepted silently.
@@ -3051,7 +3138,7 @@ main:proc()->i32 = {
     # Declaring it is what makes it callable.
     undeclared_i.write_text(
         'cinclude "stdio.h"\n'
-        "printf: proc(fmt: *const char, ...)->i32 = { external; }\n"
+        "printf: proc[external](fmt: *const char, ...)->i32 = {}\n"
         'main:proc()->i32 = { printf("hi\\n"); return 0; }\n',
         encoding="utf-8", newline="\n",
     )
@@ -3065,7 +3152,7 @@ main:proc()->i32 = {
     # call, so it has no declaration to find and must not be reported.
     undeclared_i.write_text(
         'cinclude "stdio.h"\n'
-        "printf: proc(fmt: *const char, ...)->i32 = { external; }\n"
+        "printf: proc[external](fmt: *const char, ...)->i32 = {}\n"
         'main:proc()->i32 = { printfmt("n={}\\n", 3); return 0; }\n',
         encoding="utf-8", newline="\n",
     )
@@ -3136,13 +3223,13 @@ main:proc()->i32 = {
     redecl_app = TEST_DIR / "redecl_app.i"
     redecl_mod.write_text(
         'cinclude "stdio.h"\n'
-        "printf: proc(fmt: *const char, ...)->i32 = { external; }\n"
+        "printf: proc[external](fmt: *const char, ...)->i32 = {}\n"
         "mod_helper:proc()->i32 = { return 1; }\n",
         encoding="utf-8", newline="\n")
     redecl_app.write_text(
         'cinclude "stdio.h"\n'
         'import "redecl_mod.i"\n'
-        "printf: proc(fmt: *const char, ...)->i32 = { external; }\n"
+        "printf: proc[external](fmt: *const char, ...)->i32 = {}\n"
         'main:proc()->i32 = { printf("%d\\n", mod_helper()); return 0; }\n',
         encoding="utf-8", newline="\n")
     same = run([str(I_EXE), "check", str(redecl_app)])
@@ -3154,7 +3241,7 @@ main:proc()->i32 = {
     redecl_app.write_text(
         'cinclude "stdio.h"\n'
         'import "redecl_mod.i"\n'
-        "printf: proc(fmt: *const char)->i32 = { external; }\n"
+        "printf: proc[external](fmt: *const char)->i32 = {}\n"
         'main:proc()->i32 = { printf("x"); return mod_helper(); }\n',
         encoding="utf-8", newline="\n")
     differs = run([str(I_EXE), "check", str(redecl_app)])
@@ -3253,9 +3340,9 @@ main:proc()->i32 = {
          "proc[external]"),
         ("#define WINCALL\n"
          'cinclude "stdio.h"\n'
-         "printf: proc[external, WINCALL](fmt: *const char, ...)->i32 = {}\n"
+         "printf: proc[external, callconv(WINCALL)](fmt: *const char, ...)->i32 = {}\n"
          'main:proc()->i32 = { printf("hi\\n"); return 0; }\n',
-         "proc[external, WINCALL] -- two attributes"),
+         "proc[external, callconv(WINCALL)] -- two attributes"),
         ('cinclude "stdio.h"\n'
          "DXGI_FORMAT: enum[external] = { UNKNOWN, }\n"
          "main:proc()->i32 = { return 0; }\n",
@@ -3263,15 +3350,15 @@ main:proc()->i32 = {
         # The old spellings still parse, which is what let 347 declarations
         # migrate a file at a time instead of in one commit.
         ('cinclude "time.h"\n'
-         "timespec: struct = { external; tv_sec: i64; tv_nsec: long; }\n"
+         "timespec: struct[external] = { tv_sec: i64; tv_nsec: long; }\n"
          "main:proc()->i32 = { t:timespec = {}; return cast(t.tv_sec, i32); }\n",
          "legacy struct = { external; ... }"),
         ('cinclude "stdio.h"\n'
-         "printf: proc(fmt: *const char, ...)->i32 = { external; }\n"
+         "printf: proc[external](fmt: *const char, ...)->i32 = {}\n"
          'main:proc()->i32 = { printf("hi\\n"); return 0; }\n',
          "legacy proc = { external; }"),
         ("#define WINCALL\n"
-         "add: proc[WINCALL](a: i32, b: i32)->i32 = { return a + b; }\n"
+         "add: proc[callconv(WINCALL)](a: i32, b: i32)->i32 = { return a + b; }\n"
          "main:proc()->i32 = { return add(1, 2); }\n",
          "bare callconv, the slot's original meaning"),
     ):
@@ -3412,6 +3499,699 @@ main:proc()->i32 = {
         return 1
     print("ok layout_check")
 
+    # Attribute names are a closed set. While an unrecognised name fell through
+    # to "calling convention", `struct[externl]` meant *not external* and the
+    # record was emitted as a real definition -- a typo that silently changed
+    # what the declaration meant, in the middle of a session spent closing
+    # exactly that class of hole.
+    attr2_i = TEST_DIR / "decl_attributes_known.i"
+    for src, label in (
+        ("P: struct[gibberish] = { a: i32; }\n"
+         "main:proc()->i32 = { p:P = {}; return p.a; }\n", "unknown name"),
+        ('cinclude "stdio.h"\n'
+         "FILE: struct[externl] = {}\n"
+         "main:proc()->i32 = { return 0; }\n", "typo of external"),
+        # align/packed/callconv are real attributes but not enum ones, and u32
+        # is an enum attribute that means nothing on a struct.
+        ("P: struct[u32] = { a: i32; }\n"
+         "main:proc()->i32 = { p:P = {}; return p.a; }\n", "enum attribute on a struct"),
+    ):
+        attr2_i.write_text(src, encoding="utf-8", newline="\n")
+        bad = run([str(I_EXE), "check", str(attr2_i)])
+        if bad.returncode == 0 or "unknown attribute" not in bad.stdout:
+            print(f"decl_attributes_known: {label!r} should be rejected")
+            print(bad.stdout)
+            return 1
+
+    # Attributes with arguments, and the layouts they are supposed to produce.
+    # Asserting the emitted C compiles is not enough -- `packed` that does not
+    # pack still compiles perfectly. These check the resulting sizes.
+    attr2_c = TEST_DIR / "decl_attributes_known.c"
+    attr2_exe = TEST_DIR / "decl_attributes_known.exe"
+    attr2_i.write_text(
+        "P: struct[packed] = { a: u8; b: u32; }\n"
+        "V: struct[align(16)] = { x: f32; }\n"
+        "E: enum[u32] = { A, B, }\n"
+        "printf: proc[external](f: *const char, ...)->i32 = {}\n"
+        "main:proc()->i32 = {\n"
+        '    printf("%d %d %d", cast(sizeof(P), i32), cast(alignof(V), i32), cast(sizeof(E), i32));\n'
+        "    return 0;\n}\n",
+        encoding="utf-8", newline="\n")
+    gen = run([str(I_EXE), "compile", str(attr2_i), "-o", str(attr2_c), "--no-header"])
+    if gen.returncode != 0:
+        print("decl_attributes_known: attribute arguments failed to compile")
+        print(gen.stdout)
+        return 1
+    built = run(["clang.exe", str(attr2_c), "-I", "src", "-I", "src/std", "-o", str(attr2_exe)])
+    if built.returncode != 0:
+        print("decl_attributes_known: generated C did not build")
+        print(built.stdout)
+        return 1
+    ran = run([str(attr2_exe)])
+    # 5: packed drops the three padding bytes an aligned u32 would take.
+    # 16: the requested alignment, not f32's natural 4.
+    # 4: u32, rather than whatever C picks for an enum on its own.
+    if ran.stdout.strip() != "5 16 4":
+        print(f"decl_attributes_known: expected '5 16 4', got {ran.stdout.strip()!r}")
+        return 1
+
+    # A calling convention now says what it is, so nothing has to be guessed
+    # from the shape of the name.
+    attr2_i.write_text(
+        "#define WINCALL\n"
+        'cinclude "stdio.h"\n'
+        "Binary: alias = *proc[callconv(WINCALL)](a: i32, b: i32)->i32;\n"
+        "add: proc[callconv(WINCALL)](a: i32, b: i32)->i32 = { return a + b; }\n"
+        "printf: proc[external, callconv(WINCALL)](f: *const char, ...)->i32 = {}\n"
+        "main:proc()->i32 = { fp: Binary = add; return fp(1, 2); }\n",
+        encoding="utf-8", newline="\n")
+    cc = run([str(I_EXE), "check", str(attr2_i)])
+    if cc.returncode != 0:
+        print("decl_attributes_known: callconv(NAME) must work on decls, types and externals")
+        print(cc.stdout)
+        return 1
+    print("ok decl_attributes_known")
+
+    # A type has to be declared before it is used, external signatures
+    # included. They used to be exempt twice over: the signature was skipped by
+    # semantic_check_proc, and semantic_collect_program_external_type_names
+    # walked every external declaration and added whatever type names it found
+    # to the known set -- so an external declaration *declared its types by
+    # using them*, and a misspelled one declared a type that existed nowhere.
+    undecl_i = TEST_DIR / "undeclared_types.i"
+    for src, label in (
+        ('cinclude "stdio.h"\n'
+         "f: proc[external](x: SomeUnknownType)->i32 = {}\n"
+         "main:proc()->i32 = { return 0; }\n", "parameter type"),
+        ('cinclude "stdio.h"\n'
+         "g: proc[external]()->AnotherUnknown = {}\n"
+         "main:proc()->i32 = { return 0; }\n", "return type"),
+        ('cinclude "stdio.h"\n'
+         "h: proc[external](p: *StillUnknown)->i32 = {}\n"
+         "main:proc()->i32 = { return 0; }\n", "through a pointer"),
+        ("main:proc()->i32 = { v: NotAType = {}; return 0; }\n", "a local, as before"),
+    ):
+        undecl_i.write_text(src, encoding="utf-8", newline="\n")
+        bad = run([str(I_EXE), "check", str(undecl_i)])
+        if bad.returncode == 0 or "undeclared type" not in bad.stdout:
+            print(f"undeclared_types: {label!r} should be rejected")
+            print(bad.stdout)
+            return 1
+
+    # Declaring the foreign type is what makes the signature legal -- an opaque
+    # external is enough when nothing needs its layout.
+    undecl_i.write_text(
+        'cinclude "stdio.h"\n'
+        "KnownCType: struct[external] = {}\n"
+        "f: proc[external](x: *KnownCType)->i32 = {}\n"
+        "main:proc()->i32 = { return 0; }\n",
+        encoding="utf-8", newline="\n")
+    good = run([str(I_EXE), "check", str(undecl_i)])
+    if good.returncode != 0:
+        print("undeclared_types: a declared external type must be usable in a signature")
+        print(good.stdout)
+        return 1
+    print("ok undeclared_types")
+
+    # ilang evaluates the '#if' family itself and never emits it. A dead arm is
+    # skipped in the lexer, so it is not parsed, not type-checked, and does not
+    # exist -- the same deal C makes, and what Rust's cfg and Zig's comptime
+    # both settle for. The cost is that an arm you are not building can rot.
+    #
+    # That cost buys the two things that were impossible while directives were
+    # passed through untouched: omitting a whole declaration, and `#else` at
+    # file scope. Two arms would otherwise be two declarations of one name, and
+    # ilang would reject the pair before C ever saw it.
+    cond_i = TEST_DIR / "conditionals.i"
+    cond_c = TEST_DIR / "conditionals.c"
+    cond_exe = TEST_DIR / "conditionals.exe"
+
+    def cond_run(source, label):
+        cond_i.write_text(source, encoding="utf-8", newline="\n")
+        gen = run([str(I_EXE), "compile", str(cond_i), "-o", str(cond_c), "--no-header"])
+        if gen.returncode != 0:
+            print(f"conditionals: {label!r} failed to compile")
+            print(gen.stdout)
+            return None
+        built = run(["clang.exe", str(cond_c), "-I", "src", "-I", "src/std", "-o", str(cond_exe)])
+        if built.returncode != 0:
+            print(f"conditionals: {label!r} generated C did not build")
+            print(built.stdout)
+            return None
+        return run([str(cond_exe)]).returncode
+
+    for source, expected, label in (
+        ("#define ON 1\n#ifdef ON\nalive: proc()->i32 = { return 7; }\n#endif\nmain:proc()->i32 = { return alive(); }\n", 7, "a declaration kept"),
+        ("#define OFF 1\n#ifndef OFF\ndead: proc()->i32 = { return 1; }\n#endif\nmain:proc()->i32 = { return 0; }\n", 0, "a declaration omitted"),
+        ("#define USE_A 1\n#ifdef USE_A\npick: proc()->i32 = { return 3; }\n#else\npick: proc()->i32 = { return 4; }\n#endif\nmain:proc()->i32 = { return pick(); }\n", 3, "#else at file scope, first arm"),
+        ("#define USE_B 1\n#ifdef USE_A\npick: proc()->i32 = { return 3; }\n#else\npick: proc()->i32 = { return 4; }\n#endif\nmain:proc()->i32 = { return pick(); }\n", 4, "#else at file scope, second arm"),
+        ("#ifdef NOPE\nthis is not ilang at all ((( }}} ;;;\n#endif\nmain:proc()->i32 = { return 9; }\n", 9, "a dead arm need not even parse"),
+        ("#define D 1\nmain:proc()->i32 = {\n    n: i32 = 0;\n#ifdef D\n    n = n + 5;\n#endif\n    return n;\n}\n", 5, "inside a body"),
+        ("#ifdef NOPE\n#define SNEAKY 1\n#endif\n#ifdef SNEAKY\nbad: proc()->i32 = { return 1; }\n#endif\nmain:proc()->i32 = { return 42; }\n", 42, "a define in a dead arm does not take"),
+        ("#define OUTER 1\n#ifdef OUTER\n#ifdef INNER\nmain:proc()->i32 = { return 1; }\n#else\nmain:proc()->i32 = { return 2; }\n#endif\n#endif\n", 2, "nested"),
+        ("#define B 1\n#if defined(A)\nmain:proc()->i32 = { return 1; }\n#elif defined(B)\nmain:proc()->i32 = { return 2; }\n#else\nmain:proc()->i32 = { return 3; }\n#endif\n", 2, "an elif chain"),
+        ("#define X 1\n#undef X\n#ifdef X\nmain:proc()->i32 = { return 1; }\n#else\nmain:proc()->i32 = { return 8; }\n#endif\n", 8, "undef"),
+        ("#define A 1\n#if defined(A) && !defined(B)\nmain:proc()->i32 = { return 6; }\n#endif\n", 6, "&& and !"),
+        ("#if 0\nmain:proc()->i32 = { return 1; }\n#endif\nmain:proc()->i32 = { return 5; }\n", 5, "#if 0"),
+    ):
+        got = cond_run(source, label)
+        if got is None:
+            return 1
+        if got != expected:
+            print(f"conditionals: {label!r} expected {expected}, got {got}")
+            return 1
+
+    # The conditionals are consumed, not forwarded. A `#define` still is,
+    # because C may need it -- ilang records defined-ness without expanding.
+    cond_i.write_text(
+        "#define D 1\n#ifdef D\nmain:proc()->i32 = { return 0; }\n#endif\n",
+        encoding="utf-8", newline="\n")
+    run([str(I_EXE), "compile", str(cond_i), "-o", str(cond_c), "--no-header"])
+    text = cond_c.read_text(encoding="utf-8")
+    if "#ifdef" in text:
+        print("conditionals: a conditional should not reach the generated C")
+        return 1
+    if "#define D 1" not in text:
+        print("conditionals: a #define should still be forwarded to C")
+        return 1
+    print("ok conditionals")
+
+    # ilang had two spellings of one boolean type: `bool` and `b32` both lowered
+    # to C's bool, both were accepted, and std shipped a print overload for each.
+    # b32 is the one that stays, so `bool` is now an undeclared name like any
+    # other -- which is only a real check if b32 still works alongside it.
+    b32_i = TEST_DIR / "b32_only.i"
+    b32_i.write_text("main:proc()->i32 = { v: bool = 1; return 0; }\n",
+                     encoding="utf-8", newline="\n")
+    bad = run([str(I_EXE), "check", str(b32_i)])
+    if bad.returncode == 0 or "undeclared type 'bool'" not in bad.stdout:
+        print("b32_only: 'bool' should no longer name a type")
+        print(bad.stdout)
+        return 1
+    b32_i.write_text(
+        "flip: proc(v: b32)->b32 = { if (v) { return 0; } return 1; }\n"
+        "main:proc()->i32 = { return cast(flip(1), i32); }\n",
+        encoding="utf-8", newline="\n")
+    good = run([str(I_EXE), "check", str(b32_i)])
+    if good.returncode != 0:
+        print("b32_only: b32 must still work everywhere bool did")
+        print(good.stdout)
+        return 1
+    print("ok b32_only")
+
+    # A boolean family whose names carry a width has to actually have those
+    # widths -- `bool` is one byte, so building b8/b16/b32/b64 on it would have
+    # made three of the four the same type. Checking the generated C compiles
+    # would not catch that; only sizeof does. b32 is the default boolean.
+    widths_i = TEST_DIR / "scalar_widths.i"
+    widths_c = TEST_DIR / "scalar_widths.c"
+    widths_exe = TEST_DIR / "scalar_widths.exe"
+    widths_i.write_text(
+        'cinclude "stdio.h"\n'
+        "printf: proc[external](f: *const char, ...)->i32 = {}\n"
+        "main:proc()->i32 = {\n"
+        '    printf("%d %d %d %d %d %d %d %d %d %d",\n'
+        "        cast(sizeof(b8), i32), cast(sizeof(b16), i32),\n"
+        "        cast(sizeof(b32), i32), cast(sizeof(b64), i32),\n"
+        "        cast(sizeof(c8), i32),\n"
+        "        cast(sizeof(intptr), i32), cast(sizeof(uintptr), i32),\n"
+        "        cast(sizeof(ptrdiff), i32), cast(sizeof(intmax), i32),\n"
+        "        cast(sizeof(uintmax), i32));\n"
+        "    return 0;\n}\n",
+        encoding="utf-8", newline="\n")
+    gen = run([str(I_EXE), "compile", str(widths_i), "-o", str(widths_c), "--no-header"])
+    if gen.returncode != 0:
+        print("scalar_widths: failed to compile")
+        print(gen.stdout)
+        return 1
+    built = run(["clang.exe", str(widths_c), "-I", "src", "-I", "src/std", "-o", str(widths_exe)])
+    if built.returncode != 0:
+        print("scalar_widths: generated C did not build")
+        print(built.stdout)
+        return 1
+    ran = run([str(widths_exe)])
+    # c8 is 1 because it is C's char; the pointer-sized and max types are 8 on
+    # every target ilang builds for today.
+    expected = "1 2 4 8 1 8 8 8 8 8"
+    if ran.stdout.strip() != expected:
+        print(f"scalar_widths: expected {expected!r}, got {ran.stdout.strip()!r}")
+        return 1
+
+    # c8 and char are one type, not two that look alike -- a value has to cross
+    # between them without a cast, and reach real C through a `const char *`
+    # prototype. If they were distinct types this would fail at the first call.
+    c8_i = TEST_DIR / "c8_is_char.i"
+    c8_c = TEST_DIR / "c8_is_char.c"
+    c8_exe = TEST_DIR / "c8_is_char.exe"
+    c8_i.write_text(
+        'cinclude "stdio.h"\n'
+        'cinclude "string.h"\n'
+        "printf: proc[external](f: *const char, ...)->i32 = {}\n"
+        "strlen: proc[external](s: *const c8)->usize = {}\n"
+        "take_c8:   proc(s: *const c8)->usize   = { return strlen(s); }\n"
+        "take_char: proc(s: *const char)->usize = { return take_c8(s); }\n"
+        "main:proc()->i32 = {\n"
+        '    printf("%d %d", cast(take_c8("abcd"), i32), cast(take_char("xyz"), i32));\n'
+        "    return 0;\n}\n",
+        encoding="utf-8", newline="\n")
+    gen = run([str(I_EXE), "compile", str(c8_i), "-o", str(c8_c), "--no-header"])
+    if gen.returncode != 0:
+        print("c8_is_char: failed to compile")
+        print(gen.stdout)
+        return 1
+    text = c8_c.read_text(encoding="utf-8")
+    # Both spellings must reach the emitter as the same name.
+    if "const c8 * s" not in text or "const char * s" in text:
+        print("c8_is_char: char should normalise to c8 on the way out")
+        return 1
+    built = run(["clang.exe", str(c8_c), "-I", "src", "-I", "src/std", "-o", str(c8_exe)])
+    if built.returncode != 0:
+        print("c8_is_char: generated C did not build")
+        print(built.stdout)
+        return 1
+    ran = run([str(c8_exe)])
+    if ran.stdout.strip() != "4 3":
+        print(f"c8_is_char: expected '4 3', got {ran.stdout.strip()!r}")
+        return 1
+    print("ok scalar_widths")
+
+    # An unattributed enum is i32, and says so in the emitted C. Before, nothing
+    # was stated and C picked the width, so `enum[u32]` was the only way to know
+    # what an enum was -- checking sizeof alone would not catch a regression
+    # here, since C's own choice also happens to be 4 bytes on this target.
+    enum_i = TEST_DIR / "enum_default.i"
+    enum_i.write_text(
+        "Plain: enum = { A, B, }\n"
+        "Wide: enum[u32] = { C, D, }\n"
+        "main:proc()->i32 = { return cast(Plain.A, i32) + cast(Wide.C, i32); }\n",
+        encoding="utf-8", newline="\n")
+    enum_c = TEST_DIR / "enum_default.c"
+    gen = run([str(I_EXE), "compile", str(enum_i), "-o", str(enum_c), "--no-header"])
+    if gen.returncode != 0:
+        print("enum_default: failed to compile")
+        print(gen.stdout)
+        return 1
+    text = enum_c.read_text(encoding="utf-8")
+    if "typedef enum Plain : i32 {" not in text:
+        print("enum_default: an unattributed enum should state i32")
+        return 1
+    if "typedef enum Wide : u32 {" not in text:
+        print("enum_default: enum[u32] should still win over the default")
+        return 1
+    print("ok enum_default")
+
+    # A '#' line has to work everywhere C allows one, not only between
+    # statements. The interesting part is that a guarded struct field or enum
+    # member is named by more than the record definition: the reflect table and
+    # the external layout asserts name it too, so all three have to sit behind
+    # the same guard or the generated C references a member that is not there.
+    # Both settings are built and run; the answers must differ.
+    nest_i = TEST_DIR / "directive_positions.i"
+    nest_c = TEST_DIR / "directive_positions.c"
+    nest_exe = TEST_DIR / "directive_positions.exe"
+    body = (
+        'cinclude "stdio.h"\n'
+        "printf: proc[external](f: *const char, ...)->i32 = {}\n"
+        "P: struct = {\n"
+        "    x: i32;\n"
+        "#ifdef EXTRA\n"
+        "    y: i32;\n"
+        "#endif\n"
+        "}\n"
+        "E: enum = {\n"
+        "    A,\n"
+        "#ifdef EXTRA\n"
+        "    B,\n"
+        "#endif\n"
+        "}\n"
+        "main:proc()->i32 = {\n"
+        "    xs: [3]i32 = {\n"
+        "#ifdef EXTRA\n"
+        "        7,\n"
+        "#endif\n"
+        "        8,\n"
+        "        9,\n"
+        "    };\n"
+        "    last: i32 = 0;\n"
+        "#ifdef EXTRA\n"
+        "    last = cast(E.B, i32);\n"
+        "#endif\n"
+        '    printf("%d %d %d %d", cast(sizeof(P), i32), last, xs[0], P<>.count);\n'
+        "    return 0;\n}\n"
+    )
+    # sizeof(P): 8 with the guarded field, 4 without.
+    # last: 1 when E.B exists, 0 when it does not.
+    # xs[0]: the guarded element is first, so dropping it shifts the array.
+    # P<>.count: the reflect field count has to follow the record, not the AST.
+    for flag, expected in (("EXTRA", "8 1 7 2"), ("NOTHING", "4 0 8 1")):
+        nest_i.write_text(f"#define {flag} 1\n" + body, encoding="utf-8", newline="\n")
+        gen = run([str(I_EXE), "compile", str(nest_i), "-o", str(nest_c), "--no-header"])
+        if gen.returncode != 0:
+            print(f"directive_positions: {flag} failed to compile")
+            print(gen.stdout)
+            return 1
+        built = run(["clang.exe", str(nest_c), "-I", "src", "-I", "src/std", "-o", str(nest_exe)])
+        if built.returncode != 0:
+            print(f"directive_positions: {flag} generated C did not build")
+            print(built.stdout)
+            return 1
+        ran = run([str(nest_exe)])
+        if ran.stdout.strip() != expected:
+            print(f"directive_positions: with {flag} expected {expected!r}, got {ran.stdout.strip()!r}")
+            return 1
+    print("ok directive_positions")
+
+    # A type containing itself by value has no size, so clang rejected the
+    # generated record with `field has incomplete type` -- an error about code
+    # the author never wrote. ilang knows the field types and says so first.
+    #
+    # The walk follows what needs a *complete* type and stops at what does not,
+    # so the second list matters as much as the first: a check that rejected a
+    # self-pointer would be useless, and linked lists are the common case.
+    cycle_i = TEST_DIR / "type_cycles.i"
+    for src, label in (
+        ("P: struct = { inner: P; }\nmain:proc()->i32 = { p: P = {}; return 0; }\n", "direct"),
+        ("P: struct = { xs: [4]P; }\nmain:proc()->i32 = { p: P = {}; return 0; }\n", "through an array"),
+        ("A: struct = { b: B; } B: struct = { a: A; }\nmain:proc()->i32 = { x: A = {}; return 0; }\n", "mutual"),
+        ("P: struct = { v: PA; } PA: alias = P;\nmain:proc()->i32 = { p: P = {}; return 0; }\n", "through an alias"),
+        ("P: struct = { union = { inner: P; y: i32; } }\nmain:proc()->i32 = { p: P = {}; return 0; }\n", "anonymous member"),
+        ("Box: struct<T> = { v: Box<T>; }\nmain:proc()->i32 = { b: Box<i32> = {}; return 0; }\n", "generic"),
+        ("A: alias = A;\nmain:proc()->i32 = { return 0; }\n", "alias to itself"),
+        ("A: alias = B; B: alias = A;\nmain:proc()->i32 = { return 0; }\n", "alias two-cycle"),
+    ):
+        cycle_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(cycle_i)])
+        if res.returncode == 0 or "contains itself by value" not in res.stdout:
+            print(f"type_cycles: {label!r} should be rejected")
+            print(res.stdout)
+            return 1
+
+    for src, label in (
+        ("P: struct = { next: *P; }\nmain:proc()->i32 = { p: P = {}; return 0; }\n", "pointer to itself"),
+        ("Node: struct<T> = { next: *Node<T>; v: T; }\nmain:proc()->i32 = { n: Node<i32> = {}; return 0; }\n", "generic pointer"),
+        ("Pair: struct<K, V> = { a: K; b: V; }\nmain:proc()->i32 = { p: Pair<Pair<i32, i32>, i32> = {}; return 0; }\n", "nested generic argument"),
+        ("C: struct = { v: i32; } A: struct = { c: C; } B: struct = { c: C; a: A; }\nmain:proc()->i32 = { b: B = {}; return b.c.v; }\n", "one type used by two others"),
+    ):
+        cycle_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(cycle_i)])
+        if res.returncode != 0:
+            print(f"type_cycles: {label!r} must stay legal")
+            print(res.stdout)
+            return 1
+
+    # The diagnostic names the path, not just the type, so a cycle through
+    # several declarations can be followed without re-deriving it by hand.
+    cycle_i.write_text(
+        "A: struct = { b: B; }\nB: struct = { a: A; }\nmain:proc()->i32 = { x: A = {}; return 0; }\n",
+        encoding="utf-8", newline="\n")
+    res = run([str(I_EXE), "check", str(cycle_i)])
+    if "B -> A" not in res.stdout and "A -> B" not in res.stdout:
+        print("type_cycles: the diagnostic should show the cycle path")
+        print(res.stdout)
+        return 1
+    print("ok type_cycles")
+
+    # One spelling for external, not two. `external;` inside a body said the
+    # same thing as the attribute and had to be recognised separately by four
+    # different parsers -- struct bodies, struct fields, enum items and proc
+    # bodies -- any of which could drift from the others. Nothing used it.
+    #
+    # Note what is *not* rejected: an empty body is an ordinary proc that does
+    # nothing, and a proc that returns on only some paths is C's business.
+    ext_i = TEST_DIR / "external_spelling.i"
+    for src, label in (
+        ("cinclude \"stdio.h\"\ngetchar: proc()->i32 = { external; }\nmain:proc()->i32 = { return getchar(); }\n", "a proc body"),
+        ("f: proc()->i32 = { external_emit; }\nmain:proc()->i32 = { return f(); }\n", "external_emit in a proc body"),
+        ("cinclude \"stdio.h\"\nFILE: struct = { external; }\nmain:proc()->i32 = { return 0; }\n", "a struct body"),
+        ("E: enum = { external; }\nmain:proc()->i32 = { return 0; }\n", "an enum body"),
+    ):
+        ext_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(ext_i)])
+        if res.returncode == 0 or "in a body is no longer accepted" not in res.stdout:
+            print(f"external_spelling: {label!r} should be rejected")
+            print(res.stdout)
+            return 1
+
+    for src, label in (
+        ("cinclude \"stdio.h\"\ngetchar: proc[external]()->i32 = {}\nmain:proc()->i32 = { return getchar(); }\n", "proc[external]"),
+        ("cinclude \"stdio.h\"\nFILE: struct[external] = {}\nmain:proc()->i32 = { return 0; }\n", "struct[external]"),
+        ("cinclude \"stdio.h\"\nE: enum[external] = { A, }\nmain:proc()->i32 = { return 0; }\n", "enum[external]"),
+        ("f: proc()->i32 = { }\nmain:proc()->i32 = { return f(); }\n", "an empty body"),
+        ("f: proc(n: i32)->i32 = { if (n > 0) { return 1; } }\nmain:proc()->i32 = { return f(1); }\n", "a proc that returns on one path"),
+    ):
+        ext_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(ext_i)])
+        if res.returncode != 0:
+            print(f"external_spelling: {label!r} must stay legal")
+            print(res.stdout)
+            return 1
+    print("ok external_spelling")
+
+    # The declaration grammar is
+    #
+    #     name : kind [attributes] <generics> (params) -> ReturnType = { body }
+    #
+    # so the attribute slot is read before the type parameters. It used to be
+    # after, which put `proc<T>[external]` in the middle of a form that reads
+    # left to right everywhere else.
+    order_i = TEST_DIR / "attribute_order.i"
+    for src, label in (
+        ("f: proc[external]<T>(x: T)->i32 = {}\nmain:proc()->i32 = { return 0; }\n", "generic proc"),
+        ("Box: struct[external]<T> = {}\nmain:proc()->i32 = { return 0; }\n", "generic struct"),
+        ("P: struct[packed] = { a: u8; b: u32; }\nmain:proc()->i32 = { p: P = {}; return cast(sizeof(P), i32); }\n", "plain struct"),
+        ("E: enum[u32] = { A, }\nmain:proc()->i32 = { return cast(E.A, i32); }\n", "enum"),
+    ):
+        order_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(order_i)])
+        if res.returncode != 0:
+            print(f"attribute_order: {label!r} should parse")
+            print(res.stdout)
+            return 1
+
+    # The old order is gone, so there is one spelling rather than two.
+    for src, label in (
+        ("f: proc<T>[external](x: T)->i32 = {}\nmain:proc()->i32 = { return 0; }\n", "generic proc, old order"),
+        ("Box: struct<T>[external] = {}\nmain:proc()->i32 = { return 0; }\n", "generic struct, old order"),
+    ):
+        order_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(order_i)])
+        if res.returncode == 0:
+            print(f"attribute_order: {label!r} should be rejected")
+            return 1
+
+    # Variables have no attribute slot at all. Of the six attribute names only
+    # `external` ever meant anything on one, and the slot had to sit where `[`
+    # already begins an array type. A global with no initializer says the same
+    # thing: if you did not say how it is initialized, you are not defining it.
+    order_c = TEST_DIR / "attribute_order.c"
+    order_i.write_text(
+        "Atlas: struct[external] = { w: i32; }\ng_atlas: const Atlas;\nmain:proc()->i32 = { return g_atlas.w; }\n",
+        encoding="utf-8", newline="\n")
+    gen = run([str(I_EXE), "compile", str(order_i), "-o", str(order_c), "--no-header"])
+    if gen.returncode != 0:
+        print("attribute_order: a global with no initializer should parse")
+        print(gen.stdout)
+        return 1
+    # Nothing is emitted for it: `external` says C owns the definition, and C's
+    # own header already declares it. An `extern` here would assert external
+    # linkage over a definition C may have made `static`.
+    order_text = order_c.read_text(encoding="utf-8")
+    if "Atlas g_atlas" in order_text.replace("g_atlas.w", ""):
+        print("attribute_order: an external global should emit no declaration")
+        return 1
+
+    # The two spellings it replaced are both gone.
+    for src, needle, label in (
+        ("Atlas: struct = { w: i32; }\ng_atlas: const Atlas = external;\nmain:proc()->i32 = { return g_atlas.w; }\n", "no longer accepted", "= external"),
+        ("g: [external] i32;\nmain:proc()->i32 = { return g; }\n", "", "[external] on a variable"),
+    ):
+        order_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(order_i)])
+        if res.returncode == 0 or (needle and needle not in res.stdout):
+            print(f"attribute_order: {label!r} should be rejected")
+            print(res.stdout)
+            return 1
+
+    # An initializer still means ilang owns it, and locals still require one --
+    # a local cannot be owned by C.
+    for src, ok, label in (
+        ("g_table: [4]i32 = {};\nmain:proc()->i32 = { return g_table[0]; }\n", True, "a literal array length"),
+        ("K: enum = { A, Count, }\ng_t: [K.Count]i32 = {};\nmain:proc()->i32 = { return g_t[0]; }\n", True, "a symbolic array length"),
+        ("g: i32 = ?;\nmain:proc()->i32 = { return g; }\n", True, "an uninitialized global"),
+        ("main:proc()->i32 = { v: i32; return v; }\n", False, "a local with no initializer"),
+    ):
+        order_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(order_i)])
+        if (res.returncode == 0) != ok:
+            print(f"attribute_order: {label!r} behaved the wrong way")
+            print(res.stdout)
+            return 1
+    print("ok attribute_order")
+    # `[0]T` is a GNU extension, not ISO C, and clang takes it silently. The C
+    # trick it exists for -- a flexible array member -- has its own spelling.
+    zero_i = TEST_DIR / "zero_length_array.i"
+    zero_i.write_text("main:proc()->i32 = { xs: [0]i32 = {}; return 0; }\n",
+                      encoding="utf-8", newline="\n")
+    res = run([str(I_EXE), "check", str(zero_i)])
+    if res.returncode == 0 or "greater than zero" not in res.stdout:
+        print("zero_length_array: [0]T should be rejected")
+        print(res.stdout)
+        return 1
+    zero_i.write_text("main:proc()->i32 = { xs: [1]i32 = {}; return xs[0]; }\n",
+                      encoding="utf-8", newline="\n")
+    res = run([str(I_EXE), "check", str(zero_i)])
+    if res.returncode != 0:
+        print("zero_length_array: [1]T must stay legal")
+        print(res.stdout)
+        return 1
+    print("ok zero_length_array")
+
+    # An attribute attaches to a declaration, never to a type use. That one rule
+    # decides every position below, which is why parse_type has no attribute case
+    # at all -- a nested one cannot parse rather than needing a rule of its own.
+    #
+    # `align(N)` is the only attribute that means anything on a value. The others
+    # describe records or procs, and accepting them silently is how `[align(16)]`
+    # used to compile to a plainly unaligned variable.
+    decl_i = TEST_DIR / "decl_attribute_rule.i"
+    for src, needle, label in (
+        ("f: proc(a: i32[align(16)])->i32 = { return a; }\nmain:proc()->i32 = { return f(1); }\n", "a parameter takes no attribute", "parameter"),
+        ("Handle: alias = i32[align(16)];\nmain:proc()->i32 = { return 0; }\n", "an alias takes no attribute", "alias"),
+        ("x: *proc(a: i32)->i32[align(16)] = ?;\nmain:proc()->i32 = { return 0; }\n", "cannot follow a return type", "after a return type"),
+        ("x: [4](i32[align(16)]) = {};\nmain:proc()->i32 = { return 0; }\n", "", "on an element type"),
+        ("x: *(i32[align(16)]) = ?;\nmain:proc()->i32 = { return 0; }\n", "", "on a pointee"),
+        ("x: i32[external] = 0;\nmain:proc()->i32 = { return x; }\n", "does not apply to a variable", "external on a value"),
+        ("x: i32[packed] = 0;\nmain:proc()->i32 = { return x; }\n", "not a value", "packed on a value"),
+        ("x: i32[callconv(WINAPI)] = 0;\nmain:proc()->i32 = { return x; }\n", "not a value", "callconv on a value"),
+        ("x: const [2]i32 = {};\nmain:proc()->i32 = { return 0; }\n", "cannot qualify an array", "const before an array"),
+        ("x: volatile [2]i32 = {};\nmain:proc()->i32 = { return 0; }\n", "cannot qualify an array", "volatile before an array"),
+    ):
+        decl_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(decl_i)])
+        if res.returncode == 0 or (needle and needle not in res.stdout):
+            print(f"decl_attribute_rule: {label!r} should be rejected")
+            print(res.stdout)
+            return 1
+
+    # Where it is allowed, it has to actually align -- a slot that parses and
+    # emits nothing is the failure this rule exists to prevent. Checked by
+    # measuring addresses at runtime, not by reading the generated C.
+    decl_c = TEST_DIR / "decl_attribute_rule.c"
+    decl_exe = TEST_DIR / "decl_attribute_rule.exe"
+    decl_i.write_text(
+        "cinclude \"stdio.h\"\nprintf: proc[external](f: *const char, ...)->i32 = {}\nP: struct = { a: u8; b: i32[align(16)]; }\ng_buf: [4]f32[align(64)] = {};\nmain:proc()->i32 = {\n    v: i32[align(32)] = 5;\n    printf(\"%d %d %d %d\", cast(alignof(P), i32), cast(sizeof(P), i32),\n        cast(cast(g_buf.&, uintptr) % 64, i32),\n        cast(cast(v.&, uintptr) % 32, i32));\n    return 0;\n}\n",
+        encoding="utf-8", newline="\n")
+    gen = run([str(I_EXE), "compile", str(decl_i), "-o", str(decl_c), "--no-header"])
+    if gen.returncode != 0:
+        print("decl_attribute_rule: align(N) should be legal on a value")
+        print(gen.stdout)
+        return 1
+    built = run(["clang.exe", str(decl_c), "-I", "src", "-I", "src/std", "-o", str(decl_exe)])
+    if built.returncode != 0:
+        print("decl_attribute_rule: generated C did not build")
+        print(built.stdout)
+        return 1
+    ran = run([str(decl_exe)])
+    # a field forces the record alignment; both addresses land on their boundary
+    if ran.stdout.strip() != "16 32 0 0":
+        print(f"decl_attribute_rule: expected '16 32 0 0', got {ran.stdout.strip()!r}")
+        return 1
+
+    # The three pointer spellings stay distinct, and the array element form
+    # survives -- it is the one that was kept when `const [N]T` went.
+    for src, label in (
+        ("x: *const i32 = ?;\nmain:proc()->i32 = { return 0; }\n", "pointer to const"),
+        ("x: const *i32 = ?;\nmain:proc()->i32 = { return 0; }\n", "const pointer"),
+        ("x: const *const i32 = ?;\nmain:proc()->i32 = { return 0; }\n", "const pointer to const"),
+        ("x: [2]const i32 = {};\nmain:proc()->i32 = { return 0; }\n", "array of const"),
+    ):
+        decl_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(decl_i)])
+        if res.returncode != 0:
+            print(f"decl_attribute_rule: {label!r} must stay legal")
+            print(res.stdout)
+            return 1
+    print("ok decl_attribute_rule")
+
+    # An enum member that does not fit its underlying type was silently wrong:
+    # accepted by ilang, accepted by clang at every default warning level, and
+    # then reading as one number through i32 and another through u32. Stating
+    # the underlying type (2.6) is what gave this something to check against.
+    #
+    # Partial on purpose: literals and implicit sequential values are checked,
+    # constant expressions are not, and once a value is unknown the walk stops
+    # rather than guessing at the implicit values after it.
+    range_i = TEST_DIR / "enum_ranges.i"
+    for src, ok, label in (
+        ("E: enum = { X = 3000000000, }\nmain:proc()->i32 = { return 0; }\n", False, "i32 overflow"),
+        ("E: enum[u8] = { X = 300, }\nmain:proc()->i32 = { return 0; }\n", False, "u8 overflow"),
+        ("E: enum[u8] = { X = 0x1FF, }\nmain:proc()->i32 = { return 0; }\n", False, "hex overflow"),
+        ("E: enum[u32] = { X = -1, }\nmain:proc()->i32 = { return 0; }\n", False, "negative into u32"),
+        ("E: enum[i8] = { X = -200, }\nmain:proc()->i32 = { return 0; }\n", False, "below i8"),
+        ("E: enum[u8] = { A = 254, B, C, }\nmain:proc()->i32 = { return 0; }\n", False, "an implicit value rolling past the top"),
+        ("E: enum[u32] = { X = 3000000000, }\nmain:proc()->i32 = { return 0; }\n", True, "the same value where it fits"),
+        ("E: enum = { X = -1, }\nmain:proc()->i32 = { return 0; }\n", True, "negative into i32"),
+        ("E: enum[i8] = { X = -128, }\nmain:proc()->i32 = { return 0; }\n", True, "the i8 floor"),
+        ("E: enum = { A, B, C, }\nmain:proc()->i32 = { return 0; }\n", True, "an ordinary enum"),
+        ("E: enum = { A = 1 shl 2, B, }\nmain:proc()->i32 = { return 0; }\n", True, "an expression, which ilang cannot evaluate"),
+    ):
+        range_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(range_i)])
+        if (res.returncode == 0) != ok:
+            print(f"enum_ranges: {label!r} behaved the wrong way")
+            print(res.stdout)
+            return 1
+
+    # The expression case ilang skips is caught by clang, on the real .i line,
+    # through a pragma in the generated preamble.
+    range_c = TEST_DIR / "enum_ranges.c"
+    range_i.write_text(
+        "E: enum = { A = 4000000000 + 0, }\nmain:proc()->i32 = { return 0; }\n",
+        encoding="utf-8", newline="\n")
+    gen = run([str(I_EXE), "compile", str(range_i), "-o", str(range_c), "--no-header"])
+    if gen.returncode != 0:
+        print("enum_ranges: an expression member should reach the C compiler")
+        return 1
+    built = run(["clang.exe", "-fsyntax-only", str(range_c), "-I", "src", "-I", "src/std"])
+    if built.returncode == 0 or "not representable" not in built.stdout:
+        print("enum_ranges: clang should reject the out-of-range expression")
+        print(built.stdout)
+        return 1
+    print("ok enum_ranges")
+
+    # `true` and `false` are keywords producing 1 and 0. Nothing downstream --
+    # inference, folding, emission -- had to learn about them, and b32 is
+    # int32_t, so those are exactly its values. Keywords rather than a lexer
+    # rewrite so that using one as a name reports a sensible error.
+    tf_i = TEST_DIR / "true_false.i"
+    tf_c = TEST_DIR / "true_false.c"
+    tf_exe = TEST_DIR / "true_false.exe"
+    tf_i.write_text(
+        "cinclude \"stdio.h\"\nprintf: proc[external](f: *const char, ...)->i32 = {}\ng_on: b32 = true;\nmain:proc()->i32 = {\n    f: b32 = false;\n    if (g_on and !f) { printf(\"%d %d\", g_on, f); }\n    return 0;\n}\n",
+        encoding="utf-8", newline="\n")
+    gen = run([str(I_EXE), "compile", str(tf_i), "-o", str(tf_c), "--no-header"])
+    if gen.returncode != 0:
+        print("true_false: should compile")
+        print(gen.stdout)
+        return 1
+    built = run(["clang.exe", str(tf_c), "-I", "src", "-I", "src/std", "-o", str(tf_exe)])
+    if built.returncode != 0:
+        print("true_false: generated C did not build")
+        print(built.stdout)
+        return 1
+    ran = run([str(tf_exe)])
+    if ran.stdout.strip() != "1 0":
+        print(f"true_false: expected '1 0', got {ran.stdout.strip()!r}")
+        return 1
+    tf_i.write_text("true: i32 = 5;\nmain:proc()->i32 = { return 0; }\n",
+                    encoding="utf-8", newline="\n")
+    res = run([str(I_EXE), "check", str(tf_i)])
+    if res.returncode == 0 or "expected identifier" not in res.stdout:
+        print("true_false: using a keyword as a name should report a name error")
+        print(res.stdout)
+        return 1
+    print("ok true_false")
+
     line_map_i = TEST_DIR / "generated_line_map.i"
     line_map_c = TEST_DIR / "generated_line_map.c"
     line_map_h = TEST_DIR / "generated_line_map.h"
@@ -3440,7 +4220,7 @@ main:proc()->i32 = {
     return_line = line_map_source.splitlines().index("    return value;") + 1
     line_map_path = str(line_map_i).replace("\\", "\\\\")
     line_map_comment_path = str(line_map_i)
-    expected_source_banner = f"/* Generated by I from {line_map_comment_path} (source). Do not edit. */\n"
+    expected_source_banner = f"/* Generated by ilang from {line_map_comment_path} (source). Do not edit. */\n"
     if not line_map_generated.startswith(expected_source_banner):
         print("generated_line_map: expected source banner with originating .i path")
         print(f"missing: {expected_source_banner.strip()}")
@@ -3472,7 +4252,7 @@ main:proc()->i32 = {
         print("generated_line_map: expected generated header")
         return 1
     line_map_header = line_map_h.read_text(encoding="utf-8")
-    expected_header_banner = f"/* Generated by I from {line_map_comment_path} (header). Do not edit. */\n"
+    expected_header_banner = f"/* Generated by ilang from {line_map_comment_path} (header). Do not edit. */\n"
     if not line_map_header.startswith(expected_header_banner):
         print("generated_line_map: expected header banner with originating .i path")
         print(f"missing: {expected_header_banner.strip()}")
@@ -3513,10 +4293,10 @@ main:proc()->i32 = {
     line_map_mono_param_i = TEST_DIR / "generated_line_map_mono_param_error.i"
     line_map_mono_param_c = TEST_DIR / "generated_line_map_mono_param_error.c"
     line_map_mono_param_source = r'''
-bad_generic:proc<T>(
+bad_generic:proc[external_emit]<T>(
     ok:T,
     bad:MISSING_C_MONO_PARAM_TYPE
-)->i32 = { external_emit; }
+)->i32 = {}
 
 main:proc()->i32 = {
     return bad_generic<i32>(1, cast(null, MISSING_C_MONO_PARAM_TYPE));
@@ -3551,13 +4331,20 @@ main:proc()->i32 = {
 
     line_map_error_i = TEST_DIR / "generated_line_map_error.i"
     line_map_error_c = TEST_DIR / "generated_line_map_error.c"
+    # The vehicle is a type ilang knows about but C does not: declaring it
+    # `external` says "C owns this", and no header does. ilang accepts it,
+    # external_emit puts the prototype in the generated C, and clang rejects
+    # it there -- exactly the situation #line has to map back. It used to be
+    # an *undeclared* type, but those are an ilang error now, so that never
+    # reached clang at all.
     line_map_error_i.write_text(r'''
-bad_c_proc:proc()->MissingCType = { external_emit; }
+bad_c_proc:proc[external_emit]()->MissingCType = {}
+MissingCType: struct[external] = {}
 
 main:proc()->i32 = {
     return 0;
 }
-'''.strip() + "\n", encoding="utf-8", newline="\n")
+'''.strip() + chr(10), encoding="utf-8", newline=chr(10))
     line_map_error = run([str(I_EXE), str(line_map_error_i), str(line_map_error_c)])
     if line_map_error.returncode != 0:
         print(line_map_error.stdout)
@@ -3589,7 +4376,7 @@ main:proc()->i32 = {
 bad_param_proc:proc(
     ok:i32,
     bad:MISSING_C_PARAM_TYPE
-)->i32 = { external_emit; }
+)->i32 = {}
 
 main:proc()->i32 = {
     return 0;
@@ -3769,7 +4556,7 @@ main:proc()->i32 = {{
     diamond_shared_dot_path = f"{TEST_DIR.as_posix()}/./diamond_shared.i"
     diamond_shared_i.write_text(r'''
 cinclude "stdio.h"
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 #define DIAMOND_SHARED_FLAG 1
 
 DiamondPayload:struct = {
@@ -3799,7 +4586,7 @@ diamond_right:proc(p:DiamondPayload)->i32 = {{
 }}
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     diamond_app_i.write_text(f'''
-printf: proc(fmt: *const char, ...)->i32 = {{ external; }}
+printf: proc[external](fmt: *const char, ...)->i32 = {{}}
 cinclude "stdio.h"
 import "{diamond_left_i.as_posix()}"
 import "{diamond_right_i.as_posix()}"
@@ -3849,7 +4636,7 @@ main:proc()->i32 = {{
     diamond_rev_app_c = TEST_DIR / "diamond_rev_app.c"
     diamond_rev_app_exe = TEST_DIR / "diamond_rev_app.exe"
     diamond_rev_app_i.write_text(f'''
-printf: proc(fmt: *const char, ...)->i32 = {{ external; }}
+printf: proc[external](fmt: *const char, ...)->i32 = {{}}
 cinclude "stdio.h"
 import "{diamond_right_i.as_posix()}"
 import "{diamond_left_i.as_posix()}"
@@ -3910,9 +4697,8 @@ main:proc()->i32 = {{
 cinclude "stdio.h"
 import "C:/devel/i/src/std/containers.i"
 
-NativeBox:struct<T> = {
+NativeBox:struct[external]<T> = {
     value:T;
-    external;
 }
 
 main:proc()->i32 = {
@@ -3987,9 +4773,8 @@ main:proc()->i32 = {
     native_json_i.write_text(r'''
 import "C:/devel/i/src/std/containers.i"
 
-NativeBox:struct<T> = {
+NativeBox:struct[external]<T> = {
     value:T;
-    external;
 }
 
 main:proc()->i32 = {
@@ -5192,7 +5977,7 @@ main:proc()->i32 = {
 FARPROC:alias = proc()->void;
 Callback:alias = proc(x:i32)->i32;
 
-get_proc:proc()->FARPROC = { external; }
+get_proc: proc[external]()->FARPROC = {}
 
 main:proc()->i32 = {
     cb:Callback = cast(get_proc(), Callback);
@@ -5835,11 +6620,17 @@ main:proc(p:*const i32)->i32 = {
         return 1
     print("ok type_const_call_drop")
 
+    # Spelled `[2]const i32`, not `const [2]i32`. The latter is rejected now:
+    # C qualifies an array's *element*, so the two are one type there -- and the
+    # emitter dropped the qualifier rather than moving it, so ilang enforced a
+    # const the generated C did not have. The diagnostic is simpler for it: the
+    # element type is const outright, so there is no note tracing where the
+    # constness came from.
     type_const_array_element_i = TEST_DIR / "type_const_array_element_assignment.i"
     type_const_array_element_c = TEST_DIR / "type_const_array_element_assignment.c"
     type_const_array_element_i.write_text(r'''
 main:proc()->i32 = {
-    values:const [2]i32 = {};
+    values:[2]const i32 = {};
     values[0] = 1;
     return 0;
 }
@@ -5847,8 +6638,7 @@ main:proc()->i32 = {
     type_const_array_element = run([str(I_EXE), str(type_const_array_element_i), str(type_const_array_element_c)])
     if (
         type_const_array_element.returncode == 0
-        or "type error: cannot assign to const target of type 'i32'" not in type_const_array_element.stdout
-        or "note: constness comes from lvalue base type 'const_array_2_i32'" not in type_const_array_element.stdout
+        or "type error: cannot assign to const target of type 'const_i32'" not in type_const_array_element.stdout
     ):
         print("type_const_array_element_assignment: expected const array element assignment diagnostic")
         print(type_const_array_element.stdout)
@@ -6136,7 +6926,7 @@ main:proc(value:i32)->i32 = {
     type_pointer_alias_i.write_text(r'''
 MyU32:alias = u32;
 
-take_u32s:proc(values:*u32)->void = { external; }
+take_u32s: proc[external](values:*u32)->void = {}
 
 main:proc()->i32 = {
     values:[4]MyU32 = {};
@@ -6157,7 +6947,7 @@ main:proc()->i32 = {
 MyF32:alias = f32;
 vec2:alias = [2]f32;
 
-take_f32s:proc(values:*MyF32)->void = { external; }
+take_f32s: proc[external](values:*MyF32)->void = {}
 
 main:proc()->i32 = {
     uv:vec2 = {};
@@ -6642,7 +7432,7 @@ main:proc(p:*Payload)->i32 = {
     # `external` now opts the type into checking, and leaving them off means the
     # type is opaque and cannot be field-accessed at all.
     type_external_field_i.write_text(r'''
-CMeta:struct = { external; }
+CMeta: struct[external] = {}
 
 main:proc(meta:*const CMeta)->i32 = {
     return meta[0].count;
@@ -6661,9 +7451,7 @@ main:proc(meta:*const CMeta)->i32 = {
     # Declaring the fields makes the same access legal, and still leaves the
     # definition to C.
     type_external_field_i.write_text(r'''
-CMeta:struct = {
-    external;
-    field_count:i32;
+CMeta: struct[external] = { field_count:i32;
 }
 
 main:proc(meta:*const CMeta)->i32 = {
@@ -7087,13 +7875,13 @@ main:proc()->i32 = {
     interop_i = TEST_DIR / "interop_type_compat.i"
     interop_c = TEST_DIR / "interop_type_compat.c"
     interop_i.write_text(r'''
-take_module:proc(m:HMODULE)->void = { external; }
-take_levels:proc(levels:*const D3D_FEATURE_LEVEL)->void = { external; }
-take_float:proc(v:FLOAT)->void = { external; }
-take_u8:proc(v:UINT8)->void = { external; }
+take_module: proc[external](m:HMODULE)->void = {}
+take_levels: proc[external](levels:*const D3D_FEATURE_LEVEL)->void = {}
+take_float: proc[external](v:FLOAT)->void = {}
+take_u8: proc[external](v:UINT8)->void = {}
 vec2:alias = [2]f32;
-take_vec:proc(v:vec2)->void = { external; }
-take_vec_ptr:proc(v:*vec2)->void = { external; }
+take_vec: proc[external](v:vec2)->void = {}
+take_vec_ptr: proc[external](v:*vec2)->void = {}
 
 Kind:enum = {
     None,
@@ -7626,7 +8414,7 @@ int IB_log(const char *fmt, ...);
             "IB_Callback: alias = *proc(x:i32, label:*const char)->i32;",
             "IB_DataCallback: alias = *proc(ctx:*void, data:*const void)->void;",
             "IB_VarCallback: alias = *proc(code:i32, ...)->i32;",
-            "IB_StdCallback: alias = *proc[__stdcall](value:i32)->i32;",
+            "IB_StdCallback: alias = *proc[callconv(__stdcall)](value:i32)->i32;",
             "IB_WChar: alias = u16;",
             "IB_LPCWSTR: alias = *const IB_WChar;",
             "IB_Vec3: alias = [3]f32;",
@@ -7682,7 +8470,7 @@ int IB_log(const char *fmt, ...);
             "IB_do: proc[external_emit](cb: IB_Callback, payload: *IB_Payload)->i32 = {}",
             "IB_copy: proc[external_emit](dst: *void, src: *const void, count: u32)->*void = {}",
             "IB_use_handle: proc[external_emit](handle: IB_Handle, opaque: *const IB_Opaque, defined: *IB_Defined)->i32 = {}",
-            "IB_call: proc[external_emit, __stdcall](cb: IB_StdCallback, value: i32)->i32 = {}",
+            "IB_call: proc[external_emit, callconv(__stdcall)](cb: IB_StdCallback, value: i32)->i32 = {}",
             "IB_wide: proc[external_emit](title: IB_LPCWSTR, out_title: *IB_WChar)->i32 = {}",
             "IB_use_vec: proc[external_emit](v: IB_Vec3, m: IB_Mat3, mm: IB_Mat4)->i32 = {}",
             "IB_log: proc[external_emit](fmt: *const char, ...)->i32 = {}",
@@ -7759,7 +8547,7 @@ int IB_array_use(IB_ArrayVec3 v, IB_ArrayMat3 m, IB_ArrayMat4 mm, IB_ArrayVec3s 
         ibind_array_alias_use_c = TEST_DIR / "ibind_array_alias_use.c"
         ibind_array_alias_use_exe = TEST_DIR / "ibind_array_alias_use.exe"
         ibind_array_alias_source = r'''
-printf: proc(fmt: *const char, ...)->i32 = { external; }
+printf: proc[external](fmt: *const char, ...)->i32 = {}
 cinclude "stdio.h"
 cinclude "ibind_array_alias.h"
 import "{IBIND_OUT}"
@@ -7908,16 +8696,15 @@ c:proc()->i32 = { return 2; }
             ("expected '=' after label",),
             (),
         ),
+        # A *local* still needs an initializer. A global no longer does: no
+        # initializer is how a global says C owns it. The cost is that forgetting
+        # one stops being an ilang error -- if C does not in fact define it, clang
+        # says `use of undeclared identifier` at the use site. ilang cannot tell
+        # the two apart, because a cinclude deliberately brings no names in.
         (
             "uninitialized_local_rejected",
             "main:proc()->i32 = {\n    x: i32;\n    return x;\n}\n",
             ("needs an initializer", "'= ?'"),
-            (),
-        ),
-        (
-            "uninitialized_global_rejected",
-            "g: i32;\nmain:proc()->i32 = { return g; }\n",
-            ("needs an initializer",),
             (),
         ),
         # Passthrough directives reach the generated C untouched, so an unbalanced
@@ -8070,7 +8857,7 @@ main:proc()->i32 = {
     ext_enum_c = TEST_DIR / "external_enum_member.c"
     ext_enum_i.write_text(
         "Owned:enum = { Alpha, Beta }\n"
-        "Foreign:enum = {\n    foreign_ok = 0,\n    foreign_bad = 1,\n    external;\n}\n"
+        "Foreign:enum[external] = {\n    foreign_ok = 0,\n    foreign_bad = 1,\n}\n"
         "main:proc()->i32 = {\n"
         "    a:Owned = Owned.Alpha;\n"
         "    f:Foreign = Foreign.foreign_ok;\n"
@@ -8103,7 +8890,7 @@ main:proc()->i32 = {
     count_c = TEST_DIR / "array_count_enum.c"
     count_i.write_text(
         "Kind:enum = { A, B, Count }\n"
-        "Ext:enum = {\n    EXT_N = 3,\n    external;\n}\n"
+        "Ext:enum[external] = {\n    EXT_N = 3,\n}\n"
         "g_table:[Kind.Count]i32 = {};\n"
         "g_ext:[Ext.EXT_N]i32 = {};\n"
         "g_grid:[Kind.Count][4]i32 = {};\n"
@@ -8438,35 +9225,50 @@ main:proc()->i32 = {
     # clang rejected it, pointing at generated code the author never wrote.
     # They are rejected here instead, on the real source line.
     reserved_i = TEST_DIR / "reserved_c_identifier.i"
-    for name in ("typedef", "register", "restrict", "auto", "inline", "unsigned"):
+    reserved_c = TEST_DIR / "reserved_c_identifier.c"
+    reserved_run = TEST_DIR / "reserved_c_identifier.exe"
+
+    # A C keyword ilang has no other use for is a perfectly good name; it is
+    # renamed on the way into C. Each one is run, because a rename that missed
+    # the *use* would leave the value unchanged rather than failing to build.
+    for name in ("typedef", "register", "restrict", "auto", "inline", "_Noreturn"):
         reserved_i.write_text(
+            "f:proc(" + name + ": i32)->i32 = { return " + name + " + 1; }\n"
             "main:proc()->i32 = {\n"
             f"    {name}: i32 = 1;\n"
-            f"    return {name};\n"
+            f"    return f({name}) + {name};\n"
             "}\n",
             encoding="utf-8", newline="\n",
         )
-        reserved = run([str(I_EXE), "check", str(reserved_i)])
-        if reserved.returncode == 0:
-            print(f"reserved_c_identifier: {name!r} should be rejected as a local name")
-            print(reserved.stdout)
+        gen = run([str(I_EXE), "compile", str(reserved_i), "-o", str(reserved_c), "--no-header"])
+        if gen.returncode != 0:
+            print(f"reserved_c_identifier: {name!r} should be a legal name now")
+            print(gen.stdout)
             return 1
-        if "reserved by the C backend" not in reserved.stdout:
-            print(f"reserved_c_identifier: {name!r} rejected without the expected message")
-            print(reserved.stdout)
+        built = run(["clang.exe", str(reserved_c), "-I", "src", "-I", "src/std", "-o", str(reserved_run)])
+        if built.returncode != 0:
+            print(f"reserved_c_identifier: {name!r} did not produce valid C")
+            print(built.stdout)
+            return 1
+        got = run([str(reserved_run)]).returncode
+        if got != 3:  # f(1) + 1
+            print(f"reserved_c_identifier: {name!r} expected 3, got {got}")
             return 1
 
-    # The same applies to parameters, which also become C declarations.
-    reserved_i.write_text(
-        "f:proc(typedef: i32)->i32 = { return typedef; }\n"
-        "main:proc()->i32 = { return f(1); }\n",
-        encoding="utf-8", newline="\n",
-    )
-    reserved_param = run([str(I_EXE), "check", str(reserved_i)])
-    if reserved_param.returncode == 0 or "reserved by the C backend" not in reserved_param.stdout:
-        print("reserved_c_identifier: a parameter named 'typedef' should be rejected")
-        print(reserved_param.stdout)
-        return 1
+    # `unsigned` is different: it is also an ilang type spelling that passes
+    # through to C, so renaming it would make one token mean a type in one
+    # position and a variable in another. It stays rejected.
+    for src, label in (
+        ("main:proc()->i32 = { unsigned: i32 = 1; return unsigned; }\n", "local"),
+        ("f:proc(unsigned: i32)->i32 = { return unsigned; }\n"
+         "main:proc()->i32 = { return f(1); }\n", "parameter"),
+    ):
+        reserved_i.write_text(src, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(reserved_i)])
+        if res.returncode == 0 or "reserved by the C backend" not in res.stdout:
+            print(f"reserved_c_identifier: 'unsigned' as a {label} should be rejected")
+            print(res.stdout)
+            return 1
     print("ok reserved_c_identifier")
 
     # Enum members lower to Enum_Member, so a global spelled that way collides
@@ -8498,7 +9300,7 @@ main:proc()->i32 = {
 
     # opaque, never field-accessed: still fine
     ext_i.write_text(
-        "Device: struct = { external; }\n"
+        "Device: struct[external] = {}\n"
         "use: proc(d: *Device)->*Device = { return d; }\n"
         "main: proc()->i32 = { return 0; }\n",
         encoding="utf-8", newline="\n",
@@ -8511,7 +9313,7 @@ main:proc()->i32 = {
 
     # opaque, field-accessed: rejected, with a note pointing at the declaration
     ext_i.write_text(
-        "Device: struct = { external; }\n"
+        "Device: struct[external] = {}\n"
         "main: proc()->i32 = {\n"
         "    d: *Device = null;\n"
         "    return d[0].whatever;\n"
@@ -8530,8 +9332,7 @@ main:proc()->i32 = {
 
     # declared fields: the good one passes, the typo is caught
     ext_i.write_text(
-        "Known: struct = {\n"
-        "    external;\n"
+        "Known: struct[external] = {\n"
         "    x: i32;\n"
         "    y: i32;\n"
         "}\n"
@@ -8548,8 +9349,7 @@ main:proc()->i32 = {
         return 1
 
     ext_i.write_text(
-        "Known: struct = {\n"
-        "    external;\n"
+        "Known: struct[external] = {\n"
         "    x: i32;\n"
         "}\n"
         "main: proc()->i32 = {\n"
@@ -8567,8 +9367,7 @@ main:proc()->i32 = {
     # The definition still belongs to C: declaring fields must not emit one.
     ext_c = TEST_DIR / "external_fields.c"
     ext_i.write_text(
-        "Known: struct = {\n"
-        "    external;\n"
+        "Known: struct[external] = {\n"
         "    x: i32;\n"
         "}\n"
         "main: proc()->i32 = { return 0; }\n",
@@ -8621,7 +9420,7 @@ main:proc()->i32 = {
         'cinclude "stdio.h"\n'
         'import "alpha.i"\n'
         'import "beta.i"\n'
-        "printf: proc(fmt: *const char, ...)->i32 = { external; }\n"
+        "printf: proc[external](fmt: *const char, ...)->i32 = {}\n"
         "main: proc()->i32 = {\n"
         "    s: Shared = {}; s.n = 0;\n"
         '    printf("%d\\n", alpha_val() + beta_val() + s.n);\n'

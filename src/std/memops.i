@@ -25,7 +25,7 @@ memops_arena_temp: struct = {
     used: u64;
 }
 
-memops_is_power_of_two: proc(x: usize)->bool = {
+memops_is_power_of_two: proc(x: usize)->b32 = {
     return (x & (x - 1)) == 0;
 }
 

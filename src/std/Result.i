@@ -3,7 +3,7 @@ cinclude "stdlib.h"
 import "cstd.i"
 
 Result: struct<T> = {
-    ok: bool;
+    ok: b32;
     value: T;
     error: i32;
 }
@@ -23,11 +23,11 @@ Result<T>err: proc<T>(error: i32)->Result<T> = {
     return result;
 }
 
-Result<T>is_ok: proc<T>(result: Result<T>)->bool = {
+Result<T>is_ok: proc<T>(result: Result<T>)->b32 = {
     return result.ok;
 }
 
-Result<T>is_err: proc<T>(result: Result<T>)->bool = {
+Result<T>is_err: proc<T>(result: Result<T>)->b32 = {
     return !result.ok;
 }
 

@@ -14,7 +14,7 @@ lowering, and the worst for teaching: a student's first typo produces a message
 about ISO C99 implicit declarations, in a file they did not write.
 
 > **Both settled and implemented.** `cinclude` permits nothing: every C function
-> is declared in I before it can be called (3.4). And a name resolves to its
+> is declared in ilang before it can be called (3.4). And a name resolves to its
 > nearest binding, exactly as in C, so a local shadowing a proc is caught at the
 > call (3.1). What they cost is recorded below.
 
@@ -74,8 +74,8 @@ questions about C interop rather than compiler artifacts.
 
 ### The decision — settled
 
-**A `cinclude` brings no names into I.** It arranges for a header to reach the C
-compiler and nothing more; naming a C function in I is what makes it callable.
+**A `cinclude` brings no names into ilang.** It arranges for a header to reach the C
+compiler and nothing more; naming a C function in ilang is what makes it callable.
 Chosen over the two permissive alternatives below, and the migration was smaller
 than the raw call count suggested.
 
@@ -94,7 +94,7 @@ declarations in njinn**.
   `_alloca`, `va_start`, `va_end`.
 
 An external proc emits call sites only, never a prototype, which is why
-declaring C *macros* like `va_start` costs nothing at the C level while letting I
+declaring C *macros* like `va_start` costs nothing at the C level while letting ilang
 check the calls.
 
 ### Three rules it forced
@@ -194,14 +194,14 @@ Measured, not recalled. Compiling the equivalent C:
 - **The call is an error**: `called object type 'int' is not a function or
   function pointer`.
 
-**That first reading was wrong, and worth recording as a mistake.** It said I
+**That first reading was wrong, and worth recording as a mistake.** It said ilang
 "has the same rule and is delegating the diagnostic to clang", and that §3.1 was
 "largely subsumed" by §3.4 -- that once an unresolved callee was an error, this
 would fall out nearly for free. Neither held. Checking after §3.4 landed, the
 shadow case was still accepted, because **the name resolves perfectly well**; it
 just resolves to the wrong thing. §3.4 never fires on it.
 
-I did not have C's rule. `type_check_call` consulted the proc table *before* the
+ilang did not have C's rule. `type_check_call` consulted the proc table *before* the
 scope:
 
 ```c
@@ -210,15 +210,15 @@ if (!decl) {
     TypeExpr *callee_type = type_scope_lookup(scope, call->name); // locals second
 ```
 
-So I read `helper(3)` as a call to the proc, while C read the same text as
+So ilang read `helper(3)` as a call to the proc, while C read the same text as
 calling the `i32` local beside it. The emitted C was name-for-name identical to
 the source, which makes this worse than a missing check: **the two languages
 disagreed about what the program meant.** The claim the backend rests on -- "if
-the emitted C is free of undefined behaviour, it means what the I means" -- was
+the emitted C is free of undefined behaviour, it means what the ilang means" -- was
 false here, and the failure surfaced as clang complaining about generated code.
 
 Today it fails loudly, which is survivable. The dangerous version is two
-same-named bindings that are *both* callable, where I picks one and C picks the
+same-named bindings that are *both* callable, where ilang picks one and C picks the
 other: silently wrong behaviour rather than an error.
 
 **The fix.** Prefer the scope binding over the proc table. Procs are never

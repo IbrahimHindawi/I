@@ -5,6 +5,7 @@
 // #endif
 
 #include <math.h>
+#include <stddef.h>  // ptrdiff_t, for the `ptrdiff` alias below
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -24,7 +25,29 @@ typedef int16_t i16;
 typedef int32_t i32;
 typedef int64_t i64;
 typedef size_t usize;
-typedef bool b32;
+
+/* `bool` is one byte, so a boolean family whose names carry a width could not be
+   built on it -- b8 and b32 would have been the same type twice. Each is the
+   matching fixed-width integer instead. b32 is the default boolean: it is what
+   comparisons and `and`/`or` produce, and it matches Win32's BOOL. Note these do
+   not normalise to 0/1 the way C's bool does. */
+typedef uint8_t  b8;
+typedef uint16_t b16;
+typedef int32_t  b32;
+typedef int64_t  b64;
+
+/* ilang's name for C's char: whatever width and signedness the C compiler on
+   this target gives it, which is exactly the point -- the language declines to
+   have an opinion rather than pretending the question is settled. */
+typedef char c8;
+
+/* Spellings of C's own fixed names, so a program can say what it means without
+   reaching for a cinclude. */
+typedef intptr_t  intptr;
+typedef uintptr_t uintptr;
+typedef ptrdiff_t ptrdiff;
+typedef intmax_t  intmax;
+typedef uintmax_t uintmax;
 
 typedef void *voidptr;
 // typedef i8 *str;

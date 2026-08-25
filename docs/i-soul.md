@@ -1,11 +1,11 @@
-# The Soul Of I
+# The Soul Of ilang
 
 This note answers two related questions:
 
 - what makes C feel like C
-- what kind of small example suite and book should teach I
+- what kind of small example suite and book should teach ilang
 
-The short version: I should keep C's directness and remove the boring friction
+The short version: ilang should keep C's directness and remove the boring friction
 around declarations, generics, reflection, diagnostics, and small project setup.
 
 ## What Makes C C
@@ -55,12 +55,12 @@ The bad parts of C are not the soul. They are mostly accumulated friction:
 - diagnostics often arrive after the C compiler sees generated or macro-expanded
   code
 
-I should not become "C but safer" in the abstract. That is too vague. I should be
+ilang should not become "C but safer" in the abstract. That is too vague. ilang should be
 "C, but with the common shape decisions made explicit and checkable."
 
-## What I Should Keep
+## What ilang Should Keep
 
-I should keep these C qualities:
+ilang should keep these C qualities:
 
 - explicit memory
 - predictable layout
@@ -72,26 +72,26 @@ I should keep these C qualities:
 - boring control flow
 - source you can lower to C without mystery
 
-I should improve these points:
+ilang should improve these points:
 
 - one declaration shape: `name: Type = value`
 - checked imports before generated C is handed off
-- generated headers that match the I-owned surface
+- generated headers that match the ilang-owned surface
 - generics without macro text games
 - reflection records without handwritten tables
-- good diagnostics at the I source line
+- good diagnostics at the ilang source line
 - a standard library that is just files beside `I.exe`
 - a project story where user code runs the installed compiler
 
-That gives I a simple identity:
+That gives ilang a simple identity:
 
-> I is a small systems language that keeps C's physical model, uses C as the
+> ilang is a small systems language that keeps C's physical model, uses C as the
 > backend and ABI, and makes the repeated C-era bookkeeping explicit enough for
 > tools to understand.
 
 ## The Cute Program Suite
 
-We should have a small suite of I programs outside the compiler repo. The exact
+We should have a small suite of ilang programs outside the compiler repo. The exact
 folder can be decided later. The important rule is that the suite behaves like a
 real user project: it runs `I.exe` from the installed `i-windows-x64` package and
 imports `std` from beside that executable.
@@ -157,19 +157,19 @@ The suite should be cute, but not toy-only. It should gently cross the same
 ground C programmers care about: bytes, arrays, text, files, structs, pointers,
 allocation, and separately compiled code.
 
-## The K&R-Style I Book
+## The K&R-Style ilang Book
 
 The book should be small, practical, and example-led. K&R works because each
 chapter gives the reader a working mental model and then reinforces it with
 programs.
 
-The I version should not try to be a full reference manual. It should teach the
-reader how to think in I.
+The ilang version should not try to be a full reference manual. It should teach the
+reader how to think in ilang.
 
 Working title:
 
 ```text
-The I Programming Language
+The ilang Programming Language
 ```
 
 Possible subtitle:
@@ -272,11 +272,11 @@ Each chapter should end with exercises in the old style:
 - add one enum member
 - replace a fixed buffer with an arena allocation
 - print the struct with reflection
-- call a C function instead of an I function
+- call a C function instead of an ilang function
 
 The tone should be clear and direct. No mascot. No giant framework. No fake
 enterprise app. The reader should finish the book knowing how to write a small
-real program, read the generated C when needed, and understand what I is adding
+real program, read the generated C when needed, and understand what ilang is adding
 on top of C.
 
 ## A Useful Standard For The Examples
@@ -285,7 +285,7 @@ An example belongs in the suite if it teaches one durable idea:
 
 - how memory is shaped
 - how declarations work
-- how I lowers to C
+- how ilang lowers to C
 - how imports and `std` work
 - how to call C
 - how generic code becomes concrete

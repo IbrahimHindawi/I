@@ -57,14 +57,6 @@ print: proc<char>(x: char)->void = {
     printf("%c", x);
 }
 
-print: proc<bool>(x: bool)->void = {
-    if (x) {
-        print_cstr("true");
-    } else {
-        print_cstr("false");
-    }
-}
-
 print: proc<b32>(x: b32)->void = {
     if (x) {
         print_cstr("true");

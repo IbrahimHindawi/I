@@ -3,7 +3,7 @@ cinclude "stdlib.h"
 import "cstd.i"
 
 Option: struct<T> = {
-    has_value: bool;
+    has_value: b32;
     value: T;
 }
 
@@ -20,11 +20,11 @@ Option<T>none: proc<T>()->Option<T> = {
     return option;
 }
 
-Option<T>is_some: proc<T>(option: Option<T>)->bool = {
+Option<T>is_some: proc<T>(option: Option<T>)->b32 = {
     return option.has_value;
 }
 
-Option<T>is_none: proc<T>(option: Option<T>)->bool = {
+Option<T>is_none: proc<T>(option: Option<T>)->b32 = {
     return !option.has_value;
 }
 

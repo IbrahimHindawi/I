@@ -58,6 +58,6 @@ Queue<T>destroy: proc<T>(arena: *memops_arena, queue: *Queue<T>)->void = {
     }
 }
 
-Queue<T>is_empty: proc<T>(queue: *Queue<T>)->bool = {
+Queue<T>is_empty: proc<T>(queue: *Queue<T>)->b32 = {
     return queue == null or queue[0].length == 0;
 }

@@ -76,7 +76,7 @@ Map<T>set_entry: proc<T>(arena: *memops_arena, entries: *MapEntry<T>, border: us
     return stored_key;
 }
 
-Map<T>expand: proc<T>(arena: *memops_arena, hashmap: *Map<T>)->bool = {
+Map<T>expand: proc<T>(arena: *memops_arena, hashmap: *Map<T>)->b32 = {
     new_capacity: usize = hashmap[0].border * 2;
     if (new_capacity < hashmap[0].border) {
         return 0;
@@ -170,7 +170,7 @@ MapIterator<T>create: proc<T>(arena: *memops_arena, hashmap: *Map<T>)->MapIterat
     return it;
 }
 
-MapIterator<T>next: proc<T>(arena: *memops_arena, it: *MapIterator<T>)->bool = {
+MapIterator<T>next: proc<T>(arena: *memops_arena, it: *MapIterator<T>)->b32 = {
     hashmap: *Map<T> = it[0]._hashmap;
     if (hashmap == null) {
         return 0;

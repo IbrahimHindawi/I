@@ -61,7 +61,7 @@ make the same call. *Ratified.*
 **Bitwise operators now bind tighter than comparison.** C binds `&` `^` `|`
 looser than `==` only because early C had no `&&`; by the time it did, changing
 it would have broken existing code, and Ritchie wrote it up as a known mistake.
-Rust, Zig, Go and Python all fixed it. I does not consume C source, so it owed
+Rust, Zig, Go and Python all fixed it. ilang does not consume C source, so it owed
 nothing to that compatibility. Verified safe by regenerating the whole njinn
 engine and diffing: **0 changed lines across 28,301** — nothing relied on the old
 grouping, because people parenthesise `(a & b) == c` by reflex. *Ratified.*
@@ -108,7 +108,7 @@ shadowed — suggests it may not be deliberate. Three options:
 ### Identifier restriction versus mangling
 
 C keywords are currently **rejected**. The alternative is to mangle them on
-emission so that any I identifier is legal regardless of what C reserves.
+emission so that any ilang identifier is legal regardless of what C reserves.
 
 Rejecting was chosen because it is reversible — relaxing a restriction later is
 backward compatible, the reverse is not — and because mangling every identifier
@@ -131,7 +131,7 @@ would let C re-parse `6 & 4 == 4` back into the old grouping, silently.
 
 An earlier proposal to emit unparenthesised C for legibility is therefore
 withdrawn for binary operators. A narrower version remains possible: omit
-parentheses only where I's precedence agrees with C's, keeping them where the
+parentheses only where ilang's precedence agrees with C's, keeping them where the
 tables now differ. That is cheap to state and fiddly to maintain, and it would
 need `012-precedence-and-parens.i` extended to cover every operator pair.
 
@@ -144,7 +144,7 @@ and written into the language docs, or changed.
 
 ### Documentation drift
 
-`docs/verification.md` and `docs/i-soul.md` both describe I as following C's
+`docs/verification.md` and `docs/i-soul.md` both describe ilang as following C's
 operator precedence. That is now false and should be corrected before it
 misleads a reader — including a student.
 
@@ -172,6 +172,68 @@ Constructs with no discriminating test, roughly in the order worth doing:
 - **`static`** — internal linkage, and statics inside procs if they exist
 - **recursion depth and large aggregates** returned by value
 - **string and character literals** — escapes, embedded nulls, concatenation
+
+## Still accepted, then rejected by clang
+
+Found by probing rather than by a bug report, so none of these had bitten yet.
+All are the same shape this document is about: ilang says the program is fine
+and the C compiler disagrees, pointing at generated code. Two are fixed; one
+turned out to be a deliberate inheritance rather than a defect, which is why
+the entry is still here.
+
+### ~~A type containing itself by value~~ *(fixed)*
+
+> **Fixed.** One walk over type references, rooted at every struct and every
+> alias, reporting the path it found:
+>
+>     error: type contains itself by value, so it has no size;
+>            use a pointer to break the cycle 'B -> A'
+>
+> It turned out to be six shapes rather than the two that were obvious, all one
+> root cause -- direct, through an array, mutual, through an alias, through an
+> anonymous member, and generic. The walk follows whatever needs a *complete*
+> type and stops at whatever does not.
+>
+> The half that matters as much: a self-pointer, a generic self-pointer, a
+> nested generic argument (`Pair<Pair<i32, i32>, i32>`) and a type shared by two
+> others all stay legal. A check that rejected a self-pointer would be worse
+> than no check, since linked lists are the common case. njinn's 165 records and
+> 24 aliases build unchanged.
+>
+> **Deliberate false negative:** generic type *arguments* are not walked, only
+> the base name. Walking them would be unsound without substituting them into
+> the generic's fields -- `P: struct = { items: Vec<P>; }` is legal whenever
+> `Vec` holds its elements behind a pointer, and rejecting it would be a false
+> positive on correct code. A generic that does hold its argument by value is
+> still missed, which is where this already was.
+>
+> Covered by `type_cycles`, which asserts the accepted list as well as the
+> rejected one, and checks the diagnostic names the path. Mutation-tested by
+> disabling the call.
+
+### A non-void proc with no return *(not a defect: decided)*
+
+    f: proc()->i32 = { }
+    f: proc(n: i32)->i32 = { if (n > 0) { return 1; } }
+    f: proc(n: i32)->i32 = { switch (n) { case 0: { return 1; } } }
+
+All three are accepted, and stay accepted. This was briefly implemented as an
+error and reverted: ilang keeps C's rule here, like the rest of
+[`safety.md`](safety.md). clang warns by default with `-Wreturn-type` and
+`#line` puts the warning on the real source line, which is the whole bargain --
+C does the checking ilang has deliberately not taken on.
+
+Listed here only so it is not "found" a third time.
+
+### ~~A zero-length array~~ *(fixed)*
+
+> **Fixed.** `xs: [0]i32` is now *array length must be greater than zero*. Zero
+> uses across njinn, `std` and the test suite, so nothing had to change; the C
+> trick it exists for, a flexible array member, has its own spelling.
+>
+> The related case stands: guarding every field of a struct out with `#ifdef`
+> leaves an empty struct, which ISO C also forbids and clang sizes at 4 here
+> without a word. That one needs a program to go looking for it.
 
 ## Coverage criteria
 

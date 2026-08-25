@@ -1,5 +1,5 @@
 TortureMaybe:struct<T> = {
-    has_value:bool;
+    has_value:b32;
     value:T;
 }
 

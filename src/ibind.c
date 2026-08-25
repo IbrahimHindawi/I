@@ -228,9 +228,11 @@ static char *emit_proc_type_with_names(CXType fn_type, int as_pointer, char **pa
     sb_append(&sb, "proc");
     const char *callconv = calling_conv_name(fn_type);
     if (callconv) {
-        sb_append(&sb, "[");
+        /* Bare names in the attribute slot are a closed set now, so a calling
+           convention has to say what it is. */
+        sb_append(&sb, "[callconv(");
         sb_append(&sb, callconv);
-        sb_append(&sb, "]");
+        sb_append(&sb, ")]");
     }
     sb_append(&sb, "(");
     int argc = clang_getNumArgTypes(fn_type);
@@ -783,7 +785,7 @@ static void emit_function(CXCursor c, FILE *out) {
     emit_opaque_record_decl_for_type(clang_getResultType(fn), out);
     const char *callconv = calling_conv_name(fn);
     if (callconv) {
-        fprintf(out, "%s: proc[external_emit, %s](", clean, callconv);
+        fprintf(out, "%s: proc[external_emit, callconv(%s)](", clean, callconv);
     } else {
         fprintf(out, "%s: proc[external_emit](", clean);
     }

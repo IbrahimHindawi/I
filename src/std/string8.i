@@ -23,11 +23,11 @@ string8_ascii_lower: proc(c: u8)->u8 = {
     return c;
 }
 
-string8_ascii_is_space: proc(c: u8)->bool = {
+string8_ascii_is_space: proc(c: u8)->b32 = {
     return c == 32 or c == 9 or c == 10 or c == 13 or c == 11 or c == 12;
 }
 
-path_is_sep: proc(c: u8)->bool = {
+path_is_sep: proc(c: u8)->b32 = {
     return c == 47 or c == 92;
 }
 
@@ -240,7 +240,7 @@ string8_read_file: proc(arena: *memops_arena, filename: *const char)->string8 = 
     return s;
 }
 
-string8_equals: proc(a: *const string8, b: *const string8)->bool = {
+string8_equals: proc(a: *const string8, b: *const string8)->b32 = {
     if (a == null or b == null) {
         return a == b;
     }
@@ -253,7 +253,7 @@ string8_equals: proc(a: *const string8, b: *const string8)->bool = {
     return memcmp(a[0].data, b[0].data, a[0].length) == 0;
 }
 
-string8_equals_cstr: proc(a: *const string8, cstr: *const char)->bool = {
+string8_equals_cstr: proc(a: *const string8, cstr: *const char)->b32 = {
     if (a == null or cstr == null) {
         return 0;
     }
@@ -291,7 +291,7 @@ string8_slice: proc(s: string8, start: u64, count: u64)->string8slice = {
     return string8slice_sub(string8slice_from_string8(s), start, count);
 }
 
-string8slice_equals: proc(a: string8slice, b: string8slice)->bool = {
+string8slice_equals: proc(a: string8slice, b: string8slice)->b32 = {
     if (a.length != b.length) {
         return 0;
     }
@@ -301,7 +301,7 @@ string8slice_equals: proc(a: string8slice, b: string8slice)->bool = {
     return memcmp(a.data, b.data, a.length) == 0;
 }
 
-string8slice_equals_cstr: proc(s: string8slice, cstr: *const char)->bool = {
+string8slice_equals_cstr: proc(s: string8slice, cstr: *const char)->b32 = {
     if (cstr == null) {
         return 0;
     }
@@ -349,7 +349,7 @@ string8_trim: proc(s: string8)->string8slice = {
     return string8slice_trim(string8slice_from_string8(s));
 }
 
-string8slice_starts_with: proc(s: string8slice, prefix: string8slice)->bool = {
+string8slice_starts_with: proc(s: string8slice, prefix: string8slice)->b32 = {
     if (prefix.length > s.length) {
         return 0;
     }
@@ -362,11 +362,11 @@ string8slice_starts_with: proc(s: string8slice, prefix: string8slice)->bool = {
     return memcmp(s.data, prefix.data, prefix.length) == 0;
 }
 
-string8_starts_with: proc(s: string8, prefix: string8slice)->bool = {
+string8_starts_with: proc(s: string8, prefix: string8slice)->b32 = {
     return string8slice_starts_with(string8slice_from_string8(s), prefix);
 }
 
-string8slice_ends_with: proc(s: string8slice, suffix: string8slice)->bool = {
+string8slice_ends_with: proc(s: string8slice, suffix: string8slice)->b32 = {
     if (suffix.length > s.length) {
         return 0;
     }
@@ -379,7 +379,7 @@ string8slice_ends_with: proc(s: string8slice, suffix: string8slice)->bool = {
     return memcmp(s.data + s.length - suffix.length, suffix.data, suffix.length) == 0;
 }
 
-string8_ends_with: proc(s: string8, suffix: string8slice)->bool = {
+string8_ends_with: proc(s: string8, suffix: string8slice)->b32 = {
     return string8slice_ends_with(string8slice_from_string8(s), suffix);
 }
 
@@ -403,15 +403,15 @@ string8_find: proc(s: string8, needle: string8slice)->i64 = {
     return string8slice_find(string8slice_from_string8(s), needle);
 }
 
-string8slice_contains: proc(s: string8slice, needle: string8slice)->bool = {
+string8slice_contains: proc(s: string8slice, needle: string8slice)->b32 = {
     return string8slice_find(s, needle) >= 0;
 }
 
-string8_contains: proc(s: string8, needle: string8slice)->bool = {
+string8_contains: proc(s: string8, needle: string8slice)->b32 = {
     return string8_find(s, needle) >= 0;
 }
 
-string8slice_eq_ignore_case: proc(a: string8slice, b: string8slice)->bool = {
+string8slice_eq_ignore_case: proc(a: string8slice, b: string8slice)->b32 = {
     if (a.length != b.length) {
         return 0;
     }
@@ -429,7 +429,7 @@ string8slice_eq_ignore_case: proc(a: string8slice, b: string8slice)->bool = {
     return 1;
 }
 
-string8_eq_ignore_case: proc(a: string8, b: string8slice)->bool = {
+string8_eq_ignore_case: proc(a: string8, b: string8slice)->b32 = {
     return string8slice_eq_ignore_case(string8slice_from_string8(a), b);
 }
 

@@ -1,5 +1,5 @@
 TortureResult:struct<T> = {
-    ok:bool;
+    ok:b32;
     value:T;
 }
 

@@ -108,12 +108,160 @@ form.
 
 **Attributes are comma-separated inside one bracket**, not stacked brackets.
 
+## Where the slot sits
+
+The declaration grammar is
+
+    name : kind [attributes] <generics> (params) -> ReturnType = { body }
+
+so attributes come **before** the type parameters, not after:
+
+    f:   proc[external]<T>(x: T)->i32 = {}
+    Box: struct[external]<T> = {}
+
+**Variables have no attribute slot.** Of the six attribute names only
+`external` ever meant anything on one -- `packed`, `align(N)`, `callconv(...)`,
+`no_layout_check` and `external_emit` parsed and were silently dropped. And the
+slot would have to sit directly after the colon, where `[` already begins an
+array type, so `[external]` and `[Kind.Count]` needed a lookahead that existed
+to support the single attribute that worked.
+
+A global with **no initializer** says it instead:
+
+    g_atlas:  const Atlas;      // C owns it -- nothing is emitted
+    g_table:  [4]i32 = {};      // ilang owns it, zeroed
+    g_x:      i32 = ?;          // ilang owns it, indeterminate
+
+The form was an error until now, so nothing had to move. It reads the way the
+rest of the language already works: if you did not say how it is initialized,
+you are not the one defining it.
+
+**The cost, stated plainly:** forgetting an initializer used to be an ilang
+error and is now a declaration that C is expected to satisfy. If C does not,
+clang says *use of undeclared identifier* at the use site. ilang cannot tell the
+two apart, because a `cinclude` deliberately brings no names into scope -- the
+same trade `struct[external]` already makes. Locals still require an
+initializer, since a local cannot be owned by C.
+
+## One spelling, not two
+
+`external;` written inside a body is **rejected**. The attribute is the only
+form:
+
+    f: proc[external](fmt: *const char, ...)->i32 = {}
+    X: struct[external] = {}
+    E: enum[external] = { A, }
+
+    // and with generic parameters, which come first:
+    f: proc<T>[external](x: T)->i32 = {}
+    Box: struct<T>[external] = {}
+
+The body form existed so 347 declarations could migrate a file at a time rather
+than in one commit. That migration is done, and keeping it meant four separate
+parsers -- struct bodies, struct fields, enum items and proc bodies -- each
+recognising the same thing independently and each able to drift. Covered by
+`external_spelling`.
+
+Globals are covered by the no-initializer rule above; `g: const T = external;`
+is rejected.
+
+## `external` is not C's `extern`
+
+Worth stating plainly, because conflating them produced a real bug.
+
+**`external` means: C owns this definition; here is its shape so ilang can
+type-check against it.** It is a fact about where the thing lives, not a
+linkage specifier. So an external declaration emits **nothing** -- the
+declaration C needs already arrived through the header the program `cinclude`d.
+That is true of `struct[external]`, of `enum[external]`, of `proc[external]`,
+and now of `g: [external] T;` as well.
+
+**C's `extern` is a linkage specifier**, and asserting it is a decision about
+how the symbol is resolved. ilang emitted `extern T g;` for external globals,
+which made them the only kind that emitted anything, and it asserted *external*
+linkage over definitions C is free to have made `static`. njinn has exactly
+that: `gui_atlas_meta.h` defines both atlases `static`. It happened to work,
+because a prior internal-linkage declaration wins (C11 6.2.2p4) and the header
+is included first -- but the ordering was load-bearing and nothing enforced it,
+and clang diagnoses neither arrangement.
+
+Emitting nothing removes the question: whatever linkage C gave the definition is
+the linkage the reference gets. Covered by `external_globals`, which asserts the
+declaration is *absent* from both the generated C and the header.
+
+## Where an attribute may appear
+
+> **Implemented.** Covered by `decl_attribute_rule`, which checks the rejected
+> positions, checks the allowed one *aligns* rather than merely parsing, and is
+> mutation-tested by dropping the emission.
+
+**An attribute attaches to a declaration. It never attaches to a type use.**
+
+That single rule decides every position, and it is what makes the two written
+forms -- after a head keyword, or after a whole type -- one idea rather than two:
+
+    x: i32[attrib] = 0                 ok     declares x
+    x: [4]*const T[attrib] = {}        ok     still declares x; outermost
+    P: struct[attrib]<T> = {}          ok     declares P
+    P: struct = { f: i32[attrib]; }    ok     declares a field
+    f: proc[attrib](a: i32)->i32 = {}  ok     declares f
+
+    x: *proc(a: i32)->i32[attrib]      error  a return type is a use
+    x: [4](i32[attrib])                error  an element type is a use
+    x: *(T[attrib])                    error  a pointee is a use
+    y: Box<i32[attrib]>                error  a generic argument is a use
+
+So an attribute is always outermost in the thing it modifies, and there is
+exactly one per declaration.
+
+**On a value, `align(N)` is the only attribute that means anything.** `external`
+is answered by a global having no initializer; `packed`, `no_layout_check` and
+`callconv` describe records and procs. Each of those is rejected by name rather
+than accepted and ignored -- `[align(16)] i32` used to parse and emit a plainly
+unaligned `i32`, which is the failure this whole rule exists to prevent.
+
+`align(N)` on a variable or a field lowers to C11 `_Alignas(N)`, which is the
+declaration-level spelling; records keep `__attribute__((aligned))` on the tag,
+because a tag is not a declaration.
+
+### An alias takes no attribute
+
+    Handle: alias = i32[attrib];       error
+
+An alias does not declare a type; it gives an existing one a second name. There
+is no declaration for the attribute to modify, and letting it through would
+raise a question with no good answer -- whether `Handle` or `i32` is the thing
+being modified.
+
+### A parameter takes no attribute
+
+    f: proc(a: i32[attrib])->i32 = {}  error
+    x: *proc(a: i32[attrib])->i32      error
+
+Both, in the end. A parameter would only ever want a *type qualifier* -- `const`,
+`restrict`, nullability -- and those belong to the type, which already carries
+them. The one real parameter attribute in C is `unused`, and that is warning
+suppression, a build concern rather than a language one.
+
+Ruling them out in both places also removes the only context-dependent case in
+the rule: a parameter would otherwise have been a declaration inside a proc
+declaration and a bare name inside a proc type, which is a distinction nobody
+should have to be taught.
+
+Worth noting the second line needs the `*`: C has no object of function type, so
+a variable holding a proc is a pointer to one. A bare `x: proc(a: i32)->i32` is
+an error on its own account -- read as a proc declaration it is missing its
+`= { }` body, and read as a variable type it is an object of function type.
+
 ## Still open
 
-**Do attributes take arguments?** The parser reads bare identifiers, so
-`struct[align(16)]` and `enum[u32]` are not yet expressible. Those are the next
-users of the slot -- see §7 and §2.6 in `shape.md` -- and they are what decides
-how far it generalises.
+Nothing. **Attributes take arguments**, which was the last question here:
+`struct[align(16)]`, `enum[u32]` and `proc[callconv(NAME)]` all parse and carry
+their meaning, and the name is checked against a closed list -- an unrecognised
+one used to fall through to "calling convention", so `struct[externl]` silently
+meant *not external*. Covered by `decl_attributes_known`, which asserts the
+resulting sizes rather than only that the emitted C compiles: `packed` that does
+not pack compiles perfectly well.
 
 ## What may go in the slot
 
@@ -121,7 +269,7 @@ Worth fixing while it is still empty, because both Rust's `#[...]` and C++'s
 attributes sprawled:
 
 > **An attribute may change how a declaration is lowered. It may not change what
-> the declaration means in I.**
+> the declaration means in ilang.**
 
 `external` (do not emit), `packed` and `align` (layout), `WINCALL` (ABI) all
 satisfy this. `inline` and `deprecated` are the first two that would need
@@ -134,7 +282,7 @@ what to argue with when they come up.
 that already exists. It neither costs nor buys any C transparency.
 
 The transparency question was already settled separately: a `cinclude` brings no
-names into I, so every C function is declared before it can be called. See
+names into ilang, so every C function is declared before it can be called. See
 `name-resolution.md`. Types have not had the same treatment yet, and that is the
 actual open gap:
 
@@ -143,7 +291,7 @@ actual open gap:
 | used **only** behind a pointer -- layout never needed | 31 |
 | used **by value** -- layout genuinely needed | 85 |
 
-All 116 are declared nowhere in I today; they arrive through `cinclude` and pass
+All 116 are declared nowhere in ilang today; they arrive through `cinclude` and pass
 through unexamined. That is the type-level twin of the undeclared-call hole, and
 closing it is what "everything must be declared" actually costs.
 
@@ -176,11 +324,11 @@ naming and ergonomics, or triaging what libclang could not express.
 libclang can see a function-like macro but cannot type it, and `d3d11.h`'s COM
 calls are macros: `ID3D11Device_CreateBuffer(dev, ...)`. njinn already handles
 this by declaring them as external procs in `externs.i`. That works because **an
-external proc emits call sites only, never a prototype**, so I type-checks the
+external proc emits call sites only, never a prototype**, so ilang type-checks the
 call and cpp expands the macro underneath. The same trick covers `va_start`,
 `va_end` and `_alloca`.
 
-Separately, function-like `#define`s written in *I* source are callable with an
+Separately, function-like `#define`s written in *ilang* source are callable with an
 unknown signature; see `name-resolution.md`. That covers `gin_require` and
 friends, not the header's macros.
 
@@ -195,14 +343,14 @@ hand-written bindings, and a proposal to flip everything to `external` and keep
 ### Layout verification -- implemented
 
 Nothing verified that a declared `external` layout matched C's real one. If a
-header reordered a member, or a `long` was the wrong width on this target, I
+header reordered a member, or a `long` was the wrong width on this target, ilang
 type-checked field access happily against a layout that was a lie, and the
 result was wrong bytes rather than a diagnostic. Procs at least have a prototype
 C can compare against; records had nothing.
 
 The compiler cannot assert `sizeof(X) == 24` -- it does not compute C layouts,
 deferring to C everywhere including reflection. So it emits a **shadow record**
-built from what I was told and asks C to compare the two:
+built from what ilang was told and asks C to compare the two:
 
     typedef struct { i32 x; i32 y; } i_layout_lc_point;
     _Static_assert(sizeof(lc_point) == sizeof(i_layout_lc_point), "...size");
