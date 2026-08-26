@@ -98,14 +98,14 @@ reflect: struct[external] = {
 // Kind
 // ---------------------------------------------------------------------------
 
-reflect_kind_name: proc(kind: i32)->*const char = {
+reflect_kind_name: proc(kind: i32) -> *const char = {
     if (kind == reflect_kind_struct) { return "struct"; }
     if (kind == reflect_kind_union) { return "union"; }
     if (kind == reflect_kind_enum) { return "enum"; }
     return "unknown";
 }
 
-reflect_type_kind_name: proc(kind: i32)->*const char = {
+reflect_type_kind_name: proc(kind: i32) -> *const char = {
     if (kind == reflect_field_kind_name) { return "name"; }
     if (kind == reflect_field_kind_ptr) { return "ptr"; }
     if (kind == reflect_field_kind_generic) { return "generic"; }
@@ -114,15 +114,15 @@ reflect_type_kind_name: proc(kind: i32)->*const char = {
     return "unknown";
 }
 
-reflect_is_struct: proc(type: *const reflect)->b32 = {
+reflect_is_struct: proc(type: *const reflect) -> b32 = {
     return type != null and type[0].kind == reflect_kind_struct;
 }
 
-reflect_is_union: proc(type: *const reflect)->b32 = {
+reflect_is_union: proc(type: *const reflect) -> b32 = {
     return type != null and type[0].kind == reflect_kind_union;
 }
 
-reflect_is_enum: proc(type: *const reflect)->b32 = {
+reflect_is_enum: proc(type: *const reflect) -> b32 = {
     return type != null and type[0].kind == reflect_kind_enum;
 }
 
@@ -136,23 +136,23 @@ reflect_is_enum: proc(type: *const reflect)->b32 = {
 // outright and these are not needed.
 // ---------------------------------------------------------------------------
 
-reflect_fields: proc(type: *const reflect)->*const reflect_field = {
+reflect_fields: proc(type: *const reflect) -> *const reflect_field = {
     if (type == null) { return null; }
     if (type[0].kind != reflect_kind_struct and type[0].kind != reflect_kind_union) { return null; }
     return type[0].variant.fields;
 }
 
-reflect_values: proc(type: *const reflect)->*const reflect_value = {
+reflect_values: proc(type: *const reflect) -> *const reflect_value = {
     if (type == null or type[0].kind != reflect_kind_enum) { return null; }
     return type[0].variant.values;
 }
 
-reflect_field_count: proc(type: *const reflect)->u64 = {
+reflect_field_count: proc(type: *const reflect) -> u64 = {
     if (reflect_fields(type) == null) { return 0; }
     return type[0].count;
 }
 
-reflect_value_count: proc(type: *const reflect)->u64 = {
+reflect_value_count: proc(type: *const reflect) -> u64 = {
     if (reflect_values(type) == null) { return 0; }
     return type[0].count;
 }
@@ -161,7 +161,7 @@ reflect_value_count: proc(type: *const reflect)->u64 = {
 // Fields
 // ---------------------------------------------------------------------------
 
-reflect_cstr_equal: proc(a: *const char, b: *const char)->b32 = {
+reflect_cstr_equal: proc(a: *const char, b: *const char) -> b32 = {
     i: u64 = 0;
     if (a == null or b == null) { return 0; }
     while (a[i] != 0 and b[i] != 0) {
@@ -171,13 +171,13 @@ reflect_cstr_equal: proc(a: *const char, b: *const char)->b32 = {
     return a[i] == 0 and b[i] == 0;
 }
 
-reflect_field_at: proc(type: *const reflect, index: u64)->*const reflect_field = {
+reflect_field_at: proc(type: *const reflect, index: u64) -> *const reflect_field = {
     fields: *const reflect_field = reflect_fields(type);
     if (fields == null or index >= type[0].count) { return null; }
     return fields[index].&;
 }
 
-reflect_find_field: proc(type: *const reflect, name: *const char)->*const reflect_field = {
+reflect_find_field: proc(type: *const reflect, name: *const char) -> *const reflect_field = {
     fields: *const reflect_field = reflect_fields(type);
     if (fields == null or name == null) { return null; }
     for (i: u64 = 0; i < type[0].count; i += 1) {
@@ -186,7 +186,7 @@ reflect_find_field: proc(type: *const reflect, name: *const char)->*const reflec
     return null;
 }
 
-reflect_find_field_index: proc(type: *const reflect, name: *const char, fallback: u64)->u64 = {
+reflect_find_field_index: proc(type: *const reflect, name: *const char, fallback: u64) -> u64 = {
     fields: *const reflect_field = reflect_fields(type);
     if (fields == null or name == null) { return fallback; }
     for (i: u64 = 0; i < type[0].count; i += 1) {
@@ -198,12 +198,12 @@ reflect_find_field_index: proc(type: *const reflect, name: *const char, fallback
 // The record for a field's own type, so a walk can recurse instead of stopping
 // at the type-name string. Null when the field's type has no table: a builtin,
 // an external type, a proc.
-reflect_field_info: proc(field: *const reflect_field)->*const reflect = {
+reflect_field_info: proc(field: *const reflect_field) -> *const reflect = {
     if (field == null) { return null; }
     return field[0].info;
 }
 
-reflect_find_field_info: proc(type: *const reflect, name: *const char)->*const reflect = {
+reflect_find_field_info: proc(type: *const reflect, name: *const char) -> *const reflect = {
     return reflect_field_info(reflect_find_field(type, name));
 }
 
@@ -211,13 +211,13 @@ reflect_find_field_info: proc(type: *const reflect, name: *const char)->*const r
 // Enum values
 // ---------------------------------------------------------------------------
 
-reflect_value_at: proc(type: *const reflect, index: u64)->*const reflect_value = {
+reflect_value_at: proc(type: *const reflect, index: u64) -> *const reflect_value = {
     values: *const reflect_value = reflect_values(type);
     if (values == null or index >= type[0].count) { return null; }
     return values[index].&;
 }
 
-reflect_find_value_by_name: proc(type: *const reflect, name: *const char)->*const reflect_value = {
+reflect_find_value_by_name: proc(type: *const reflect, name: *const char) -> *const reflect_value = {
     values: *const reflect_value = reflect_values(type);
     if (values == null or name == null) { return null; }
     for (i: u64 = 0; i < type[0].count; i += 1) {
@@ -226,7 +226,7 @@ reflect_find_value_by_name: proc(type: *const reflect, name: *const char)->*cons
     return null;
 }
 
-reflect_find_value_by_value: proc(type: *const reflect, value: i32)->*const reflect_value = {
+reflect_find_value_by_value: proc(type: *const reflect, value: i32) -> *const reflect_value = {
     values: *const reflect_value = reflect_values(type);
     if (values == null) { return null; }
     for (i: u64 = 0; i < type[0].count; i += 1) {
@@ -235,12 +235,12 @@ reflect_find_value_by_value: proc(type: *const reflect, value: i32)->*const refl
     return null;
 }
 
-reflect_name_from_value: proc(type: *const reflect, value: i32)->*const char = {
+reflect_name_from_value: proc(type: *const reflect, value: i32) -> *const char = {
     found: *const reflect_value = reflect_find_value_by_value(type, value);
     return found != null ? found[0].name : null;
 }
 
-reflect_value_from_name: proc(type: *const reflect, name: *const char, fallback: i32)->i32 = {
+reflect_value_from_name: proc(type: *const reflect, name: *const char, fallback: i32) -> i32 = {
     found: *const reflect_value = reflect_find_value_by_name(type, name);
     return found != null ? found[0].value : fallback;
 }
@@ -249,22 +249,22 @@ reflect_value_from_name: proc(type: *const reflect, name: *const char, fallback:
 // Field shape
 // ---------------------------------------------------------------------------
 
-reflect_field_is_pointer: proc(field: *const reflect_field)->b32 = {
+reflect_field_is_pointer: proc(field: *const reflect_field) -> b32 = {
     return field != null and field[0].pointer_depth > 0;
 }
 
-reflect_field_is_array: proc(field: *const reflect_field)->b32 = {
+reflect_field_is_array: proc(field: *const reflect_field) -> b32 = {
     if (field == null) { return 0; }
     return field[0].kind == reflect_field_kind_array or field[0].array_count > 0;
 }
 
-reflect_field_is_generic: proc(field: *const reflect_field)->b32 = {
+reflect_field_is_generic: proc(field: *const reflect_field) -> b32 = {
     if (field == null) { return 0; }
     if (field[0].kind == reflect_field_kind_generic) { return 1; }
     return field[0].generic_arg_type != null and field[0].generic_arg_type[0] != 0;
 }
 
-reflect_count_fields_with_kind: proc(type: *const reflect, kind: i32)->u64 = {
+reflect_count_fields_with_kind: proc(type: *const reflect, kind: i32) -> u64 = {
     fields: *const reflect_field = reflect_fields(type);
     count: u64 = 0;
     if (fields == null) { return 0; }
@@ -274,7 +274,7 @@ reflect_count_fields_with_kind: proc(type: *const reflect, kind: i32)->u64 = {
     return count;
 }
 
-reflect_find_field_with_kind: proc(type: *const reflect, kind: i32)->*const reflect_field = {
+reflect_find_field_with_kind: proc(type: *const reflect, kind: i32) -> *const reflect_field = {
     fields: *const reflect_field = reflect_fields(type);
     if (fields == null) { return null; }
     for (i: u64 = 0; i < type[0].count; i += 1) {
@@ -285,7 +285,7 @@ reflect_find_field_with_kind: proc(type: *const reflect, kind: i32)->*const refl
 
 // `after` walks the matches in order: pass null for the first, then the previous
 // result for each one after it.
-reflect_next_field_with_kind: proc(type: *const reflect, kind: i32, after: *const reflect_field)->*const reflect_field = {
+reflect_next_field_with_kind: proc(type: *const reflect, kind: i32, after: *const reflect_field) -> *const reflect_field = {
     fields: *const reflect_field = reflect_fields(type);
     start: u64 = 0;
     if (fields == null) { return null; }
@@ -300,7 +300,7 @@ reflect_next_field_with_kind: proc(type: *const reflect, kind: i32, after: *cons
     return null;
 }
 
-reflect_field_index: proc(type: *const reflect, field: *const reflect_field, fallback: u64)->u64 = {
+reflect_field_index: proc(type: *const reflect, field: *const reflect_field, fallback: u64) -> u64 = {
     fields: *const reflect_field = reflect_fields(type);
     if (fields == null or field == null) { return fallback; }
     for (i: u64 = 0; i < type[0].count; i += 1) {
@@ -313,12 +313,12 @@ reflect_field_index: proc(type: *const reflect, field: *const reflect_field, fal
 // Offsets
 // ---------------------------------------------------------------------------
 
-reflect_field_end_offset: proc(field: *const reflect_field)->u64 = {
+reflect_field_end_offset: proc(field: *const reflect_field) -> u64 = {
     if (field == null) { return 0; }
     return field[0].offset + field[0].size;
 }
 
-reflect_find_field_by_offset: proc(type: *const reflect, offset: u64)->*const reflect_field = {
+reflect_find_field_by_offset: proc(type: *const reflect, offset: u64) -> *const reflect_field = {
     fields: *const reflect_field = reflect_fields(type);
     if (fields == null) { return null; }
     for (i: u64 = 0; i < type[0].count; i += 1) {
@@ -328,7 +328,7 @@ reflect_find_field_by_offset: proc(type: *const reflect, offset: u64)->*const re
 }
 
 // The field an arbitrary byte falls inside, rather than one that starts there.
-reflect_find_field_containing_offset: proc(type: *const reflect, offset: u64)->*const reflect_field = {
+reflect_find_field_containing_offset: proc(type: *const reflect, offset: u64) -> *const reflect_field = {
     fields: *const reflect_field = reflect_fields(type);
     if (fields == null) { return null; }
     for (i: u64 = 0; i < type[0].count; i += 1) {
@@ -343,17 +343,17 @@ reflect_find_field_containing_offset: proc(type: *const reflect, offset: u64)->*
 // Reading and writing a field through its record
 // ---------------------------------------------------------------------------
 
-reflect_field_ptr: proc(base: *void, field: *const reflect_field)->*void = {
+reflect_field_ptr: proc(base: *void, field: *const reflect_field) -> *void = {
     if (base == null or field == null) { return null; }
     return cast(cast(base, *u8) + field[0].offset, *void);
 }
 
-reflect_field_const_ptr: proc(base: *const void, field: *const reflect_field)->*const void = {
+reflect_field_const_ptr: proc(base: *const void, field: *const reflect_field) -> *const void = {
     if (base == null or field == null) { return null; }
     return cast(cast(base, *const u8) + field[0].offset, *const void);
 }
 
-reflect_field_copy: proc(dst_base: *void, src_base: *const void, field: *const reflect_field)->b32 = {
+reflect_field_copy: proc(dst_base: *void, src_base: *const void, field: *const reflect_field) -> b32 = {
     dst: *void = reflect_field_ptr(dst_base, field);
     src: *const void = reflect_field_const_ptr(src_base, field);
     if (dst == null or src == null) { return 0; }
@@ -361,18 +361,18 @@ reflect_field_copy: proc(dst_base: *void, src_base: *const void, field: *const r
     return 1;
 }
 
-reflect_field_zero: proc(base: *void, field: *const reflect_field)->b32 = {
+reflect_field_zero: proc(base: *void, field: *const reflect_field) -> b32 = {
     dst: *void = reflect_field_ptr(base, field);
     if (dst == null) { return 0; }
     memset(dst, 0, cast(field[0].size, usize));
     return 1;
 }
 
-reflect_field_copy_by_name: proc(dst_base: *void, src_base: *const void, type: *const reflect, name: *const char)->b32 = {
+reflect_field_copy_by_name: proc(dst_base: *void, src_base: *const void, type: *const reflect, name: *const char) -> b32 = {
     return reflect_field_copy(dst_base, src_base, reflect_find_field(type, name));
 }
 
-reflect_field_zero_by_name: proc(base: *void, type: *const reflect, name: *const char)->b32 = {
+reflect_field_zero_by_name: proc(base: *void, type: *const reflect, name: *const char) -> b32 = {
     return reflect_field_zero(base, reflect_find_field(type, name));
 }
 
@@ -384,11 +384,11 @@ reflect_field_zero_by_name: proc(base: *void, type: *const reflect, name: *const
 // `@ "save editor"` both answer yes to "save".
 // ---------------------------------------------------------------------------
 
-reflect_attr_is_sep: proc(c: char)->b32 = {
+reflect_attr_is_sep: proc(c: char) -> b32 = {
     return c == 0 or c == 44 or c == 32 or c == 9 or c == 13 or c == 10;
 }
 
-reflect_field_has_attr: proc(field: *const reflect_field, attr: *const char)->b32 = {
+reflect_field_has_attr: proc(field: *const reflect_field, attr: *const char) -> b32 = {
     scan: u64 = 0;
     token: u64 = 0;
     a: u64 = 0;
@@ -416,7 +416,7 @@ reflect_field_has_attr: proc(field: *const reflect_field, attr: *const char)->b3
     return 0;
 }
 
-reflect_count_fields_with_attr: proc(type: *const reflect, attr: *const char)->u64 = {
+reflect_count_fields_with_attr: proc(type: *const reflect, attr: *const char) -> u64 = {
     fields: *const reflect_field = reflect_fields(type);
     count: u64 = 0;
     if (fields == null or attr == null or attr[0] == 0) { return 0; }
@@ -426,7 +426,7 @@ reflect_count_fields_with_attr: proc(type: *const reflect, attr: *const char)->u
     return count;
 }
 
-reflect_find_field_with_attr: proc(type: *const reflect, attr: *const char)->*const reflect_field = {
+reflect_find_field_with_attr: proc(type: *const reflect, attr: *const char) -> *const reflect_field = {
     fields: *const reflect_field = reflect_fields(type);
     if (fields == null or attr == null or attr[0] == 0) { return null; }
     for (i: u64 = 0; i < type[0].count; i += 1) {
@@ -435,7 +435,7 @@ reflect_find_field_with_attr: proc(type: *const reflect, attr: *const char)->*co
     return null;
 }
 
-reflect_next_field_with_attr: proc(type: *const reflect, attr: *const char, after: *const reflect_field)->*const reflect_field = {
+reflect_next_field_with_attr: proc(type: *const reflect, attr: *const char, after: *const reflect_field) -> *const reflect_field = {
     fields: *const reflect_field = reflect_fields(type);
     start: u64 = 0;
     if (fields == null or attr == null or attr[0] == 0) { return null; }

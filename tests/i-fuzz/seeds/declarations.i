@@ -5,7 +5,7 @@ define("SEED_IMPLEMENTATION")
 
 #define SEED_LIMIT 8
 
-printf: proc[external](fmt: *const char, ...)->i32 = {}
+printf: proc[external](fmt: *const char, ...) -> i32 = {}
 
 Color: enum = { Red = -1, Green = 0, Blue = 1 shl 2, Alias = Blue }
 
@@ -28,7 +28,7 @@ Bag: struct<T> = {
     count: u64;
 }
 
-Handler: alias = *proc(value: i32)->i32;
+Handler: alias = *proc(value: i32) -> i32;
 
 Blob: union = {
     as_i32: i32;
@@ -38,17 +38,17 @@ Blob: union = {
 counter: static i32 = 0;
 exported: i32 = 1;
 
-hidden: static proc(x: i32)->i32 = {
+hidden: static proc(x: i32) -> i32 = {
     local: static i32 = 0;
     local += x;
     return local;
 }
 
-Bag<T>first: proc<T>(bag: Bag<T>)->T = {
+Bag<T>first: proc<T>(bag: Bag<T>) -> T = {
     return bag.items[0];
 }
 
-main: proc(argc: i32, argv: **char)->i32 = {
+main: proc(argc: i32, argv: **char) -> i32 = {
     p: Pair = { .x = 1, .y = 2.5 };
     k: Packed = {};
     k.lo = 7;

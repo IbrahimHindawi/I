@@ -182,7 +182,7 @@ running the generated C under UBSan and ASan over the test corpus.
 clean and passes straight through to C:
 
     Foo: struct = { external; }
-    main: proc()->i32 = {
+    main: proc() -> i32 = {
         f: *Foo = null;
         return f[0].this_field_does_not_exist_anywhere;
     }

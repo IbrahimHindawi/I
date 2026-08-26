@@ -22,7 +22,7 @@ MapIterator: struct<T> = {
     _index: usize;
 }
 
-runtime_cstr_copy: proc(arena: *memops_arena, key: *const char)->*const char = {
+runtime_cstr_copy: proc(arena: *memops_arena, key: *const char) -> *const char = {
     if (key == null) {
         return null;
     }
@@ -36,7 +36,7 @@ runtime_cstr_copy: proc(arena: *memops_arena, key: *const char)->*const char = {
     return copy;
 }
 
-map_hash_key: proc(key: *const char)->u64 = {
+map_hash_key: proc(key: *const char) -> u64 = {
     hash: u64 = I_RUNTIME_FNV_OFFSET;
     p: *const char = key;
     if (p == null) {
@@ -50,7 +50,7 @@ map_hash_key: proc(key: *const char)->u64 = {
     return hash;
 }
 
-Map<T>set_entry: proc<T>(arena: *memops_arena, entries: *MapEntry<T>, border: usize, key: *const char, val: T, plength: *usize)->*const char = {
+Map<T>set_entry: proc<T>(arena: *memops_arena, entries: *MapEntry<T>, border: usize, key: *const char, val: T, plength: *usize) -> *const char = {
     hash: u64 = map_hash_key(key);
     index: usize = cast(hash & cast(border - 1, u64), usize);
     while (entries[index].key != null) {
@@ -76,7 +76,7 @@ Map<T>set_entry: proc<T>(arena: *memops_arena, entries: *MapEntry<T>, border: us
     return stored_key;
 }
 
-Map<T>expand: proc<T>(arena: *memops_arena, hashmap: *Map<T>)->b32 = {
+Map<T>expand: proc<T>(arena: *memops_arena, hashmap: *Map<T>) -> b32 = {
     new_capacity: usize = hashmap[0].border * 2;
     if (new_capacity < hashmap[0].border) {
         return 0;
@@ -96,7 +96,7 @@ Map<T>expand: proc<T>(arena: *memops_arena, hashmap: *Map<T>)->b32 = {
     return 1;
 }
 
-Map<T>create: proc<T>(arena: *memops_arena)->*Map<T> = {
+Map<T>create: proc<T>(arena: *memops_arena) -> *Map<T> = {
     hashmap: *Map<T> = cast(memops_arena_push_zero(arena, sizeof(Map<T>), alignof(Map<T>)), *Map<T>);
     if (hashmap == null) {
         printf("I runtime: Map allocation failure\n");
@@ -112,7 +112,7 @@ Map<T>create: proc<T>(arena: *memops_arena)->*Map<T> = {
     return hashmap;
 }
 
-Map<T>destroy: proc<T>(arena: *memops_arena, hashmap: *Map<T>)->void = {
+Map<T>destroy: proc<T>(arena: *memops_arena, hashmap: *Map<T>) -> void = {
     if (hashmap != null) {
         hashmap[0].entries = null;
         hashmap[0].length = 0;
@@ -120,7 +120,7 @@ Map<T>destroy: proc<T>(arena: *memops_arena, hashmap: *Map<T>)->void = {
     }
 }
 
-Map<T>get: proc<T>(arena: *memops_arena, hashmap: *Map<T>, key: *const char)->*T = {
+Map<T>get: proc<T>(arena: *memops_arena, hashmap: *Map<T>, key: *const char) -> *T = {
     if (hashmap == null or hashmap[0].entries == null or hashmap[0].border == 0) {
         return null;
     }
@@ -138,7 +138,7 @@ Map<T>get: proc<T>(arena: *memops_arena, hashmap: *Map<T>, key: *const char)->*T
     return null;
 }
 
-Map<T>set: proc<T>(arena: *memops_arena, hashmap: *Map<T>, key: *const char, val: T)->*const char = {
+Map<T>set: proc<T>(arena: *memops_arena, hashmap: *Map<T>, key: *const char, val: T) -> *const char = {
     if (hashmap[0].length >= hashmap[0].border / 2) {
         if (!Map<T>expand(arena, hashmap)) {
             return null;
@@ -147,7 +147,7 @@ Map<T>set: proc<T>(arena: *memops_arena, hashmap: *Map<T>, key: *const char, val
     return Map<T>set_entry(arena, hashmap[0].entries, hashmap[0].border, key, val, hashmap[0].length.&);
 }
 
-Map<T>try_emplace: proc<T>(arena: *memops_arena, hashmap: *Map<T>, key: *const char, val: T)->*T = {
+Map<T>try_emplace: proc<T>(arena: *memops_arena, hashmap: *Map<T>, key: *const char, val: T) -> *T = {
     result: *T = Map<T>get(arena, hashmap, key);
     if (result == null) {
         Map<T>set(arena, hashmap, key, val);
@@ -156,21 +156,21 @@ Map<T>try_emplace: proc<T>(arena: *memops_arena, hashmap: *Map<T>, key: *const c
     return result;
 }
 
-Map<T>length: proc<T>(arena: *memops_arena, hashmap: *Map<T>)->usize = {
+Map<T>length: proc<T>(arena: *memops_arena, hashmap: *Map<T>) -> usize = {
     if (hashmap == null) {
         return 0;
     }
     return hashmap[0].length;
 }
 
-MapIterator<T>create: proc<T>(arena: *memops_arena, hashmap: *Map<T>)->MapIterator<T> = {
+MapIterator<T>create: proc<T>(arena: *memops_arena, hashmap: *Map<T>) -> MapIterator<T> = {
     it: MapIterator<T> = {};
     it._hashmap = hashmap;
     it._index = 0;
     return it;
 }
 
-MapIterator<T>next: proc<T>(arena: *memops_arena, it: *MapIterator<T>)->b32 = {
+MapIterator<T>next: proc<T>(arena: *memops_arena, it: *MapIterator<T>) -> b32 = {
     hashmap: *Map<T> = it[0]._hashmap;
     if (hashmap == null) {
         return 0;

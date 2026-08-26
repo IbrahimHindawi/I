@@ -3454,7 +3454,9 @@ main:proc()->i32 = {
         print(out)
         return 1
     generated = layout_c.read_text(encoding="utf-8")
-    if generated.count("_Static_assert") < 6 or "i_layout_lc_point" not in generated:
+    # `static_assert`, from <assert.h>, not the `_Static_assert` keyword: MSVC
+    # only has the keyword under /std:c11 while the macro works by default.
+    if generated.count("static_assert") < 6 or "i_layout_lc_point" not in generated:
         print("layout_check: expected a shadow record and per-field assertions")
         print(generated)
         return 1
@@ -3792,12 +3794,19 @@ main:proc()->i32 = {
         print(gen.stdout)
         return 1
     text = enum_c.read_text(encoding="utf-8")
-    if "typedef enum Plain : i32 {" not in text:
-        print("enum_default: an unattributed enum should state i32")
+    # The underlying type is *asserted*, not dictated. `enum E : T` is C23 and
+    # MSVC's C mode rejects it at every /std level -- including `: int` -- so
+    # emitting it made the whole backend clang-only. The enum goes out plainly
+    # and a static assertion holds C to the declared width, which is the same
+    # trade the external layout checks make.
+    if "typedef enum Plain : " in text or "typedef enum Wide : " in text:
+        print("enum_default: the C23 fixed underlying type is not portable")
         return 1
-    if "typedef enum Wide : u32 {" not in text:
-        print("enum_default: enum[u32] should still win over the default")
-        return 1
+    for needle in ('static_assert(sizeof(Plain) == sizeof(i32)',
+                   'static_assert(sizeof(Wide) == sizeof(u32)'):
+        if needle not in text:
+            print(f"enum_default: expected {needle!r} in the generated C")
+            return 1
     print("ok enum_default")
 
     # A '#' line has to work everywhere C allows one, not only between
@@ -4191,6 +4200,56 @@ main:proc()->i32 = {
         print(res.stdout)
         return 1
     print("ok true_false")
+
+    # The LSP keeps its own copies of three of the compiler's tables, because it
+    # has to tokenise without running a compile. Copies drift: `true` and
+    # `false` became keywords and the LSP did not hear about it, so an editor
+    # would have coloured them as identifiers and offered them as completions
+    # for a name. This reads both sides out of the sources and compares them.
+    lsp_source = (ROOT / "scripts" / "i_lsp.py").read_text(encoding="utf-8")
+    compiler_source = (ROOT / "src" / "main.c").read_text(encoding="utf-8")
+
+    def python_set_literal(name: str) -> set[str]:
+        match = re.search(r"^" + name + r" = \{(.*?)\n\}", lsp_source, re.S | re.M)
+        if not match:
+            return set()
+        body = re.sub(r"#[^\n]*", "", match.group(1))
+        return set(re.findall(r'"([^"]+)"', body))
+
+    # Keywords the lexer turns into a Token_Keyword_*.
+    compiler_keywords = set(re.findall(
+        r'string8slice_equals_cstr\(text, "(\w+)"\)\) kind = Token_Keyword', compiler_source))
+    lsp_keywords = python_set_literal("KEYWORDS")
+    missing = sorted(compiler_keywords - lsp_keywords)
+    if missing:
+        print(f"lsp_tables_in_sync: the LSP does not know these keywords: {missing}")
+        return 1
+
+    # Type names the semantic pass accepts without a declaration. `cinclude` and
+    # `label` are parser-level and deliberately absent from the lexer set above,
+    # which is why only one direction is checked.
+    intrinsics = re.search(
+        r"static bool semantic_intrinsic_type_name\(string8 name\) \{(.*?)\n\}",
+        compiler_source, re.S)
+    if not intrinsics:
+        print("lsp_tables_in_sync: could not find semantic_intrinsic_type_name")
+        return 1
+    compiler_types = set(re.findall(r'string8_equals_cstr\(&name, "(\w+)"\)',
+                                    intrinsics.group(1)))
+    # The reflect record names are listed separately in the LSP.
+    compiler_types = {t for t in compiler_types if not t.startswith("reflect")}
+    lsp_types = python_set_literal("BUILTIN_TYPES")
+    missing_types = sorted(compiler_types - lsp_types)
+    if missing_types:
+        print(f"lsp_tables_in_sync: the LSP does not know these types: {missing_types}")
+        return 1
+    # `char` is accepted by the parser and normalised to c8, so the LSP may
+    # carry it even though the semantic table no longer does.
+    extra_types = sorted(lsp_types - compiler_types - {"char"})
+    if extra_types:
+        print(f"lsp_tables_in_sync: the LSP lists types the compiler rejects: {extra_types}")
+        return 1
+    print("ok lsp_tables_in_sync")
 
     line_map_i = TEST_DIR / "generated_line_map.i"
     line_map_c = TEST_DIR / "generated_line_map.c"
@@ -9549,6 +9608,15 @@ main:proc()->i32 = {
         return i_execute.returncode
     print(i_execute.stdout.rstrip())
 
+    # A second C compiler, because the backend contract in shape.md section 7 was
+    # a claim with nothing behind it until one existed. Skips itself when cl is
+    # not installed.
+    msvc = run([sys.executable, "tests/run_msvc.py"])
+    if msvc.returncode != 0:
+        print(msvc.stdout)
+        return msvc.returncode
+    print(msvc.stdout.rstrip())
+
     i_debuginfo = run([sys.executable, "tests/run_i_debuginfo.py"])
     if i_debuginfo.returncode != 0:
         print(i_debuginfo.stdout)
@@ -9557,6 +9625,14 @@ main:proc()->i32 = {
 
     # Bounded here so the suite stays quick; soak with
     # `python tests/run_i_fuzz.py --iterations 6000 --seed <n> --keep-going`.
+    # The PDB half of the debug-info story: CodeView is what Windows debuggers
+    # read, and nothing checked it until a misaligned line table was reported.
+    pdb_lines = run([sys.executable, "tests/run_pdb_lines.py"])
+    if pdb_lines.returncode != 0:
+        print(pdb_lines.stdout)
+        return pdb_lines.returncode
+    print(pdb_lines.stdout.rstrip())
+
     i_fuzz = run([sys.executable, "tests/run_i_fuzz.py", "--iterations", "400"])
     if i_fuzz.returncode != 0:
         print(i_fuzz.stdout)

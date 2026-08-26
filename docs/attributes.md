@@ -12,7 +12,7 @@ What one attribute slot per declaration buys, and what it means for C interop.
 
 `proc[...]` is already parsed, and already carries something:
 
-    platform_add: proc[WINCALL](a: i32, b: i32)->i32 = { ... }
+    platform_add: proc[WINCALL](a: i32, b: i32) -> i32 = { ... }
 
 The parser reads a single identifier between the brackets and stores it as the
 declaration's calling convention. Seven uses across the tree. Structs have no
@@ -25,14 +25,14 @@ letting it hold more than one thing.
 
     timespec:       struct[external] = { tv_sec: i64; tv_nsec: long; }
     FILE:           struct[external] = {}
-    timespec_alloc: proc[external](...)->i32 = {}
-    printf:         proc[external, WINCALL](fmt: *const char, ...)->i32 = {}
+    timespec_alloc: proc[external](...) -> i32 = {}
+    printf:         proc[external, WINCALL](fmt: *const char, ...) -> i32 = {}
     DXGI_FORMAT:    enum[external] = { UNKNOWN, }
 
 replacing
 
     timespec:       struct = { external; tv_sec: i64; tv_nsec: long; }
-    timespec_alloc: proc(...)->i32 = { external; }
+    timespec_alloc: proc(...) -> i32 = { external; }
 
 One parser, `parse_decl_attributes`, reads the comma-separated list for all
 three declaration kinds. It recognises `external` and `external_emit`; any other
@@ -116,7 +116,7 @@ The declaration grammar is
 
 so attributes come **before** the type parameters, not after:
 
-    f:   proc[external]<T>(x: T)->i32 = {}
+    f:   proc[external]<T>(x: T) -> i32 = {}
     Box: struct[external]<T> = {}
 
 **Variables have no attribute slot.** Of the six attribute names only
@@ -148,12 +148,12 @@ initializer, since a local cannot be owned by C.
 `external;` written inside a body is **rejected**. The attribute is the only
 form:
 
-    f: proc[external](fmt: *const char, ...)->i32 = {}
+    f: proc[external](fmt: *const char, ...) -> i32 = {}
     X: struct[external] = {}
     E: enum[external] = { A, }
 
     // and with generic parameters, which come first:
-    f: proc<T>[external](x: T)->i32 = {}
+    f: proc<T>[external](x: T) -> i32 = {}
     Box: struct<T>[external] = {}
 
 The body form existed so 347 declarations could migrate a file at a time rather
@@ -204,9 +204,9 @@ forms -- after a head keyword, or after a whole type -- one idea rather than two
     x: [4]*const T[attrib] = {}        ok     still declares x; outermost
     P: struct[attrib]<T> = {}          ok     declares P
     P: struct = { f: i32[attrib]; }    ok     declares a field
-    f: proc[attrib](a: i32)->i32 = {}  ok     declares f
+    f: proc[attrib](a: i32) -> i32 = {}  ok     declares f
 
-    x: *proc(a: i32)->i32[attrib]      error  a return type is a use
+    x: *proc(a: i32) -> i32[attrib]      error  a return type is a use
     x: [4](i32[attrib])                error  an element type is a use
     x: *(T[attrib])                    error  a pointee is a use
     y: Box<i32[attrib]>                error  a generic argument is a use
@@ -235,8 +235,8 @@ being modified.
 
 ### A parameter takes no attribute
 
-    f: proc(a: i32[attrib])->i32 = {}  error
-    x: *proc(a: i32[attrib])->i32      error
+    f: proc(a: i32[attrib]) -> i32 = {}  error
+    x: *proc(a: i32[attrib]) -> i32      error
 
 Both, in the end. A parameter would only ever want a *type qualifier* -- `const`,
 `restrict`, nullability -- and those belong to the type, which already carries
@@ -249,7 +249,7 @@ declaration and a bare name inside a proc type, which is a distinction nobody
 should have to be taught.
 
 Worth noting the second line needs the `*`: C has no object of function type, so
-a variable holding a proc is a pointer to one. A bare `x: proc(a: i32)->i32` is
+a variable holding a proc is a pointer to one. A bare `x: proc(a: i32) -> i32` is
 an error on its own account -- read as a proc declaration it is missing its
 `= { }` body, and read as a variable type it is an object of function type.
 
@@ -356,7 +356,7 @@ built from what ilang was told and asks C to compare the two:
     _Static_assert(sizeof(lc_point) == sizeof(i_layout_lc_point), "...size");
     _Static_assert(_Alignof(lc_point) == _Alignof(i_layout_lc_point), "...alignment");
     _Static_assert(offsetof(lc_point, x) == offsetof(i_layout_lc_point, x), "...x offset");
-    _Static_assert(sizeof(((lc_point *)0)->x) == sizeof(((i_layout_lc_point *)0)->x), "...x type");
+    _Static_assert(sizeof(((lc_point *)0) -> x) == sizeof(((i_layout_lc_point *)0) -> x), "...x type");
 
 C computes both layouts with the same rules, so member order, member type,
 padding and alignment are all covered. Per-field offsets matter: reordering two

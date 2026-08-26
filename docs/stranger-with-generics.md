@@ -18,7 +18,7 @@ A library defines a generic container:
         count: i32;
     }
 
-    Stack<T>push: proc<T>(s: *Stack<T>, v: T)->void = { ... }
+    Stack<T>push: proc<T>(s: *Stack<T>, v: T) -> void = { ... }
 
 A stranger uses it with a type the library has never heard of:
 
@@ -142,7 +142,7 @@ addresses are read through, never compared**.
 Verified against a real codebase: 62 uses of `Type<>.&` across four modules, all
 of them passing the address to a reader such as
 
-    gin_reflect_enum_name: proc(meta: *const reflect, value: i64)->*const char = {
+    gin_reflect_enum_name: proc(meta: *const reflect, value: i64) -> *const char = {
         values: *const reflect_value = reflect_values(meta);
         if (values == null) {
             return "unknown";

@@ -1,8 +1,8 @@
 cinclude "stdio.h"
 
-printf: proc[external](fmt: *const char, ...)->i32 = {}
+printf: proc[external](fmt: *const char, ...) -> i32 = {}
 
-main: proc()->i32 = {
+main: proc() -> i32 = {
     x: u32 = 0b1010;
     printf("%u\n", ~x);
 

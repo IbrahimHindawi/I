@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc[external](fmt: *const char, ...)->i32 = {}
+printf: proc[external](fmt: *const char, ...) -> i32 = {}
 
 // I lowers to C, so every operator has two precedences: I's, and the one the
 // emitted C would get if the emitter dropped a parenthesis. The emitter
@@ -9,7 +9,7 @@ printf: proc[external](fmt: *const char, ...)->i32 = {}
 // under the other grouping, so a regression in parenthesisation shows up as a
 // wrong number rather than as C that happens to still compile.
 
-main: proc()->i32 = {
+main: proc() -> i32 = {
     // Explicit grouping in the source must survive lowering. These are the
     // unambiguous ones: they hold whatever the precedence table says.
     printf("%d %d\n", 1 + 2 * 3, (1 + 2) * 3);

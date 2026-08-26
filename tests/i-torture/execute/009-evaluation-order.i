@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc[external](fmt: *const char, ...)->i32 = {}
+printf: proc[external](fmt: *const char, ...) -> i32 = {}
 
 // Short-circuiting and how many times a subexpression runs are invisible in the
 // result of most expressions, so they need side effects to be observable at all.
@@ -10,17 +10,17 @@ printf: proc[external](fmt: *const char, ...)->i32 = {}
 
 g_calls: i32 = 0;
 
-bump: proc(v: i32)->i32 = {
+bump: proc(v: i32) -> i32 = {
     g_calls += 1;
     return v;
 }
 
-reset: proc()->void = {
+reset: proc() -> void = {
     g_calls = 0;
 }
 
 // `and` must not evaluate its right operand when the left is false.
-short_and: proc()->i32 = {
+short_and: proc() -> i32 = {
     reset();
     if (0 != 0 and bump(1) != 0) {
         g_calls += 100;
@@ -29,7 +29,7 @@ short_and: proc()->i32 = {
 }
 
 // `or` must not evaluate its right operand when the left is true.
-short_or: proc()->i32 = {
+short_or: proc() -> i32 = {
     reset();
     if (1 != 0 or bump(1) != 0) {
         g_calls += 100;
@@ -38,7 +38,7 @@ short_or: proc()->i32 = {
 }
 
 // When the left operand does not decide the result, the right one must run.
-full_and: proc()->i32 = {
+full_and: proc() -> i32 = {
     reset();
     if (1 != 0 and bump(1) != 0) {
         g_calls += 100;
@@ -47,7 +47,7 @@ full_and: proc()->i32 = {
 }
 
 // A conditional evaluates exactly one arm.
-ternary_once: proc()->i32 = {
+ternary_once: proc() -> i32 = {
     reset();
     v: i32 = 1 != 0 ? bump(5) : bump(9);
     return g_calls * 1000 + v;
@@ -55,7 +55,7 @@ ternary_once: proc()->i32 = {
 
 // A compound assignment evaluates its target once. Lowering `a[f()] += x` as
 // `a[f()] = a[f()] + x` calls f twice and still stores the right value.
-compound_once: proc()->i32 = {
+compound_once: proc() -> i32 = {
     arr: [4]i32 = {};
     reset();
     arr[bump(2)] += 5;
@@ -63,13 +63,13 @@ compound_once: proc()->i32 = {
 }
 
 // Arguments are evaluated once each, in some order; the count is what matters.
-args_once: proc()->i32 = {
+args_once: proc() -> i32 = {
     reset();
     v: i32 = bump(1) + bump(2) + bump(3);
     return g_calls * 1000 + v;
 }
 
-main: proc()->i32 = {
+main: proc() -> i32 = {
     printf("%d\n", short_and());
     printf("%d\n", short_or());
     printf("%d\n", full_and());

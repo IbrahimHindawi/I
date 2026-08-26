@@ -4620,6 +4620,7 @@ static bool ident_needs_c_mangle(string8 name) {
         "auto", "extern", "inline", "register", "restrict", "typedef",
         "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic",
         "_Imaginary", "_Noreturn", "_Static_assert", "_Thread_local",
+        "static_assert",
     };
     for (i32 i = 0; i < (i32)(sizeof(mangled) / sizeof(mangled[0])); i++) {
         if (string8_equals_cstr(&name, mangled[i])) {
@@ -4663,6 +4664,7 @@ static bool ident_is_c_mangle_target(string8 name) {
         "i_auto", "i_extern", "i_inline", "i_register", "i_restrict", "i_typedef",
         "i_Alignas", "i_Alignof", "i_Atomic", "i_Bool", "i_Complex", "i_Generic",
         "i_Imaginary", "i_Noreturn", "i_Static_assert", "i_Thread_local",
+        "i_static_assert",
     };
     for (i32 i = 0; i < (i32)(sizeof(targets) / sizeof(targets[0])); i++) {
         if (string8_equals_cstr(&name, targets[i])) return true;
@@ -13361,17 +13363,6 @@ static void emit_enum_decl(memops_arena *arena, string8 *out, EnumDecl *decl) {
        made shape.md 2.6 a question at all. Stating it pins the width and the
        signedness, so a member that does not fit is a C error here instead of a
        value that reads differently depending on how it is cast. */
-    emit_cstr(arena, out, " : ");
-    if (decl->underlying.data && decl->underlying.length > 0) {
-        emit_string8(arena, out, decl->underlying);
-    } else {
-        /* An unattributed enum is i32. Previously nothing was stated and C
-           picked, so the width was whatever the implementation felt like and
-           `enum[u32]` was the only way to know what it was. Stating the
-           default makes the attribute a change of mind rather than the only
-           source of truth. */
-        emit_cstr(arena, out, "i32");
-    }
     emit_cstr(arena, out, " {\n");
     for (i32 i = 0; i < decl->items.length; i++) {
         EnumItem *item = (EnumItem *)decl->items.data[i];
@@ -13393,7 +13384,21 @@ static void emit_enum_decl(memops_arena *arena, string8 *out, EnumDecl *decl) {
     emit_pre_directives(arena, out, &decl->tail_directives);
     emit_cstr(arena, out, "} ");
     emit_c_ident(arena, out, decl->name);
-    emit_cstr(arena, out, ";\n\n");
+    emit_cstr(arena, out, ";\n");
+
+    /* The underlying type, asserted rather than dictated. An unattributed
+       enum is i32; see shape.md 2.6. */
+    emit_cstr(arena, out, "static_assert(sizeof(");
+    emit_c_ident(arena, out, decl->name);
+    emit_cstr(arena, out, ") == sizeof(");
+    if (decl->underlying.data && decl->underlying.length > 0) {
+        emit_string8(arena, out, decl->underlying);
+    } else {
+        emit_cstr(arena, out, "i32");
+    }
+    emit_cstr(arena, out, "), \"enum ");
+    emit_string8(arena, out, decl->name);
+    emit_cstr(arena, out, ": underlying type is not the declared width\");\n\n");
 }
 
 static void emit_struct_fwd_decl(memops_arena *arena, string8 *out, string8 name, bool is_union) {
@@ -13958,10 +13963,8 @@ static void emit_struct_reflection_fields(
             emit_string8(arena, out, concrete_name);
             emit_cstr(arena, out, " *)0)->");
             emit_c_ident(arena, out, f->name);
-            emit_cstr(arena, out, "), (u64)__alignof__((( ");
-            emit_string8(arena, out, concrete_name);
-            emit_cstr(arena, out, " *)0)->");
-            emit_c_ident(arena, out, f->name);
+            emit_cstr(arena, out, "), (u64)_Alignof(");
+            emit_compound_literal_type(arena, out, field_type, (TypeSub){0});
             emit_cstr(arena, out, "), ");
         }
         emit_cstr(arena, out, reflect_type_kind_name(field_type));
@@ -14056,7 +14059,7 @@ static void emit_struct_layout_check(memops_arena *arena, string8 *out, Program 
     emit_string8(arena, out, shadow);
     emit_cstr(arena, out, ";\n");
 
-    emit_cstr(arena, out, "_Static_assert(sizeof(");
+    emit_cstr(arena, out, "static_assert(sizeof(");
     emit_string8(arena, out, c_name);
     emit_cstr(arena, out, ") == sizeof(");
     emit_string8(arena, out, shadow);
@@ -14064,7 +14067,7 @@ static void emit_struct_layout_check(memops_arena *arena, string8 *out, Program 
     emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, " size\");\n");
 
-    emit_cstr(arena, out, "_Static_assert(_Alignof(");
+    emit_cstr(arena, out, "static_assert(_Alignof(");
     emit_string8(arena, out, c_name);
     emit_cstr(arena, out, ") == _Alignof(");
     emit_string8(arena, out, shadow);
@@ -14075,7 +14078,7 @@ static void emit_struct_layout_check(memops_arena *arena, string8 *out, Program 
     for (i32 i = 0; i < decl->fields.length; i++) {
         Field *f = (Field *)decl->fields.data[i];
         emit_pre_directives(arena, out, &f->pre_directives);
-        emit_cstr(arena, out, "_Static_assert(offsetof(");
+        emit_cstr(arena, out, "static_assert(offsetof(");
         emit_string8(arena, out, c_name);
         emit_cstr(arena, out, ", ");
         emit_c_ident(arena, out, f->name);
@@ -14089,7 +14092,7 @@ static void emit_struct_layout_check(memops_arena *arena, string8 *out, Program 
         emit_c_ident(arena, out, f->name);
         emit_cstr(arena, out, " offset\");\n");
 
-        emit_cstr(arena, out, "_Static_assert(sizeof(((");
+        emit_cstr(arena, out, "static_assert(sizeof(((");
         emit_string8(arena, out, c_name);
         emit_cstr(arena, out, " *)0)->");
         emit_c_ident(arena, out, f->name);
@@ -14144,7 +14147,7 @@ static void emit_struct_reflection(
     emit_cstr(arena, out, ", (u64)sizeof(");
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "), ");
-    emit_cstr(arena, out, "(u64)__alignof__(");
+    emit_cstr(arena, out, "(u64)_Alignof(");
     emit_string8(arena, out, concrete_name);
     emit_cstr(arena, out, "), ");
     emit_cstr(arena, out, decl->is_union ? "I_Reflect_Union" : "I_Reflect_Struct");
@@ -14232,7 +14235,7 @@ static void emit_enum_reflection(memops_arena *arena, string8 *out, EnumDecl *de
     emit_cstr(arena, out, ", (u64)sizeof(");
     emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "), ");
-    emit_cstr(arena, out, "(u64)__alignof__(");
+    emit_cstr(arena, out, "(u64)_Alignof(");
     emit_c_ident(arena, out, decl->name);
     emit_cstr(arena, out, "), I_Reflect_Enum, ");
     emit_cstr(arena, out, "(u64)(sizeof(i_reflect_values_");

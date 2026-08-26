@@ -273,9 +273,9 @@ keep it and forbid shadowing globals too, for consistency.
 accepted, and the failure surfaces as a C error in generated code rather than a
 diagnostic:
 
-    helper: proc(v: i32)->i32 = { return v * 2; }
+    helper: proc(v: i32) -> i32 = { return v * 2; }
 
-    main: proc()->i32 = {
+    main: proc() -> i32 = {
         helper: i32 = 7;
         n: i32 = helper(3);   // `i: checked` passes
         return helper + n;
@@ -341,7 +341,7 @@ is a fair question from a student.
 **Today.** Not checked. The name resolves to nothing, and only the C compiler
 objects:
 
-    main: proc()->i32 = {
+    main: proc() -> i32 = {
         return totally_not_declared_anywhere(3);   // `i: checked` passes
     }
 
@@ -356,7 +356,7 @@ reappears in generated code with a message pointing at C.
 
 Presumably it exists so a C function can be called without declaring it. That is
 not a bargain real code takes: njinn declares every external explicitly
-(`printf: proc(fmt: *const char, ...)->i32 = { external; }`), so the hole buys
+(`printf: proc(fmt: *const char, ...) -> i32 = { external; }`), so the hole buys
 nothing and costs the diagnostic. It is the same trade `external` structs used to
 make before they were given a field list.
 
@@ -473,8 +473,37 @@ use and whether it can be specified. What the emitted C guarantees, given
 "if the emitted C is free of undefined behaviour, it means what the ilang means" is
 the strongest correctness claim available, and it is only worth something once
 the lowering rules are written down.
-> **Later.** Deferred deliberately; no work planned this round.
-
+> **Partly answered, by testing it.** The generated C had only ever met clang,
+> so this section was a claim with nothing behind it. Building the torture suite
+> with MSVC `cl` found three constructs that were clang-only -- 8 of 28 cases
+> compiled on the first run:
+>
+> | construct | problem | now |
+> |---|---|---|
+> | `__alignof__` | a GCC extension | `_Alignof`, which is C11 |
+> | `enum E : T` | C23; MSVC's C mode rejects it at every `/std`, `: int` included | the width is asserted, not dictated |
+> | `_Static_assert` | the keyword needs `/std:c11` on MSVC | `static_assert`, the `<assert.h>` macro |
+>
+> The alignment one is the interesting fix. `_Alignof` takes a *type*, and
+> nothing standard takes an expression, so member alignment stopped asking about
+> `((P *)0)->x` and started asking about the member's declared type -- the same
+> number, spellable in standard C.
+>
+> The enum one reverses a decision from 2.6. `enum E : T` said what the
+> underlying type *is*; the portable form emits the enum plainly and follows it
+> with `static_assert(sizeof(E) == sizeof(T))`, which says the same thing as a
+> claim C has to agree with. That is the trade the external layout checks
+> already make, and it is the one available when the syntax is not.
+>
+> After those three: **28/28 compile and 19/19 produce byte-identical output to
+> clang**, checked against the same `.expected` files. `tests/run_msvc.py` is
+> part of the suite now and skips itself where cl is absent.
+>
+> **Still open**, and unaffected by any of this: whether struct layout is
+> *guaranteed* to match the equivalent C declaration including padding, what the
+> calling convention is, and how bitfields map. Those are promises to write
+> down, not bugs to find -- but a second compiler is what makes writing them
+> down meaningful, and there is now one.
 
 ## 8. Tooling And Diagnostics
 
@@ -657,7 +686,7 @@ nothing but habit.
 **A crash, found while checking the above -- now fixed.** Dotted call syntax did
 not merely fail to parse, it segfaulted the compiler:
 
-    main: proc()->i32 = { return nosuch.method(); }     // exit 139
+    main: proc() -> i32 = { return nosuch.method(); }     // exit 139
 
 The first guess -- "calls through an unresolved receiver" -- was wrong. Six
 shapes reached it, including `n.g()` with `n: i32`, whose receiver is perfectly

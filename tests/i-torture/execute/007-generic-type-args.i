@@ -2,11 +2,11 @@ cinclude "stdio.h"
 import "std/memops.i"
 import "std/Array.i"
 
-printf: proc[external](fmt: *const char, ...)->i32 = {}
+printf: proc[external](fmt: *const char, ...) -> i32 = {}
 
 // Non-simple type arguments used to emit the mangled spelling as a C type name,
 // so Array<*i32> generated 'ptr_i32 * data;' and would not compile.
-main: proc()->i32 = {
+main: proc() -> i32 = {
     arena: memops_arena = {};
     memops_arena_initialize(arena.&);
 

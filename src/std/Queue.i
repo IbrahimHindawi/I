@@ -7,7 +7,7 @@ Queue: struct<T> = {
     length: usize;
 }
 
-Queue<T>create: proc<T>(arena: *memops_arena)->*Queue<T> = {
+Queue<T>create: proc<T>(arena: *memops_arena) -> *Queue<T> = {
     queue: *Queue<T> = cast(memops_arena_push_zero(arena, sizeof(Queue<T>), alignof(Queue<T>)), *Queue<T>);
     if (queue == null) {
         printf("I runtime: Queue allocation failure\n");
@@ -16,7 +16,7 @@ Queue<T>create: proc<T>(arena: *memops_arena)->*Queue<T> = {
     return queue;
 }
 
-Queue<T>enqueue: proc<T>(arena: *memops_arena, queue: *Queue<T>, data: T)->void = {
+Queue<T>enqueue: proc<T>(arena: *memops_arena, queue: *Queue<T>, data: T) -> void = {
     node: *Node<T> = Node<T>create(arena, data);
     if (queue[0].head == null) {
         queue[0].head = node;
@@ -29,7 +29,7 @@ Queue<T>enqueue: proc<T>(arena: *memops_arena, queue: *Queue<T>, data: T)->void 
     queue[0].length += 1;
 }
 
-Queue<T>dequeue: proc<T>(arena: *memops_arena, queue: *Queue<T>)->*Node<T> = {
+Queue<T>dequeue: proc<T>(arena: *memops_arena, queue: *Queue<T>) -> *Node<T> = {
     if (queue == null or queue[0].head == null) {
         return null;
     }
@@ -43,14 +43,14 @@ Queue<T>dequeue: proc<T>(arena: *memops_arena, queue: *Queue<T>)->*Node<T> = {
     return node;
 }
 
-Queue<T>peek: proc<T>(arena: *memops_arena, queue: *Queue<T>)->*Node<T> = {
+Queue<T>peek: proc<T>(arena: *memops_arena, queue: *Queue<T>) -> *Node<T> = {
     if (queue == null) {
         return null;
     }
     return queue[0].head;
 }
 
-Queue<T>destroy: proc<T>(arena: *memops_arena, queue: *Queue<T>)->void = {
+Queue<T>destroy: proc<T>(arena: *memops_arena, queue: *Queue<T>) -> void = {
     if (queue != null) {
         queue[0].head = null;
         queue[0].tail = null;
@@ -58,6 +58,6 @@ Queue<T>destroy: proc<T>(arena: *memops_arena, queue: *Queue<T>)->void = {
     }
 }
 
-Queue<T>is_empty: proc<T>(queue: *Queue<T>)->b32 = {
+Queue<T>is_empty: proc<T>(queue: *Queue<T>) -> b32 = {
     return queue == null or queue[0].length == 0;
 }

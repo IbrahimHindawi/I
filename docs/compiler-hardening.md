@@ -213,9 +213,9 @@ the entry is still here.
 
 ### A non-void proc with no return *(not a defect: decided)*
 
-    f: proc()->i32 = { }
-    f: proc(n: i32)->i32 = { if (n > 0) { return 1; } }
-    f: proc(n: i32)->i32 = { switch (n) { case 0: { return 1; } } }
+    f: proc() -> i32 = { }
+    f: proc(n: i32) -> i32 = { if (n > 0) { return 1; } }
+    f: proc(n: i32) -> i32 = { switch (n) { case 0: { return 1; } } }
 
 All three are accepted, and stay accepted. This was briefly implemented as an
 error and reverted: ilang keeps C's rule here, like the rest of

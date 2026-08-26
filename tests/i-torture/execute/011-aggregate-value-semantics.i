@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc[external](fmt: *const char, ...)->i32 = {}
+printf: proc[external](fmt: *const char, ...) -> i32 = {}
 
 // Aggregates are values. A lowering that passes or assigns them by reference
 // produces the right answer for reads and the wrong answer the moment anything
@@ -21,7 +21,7 @@ Outer: struct = {
 }
 
 // Assignment copies: writing through b must not disturb a.
-copy_independent: proc()->i32 = {
+copy_independent: proc() -> i32 = {
     a: P = {};
     a.x = 1;
     b: P = a;
@@ -30,7 +30,7 @@ copy_independent: proc()->i32 = {
 }
 
 // The copy reaches through a nested struct and the array inside it.
-nested_deep_copy: proc()->i32 = {
+nested_deep_copy: proc() -> i32 = {
     o1: Outer = {};
     o1.inner.a[1] = 42;
     o1.tag = 9;
@@ -40,12 +40,12 @@ nested_deep_copy: proc()->i32 = {
 }
 
 // A parameter is a copy: the callee mutating it must not reach the caller.
-mutate_param: proc(p: P)->i32 = {
+mutate_param: proc(p: P) -> i32 = {
     p.x = 999;
     return p.x;
 }
 
-by_value: proc()->i32 = {
+by_value: proc() -> i32 = {
     a: P = {};
     a.x = 1;
     got: i32 = mutate_param(a);
@@ -53,20 +53,20 @@ by_value: proc()->i32 = {
 }
 
 // A returned struct is a value the caller owns.
-make_p: proc()->P = {
+make_p: proc() -> P = {
     r: P = {};
     r.x = 5;
     r.y = 6;
     return r;
 }
 
-by_return: proc()->i32 = {
+by_return: proc() -> i32 = {
     g: P = make_p();
     return g.x * 10 + g.y;
 }
 
 // Struct elements of an array copy the same way.
-struct_in_array: proc()->i32 = {
+struct_in_array: proc() -> i32 = {
     arr: [2]P = {};
     arr[0].x = 3;
     arr[1] = arr[0];
@@ -75,7 +75,7 @@ struct_in_array: proc()->i32 = {
 }
 
 // A pointer to an aggregate aliases it, which is the case that must still work.
-alias_through_pointer: proc()->i32 = {
+alias_through_pointer: proc() -> i32 = {
     a: P = {};
     a.x = 4;
     p: *P = a.&;
@@ -83,7 +83,7 @@ alias_through_pointer: proc()->i32 = {
     return a.x;
 }
 
-main: proc()->i32 = {
+main: proc() -> i32 = {
     printf("%d\n", copy_independent());
     printf("%d\n", nested_deep_copy());
     printf("%d\n", by_value());

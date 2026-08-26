@@ -56,7 +56,7 @@ a floor. Three distinct failure modes:
 macro-expanded:
 
     #define tricky_max(a, b) ((a) > (b) ? (a) : (b))
-    tricky_max: proc[external_emit](a: i32, b: i32)->i32 = {}
+    tricky_max: proc[external_emit](a: i32, b: i32) -> i32 = {}
     -> clang: expected ')'
 
 This is why `external` is the *only* way to declare a C macro as a proc, which

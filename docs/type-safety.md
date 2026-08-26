@@ -27,7 +27,7 @@ narrower than "there is no const".
 
 ### Implicit numeric conversion
 
-    f: proc(x: f32)->void = {}
+    f: proc(x: f32) -> void = {}
     f(3);                     // accepted: integer literal into a float param
 
     d: f64 = 1.5;
@@ -66,7 +66,7 @@ would take.
 ### `alias` is transparent
 
     Handle: alias = i32;
-    f: proc(x: Handle)->void = {}
+    f: proc(x: Handle) -> void = {}
     f(7);                     // accepted
 
 By design: `alias` is a second name for a type, not a new one. It is listed here

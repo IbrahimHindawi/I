@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc[external](fmt: *const char, ...)->i32 = {}
+printf: proc[external](fmt: *const char, ...) -> i32 = {}
 
 Status: enum = {
     Failed = -2,
@@ -19,7 +19,7 @@ Flags: enum = {
     Inverted = ~0,
 }
 
-describe: proc(s: Status)->i32 = {
+describe: proc(s: Status) -> i32 = {
     switch (s) {
         case Status_Failed: { return 100; }
         case Status_Cancelled: { return 200; }
@@ -28,7 +28,7 @@ describe: proc(s: Status)->i32 = {
     }
 }
 
-main: proc()->i32 = {
+main: proc() -> i32 = {
     printf("%d %d %d %d\n", Status_Failed, Status_Cancelled, Status_Idle, Status_Busy);
     printf("%d %d %d %d %d\n", Flags_Read, Flags_Write, Flags_Exec, Flags_All, Flags_Alias);
     printf("%d\n", Flags_Inverted);

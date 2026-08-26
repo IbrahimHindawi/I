@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc[external](fmt: *const char, ...)->i32 = {}
+printf: proc[external](fmt: *const char, ...) -> i32 = {}
 
 // A case takes a block, so it does not fall through. This shipped falling
 // through once: an enemy AI ran its approach case, fell into retreat, and
@@ -14,7 +14,7 @@ Mode: enum = {
 }
 
 // Assigning cases. Under fall-through every input collapses to the last value.
-classify: proc(m: Mode)->i32 = {
+classify: proc(m: Mode) -> i32 = {
     v: i32 = 0;
     switch (m) {
         case Mode.A: { v = 1; }
@@ -26,7 +26,7 @@ classify: proc(m: Mode)->i32 = {
 }
 
 // Accumulating cases. Fall-through sums the tail instead of picking one arm.
-accumulate: proc(m: Mode)->i32 = {
+accumulate: proc(m: Mode) -> i32 = {
     v: i32 = 0;
     switch (m) {
         case Mode.A: { v += 1; }
@@ -39,7 +39,7 @@ accumulate: proc(m: Mode)->i32 = {
 
 // break inside a case leaves the switch, not the enclosing loop. If it left the
 // loop the total would stop accumulating after the first match.
-loop_switch: proc()->i32 = {
+loop_switch: proc() -> i32 = {
     total: i32 = 0;
     for (i: i32 = 0; i < 4; i += 1) {
         switch (i) {
@@ -61,7 +61,7 @@ loop_switch: proc()->i32 = {
 
 // An empty case is still a case: it must match and do nothing, not fall into
 // the next arm.
-empty_case: proc(m: Mode)->i32 = {
+empty_case: proc(m: Mode) -> i32 = {
     v: i32 = 7;
     switch (m) {
         case Mode.A: {
@@ -77,7 +77,7 @@ empty_case: proc(m: Mode)->i32 = {
 }
 
 // Nested switches: the inner one must not leak into the outer one's arms.
-nested: proc(outer: i32, inner: i32)->i32 = {
+nested: proc(outer: i32, inner: i32) -> i32 = {
     v: i32 = 0;
     switch (outer) {
         case 0: {
@@ -94,7 +94,7 @@ nested: proc(outer: i32, inner: i32)->i32 = {
 }
 
 // Switching on a plain integer, including sparse and negative labels.
-sparse: proc(x: i32)->i32 = {
+sparse: proc(x: i32) -> i32 = {
     v: i32 = 0;
     switch (x) {
         case -5: { v = 11; }
@@ -105,7 +105,7 @@ sparse: proc(x: i32)->i32 = {
     return v;
 }
 
-main: proc()->i32 = {
+main: proc() -> i32 = {
     printf("%d %d %d\n", classify(Mode.A), classify(Mode.B), classify(Mode.C));
     printf("%d %d %d\n", accumulate(Mode.A), accumulate(Mode.B), accumulate(Mode.C));
     printf("%d\n", loop_switch());

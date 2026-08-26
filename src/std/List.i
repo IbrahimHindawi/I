@@ -7,7 +7,7 @@ List: struct<T> = {
     length: usize;
 }
 
-List<T>create: proc<T>(arena: *memops_arena)->*List<T> = {
+List<T>create: proc<T>(arena: *memops_arena) -> *List<T> = {
     list: *List<T> = cast(memops_arena_push_zero(arena, sizeof(List<T>), alignof(List<T>)), *List<T>);
     if (list == null) {
         printf("I runtime: List allocation failure\n");
@@ -16,7 +16,7 @@ List<T>create: proc<T>(arena: *memops_arena)->*List<T> = {
     return list;
 }
 
-List<T>append: proc<T>(arena: *memops_arena, list: *List<T>, item: T)->void = {
+List<T>append: proc<T>(arena: *memops_arena, list: *List<T>, item: T) -> void = {
     node: *Node<T> = Node<T>create(arena, item);
     if (list[0].head == null) {
         list[0].head = node;
@@ -31,14 +31,14 @@ List<T>append: proc<T>(arena: *memops_arena, list: *List<T>, item: T)->void = {
     list[0].length += 1;
 }
 
-List<T>prepend: proc<T>(arena: *memops_arena, list: *List<T>, item: T)->void = {
+List<T>prepend: proc<T>(arena: *memops_arena, list: *List<T>, item: T) -> void = {
     node: *Node<T> = Node<T>create(arena, item);
     node[0].next = list[0].head;
     list[0].head = node;
     list[0].length += 1;
 }
 
-List<T>insert_at: proc<T>(arena: *memops_arena, list: *List<T>, item: T, index: i32)->void = {
+List<T>insert_at: proc<T>(arena: *memops_arena, list: *List<T>, item: T, index: i32) -> void = {
     if (list == null or index < 0 or cast(index, usize) > list[0].length) {
         printf("I runtime: List invalid index\n");
         return;
@@ -61,14 +61,14 @@ List<T>insert_at: proc<T>(arena: *memops_arena, list: *List<T>, item: T, index: 
     list[0].length += 1;
 }
 
-List<T>get_length: proc<T>(arena: *memops_arena, list: *List<T>)->usize = {
+List<T>get_length: proc<T>(arena: *memops_arena, list: *List<T>) -> usize = {
     if (list == null) {
         return 0;
     }
     return list[0].length;
 }
 
-List<T>get_at: proc<T>(arena: *memops_arena, list: *List<T>, index: i32)->*Node<T> = {
+List<T>get_at: proc<T>(arena: *memops_arena, list: *List<T>, index: i32) -> *Node<T> = {
     if (list == null or index < 0 or cast(index, usize) >= list[0].length) {
         return null;
     }
@@ -84,7 +84,7 @@ List<T>get_at: proc<T>(arena: *memops_arena, list: *List<T>, index: i32)->*Node<
     return null;
 }
 
-List<T>remove_at: proc<T>(arena: *memops_arena, list: *List<T>, index: i32)->*Node<T> = {
+List<T>remove_at: proc<T>(arena: *memops_arena, list: *List<T>, index: i32) -> *Node<T> = {
     if (list == null or index < 0 or cast(index, usize) >= list[0].length) {
         return null;
     }
@@ -109,7 +109,7 @@ List<T>remove_at: proc<T>(arena: *memops_arena, list: *List<T>, index: i32)->*No
     return null;
 }
 
-List<T>remove: proc<T>(arena: *memops_arena, list: *List<T>, item: T)->*Node<T> = {
+List<T>remove: proc<T>(arena: *memops_arena, list: *List<T>, item: T) -> *Node<T> = {
     if (list == null or list[0].length == 0) {
         return null;
     }
@@ -132,13 +132,13 @@ List<T>remove: proc<T>(arena: *memops_arena, list: *List<T>, item: T)->*Node<T> 
     return null;
 }
 
-List<T>destroy: proc<T>(arena: *memops_arena, list: *List<T>)->void = {
+List<T>destroy: proc<T>(arena: *memops_arena, list: *List<T>) -> void = {
     if (list != null) {
         list[0].head = null;
         list[0].length = 0;
     }
 }
 
-List<T>is_empty: proc<T>(list: *List<T>)->b32 = {
+List<T>is_empty: proc<T>(list: *List<T>) -> b32 = {
     return list == null or list[0].length == 0;
 }

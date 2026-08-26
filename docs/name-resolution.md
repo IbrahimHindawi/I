@@ -21,7 +21,7 @@ about ISO C99 implicit declarations, in a file they did not write.
 ## §3.4 — A call to an undeclared name is not checked *(fixed)*
 
 ```
-main: proc()->i32 = {
+main: proc() -> i32 = {
     return totally_not_declared_anywhere(3);   // `i: checked` passes
 }
 
@@ -161,7 +161,7 @@ the old silence; the ambiguity only ever existed for a bare name.
 
 Two adjacent holes closed with it: `sizeof` was the last C keyword still usable
 as an identifier, and proc and struct names were not checked against the reserved
-list at all, so `typedef: proc()->i32` also passed and then failed in clang.
+list at all, so `typedef: proc() -> i32` also passed and then failed in clang.
 
 *Covered by `sizeof_operand` and `sizeof_reserved`.*
 
@@ -174,9 +174,9 @@ their own right was both simpler and closer to the truth.
 ## §3.1 — A local may shadow a proc *(fixed)*
 
 ```
-helper: proc(v: i32)->i32 = { return v * 2; }
+helper: proc(v: i32) -> i32 = { return v * 2; }
 
-main: proc()->i32 = {
+main: proc() -> i32 = {
     helper: i32 = 7;
     n: i32 = helper(3);   // `i: checked` passes
     return helper + n;

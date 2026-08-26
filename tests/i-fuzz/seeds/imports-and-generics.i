@@ -10,19 +10,19 @@ Payload: struct = {
     weight: f32;
 }
 
-hash: proc<i32>(value: *i32)->u64 = {
+hash: proc<i32>(value: *i32) -> u64 = {
     return cast(value[0], u64);
 }
 
-needs_hash: proc<T: hash>(value: T)->u64 = {
+needs_hash: proc<T: hash>(value: T) -> u64 = {
     return hash<T>(value.&);
 }
 
-add: proc<i32>(a: i32, b: i32)->i32 = {
+add: proc<i32>(a: i32, b: i32) -> i32 = {
     return a + b;
 }
 
-sum: proc<T>(items: *T, count: u64)->T = {
+sum: proc<T>(items: *T, count: u64) -> T = {
     total: T = {};
     for (i: u64 = 0; i < count; i += 1) {
         total = add<T>(total, items[i]);
@@ -30,7 +30,7 @@ sum: proc<T>(items: *T, count: u64)->T = {
     return total;
 }
 
-main: proc()->i32 = {
+main: proc() -> i32 = {
     arena: memops_arena = {};
     memops_arena_initialize(arena.&);
 

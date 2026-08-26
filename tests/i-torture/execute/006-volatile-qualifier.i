@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc[external](fmt: *const char, ...)->i32 = {}
+printf: proc[external](fmt: *const char, ...) -> i32 = {}
 
 // the shape memory-mapped register access takes
 Regs: struct = {
@@ -10,12 +10,12 @@ Regs: struct = {
 
 flag: volatile i32 = 0;
 
-poll: proc(reg: *volatile u32)->u32 = {
+poll: proc(reg: *volatile u32) -> u32 = {
     v: volatile u32 = reg[0];
     return v;
 }
 
-main: proc()->i32 = {
+main: proc() -> i32 = {
     r: Regs = {};
     r.status = 7;
     cell: volatile u32 = 42;

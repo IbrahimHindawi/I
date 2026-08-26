@@ -1,6 +1,6 @@
 cinclude "stdio.h"
 
-printf: proc[external](fmt: *const char, ...)->i32 = {}
+printf: proc[external](fmt: *const char, ...) -> i32 = {}
 
 // the shape C headers use for packed protocol headers
 Packet: struct = {
@@ -17,7 +17,7 @@ Packet: struct = {
     }
 }
 
-main: proc()->i32 = {
+main: proc() -> i32 = {
     p: Packet = {};
     p.version = 3;
     p.kind = 9;

@@ -6,7 +6,7 @@ Array: struct<T> = {
     length: u64;
 }
 
-Array<T>reserve: proc<T>(arena: *memops_arena, length: u64)->Array<T> = {
+Array<T>reserve: proc<T>(arena: *memops_arena, length: u64) -> Array<T> = {
     arr: Array<T> = {};
     if (length == 0) {
         return arr;
@@ -21,12 +21,12 @@ Array<T>reserve: proc<T>(arena: *memops_arena, length: u64)->Array<T> = {
     return arr;
 }
 
-Array<T>destroy: proc<T>(arena: *memops_arena, array: *Array<T>)->void = {
+Array<T>destroy: proc<T>(arena: *memops_arena, array: *Array<T>) -> void = {
     array[0].data = null;
     array[0].length = 0;
 }
 
-Array<T>at: proc<T>(array: *Array<T>, index: u64)->*T = {
+Array<T>at: proc<T>(array: *Array<T>, index: u64) -> *T = {
     if (array == null or index >= array[0].length) {
         printf("I runtime: Array index out of bounds\n");
         exit(1);
@@ -34,13 +34,13 @@ Array<T>at: proc<T>(array: *Array<T>, index: u64)->*T = {
     return array[0].data[index].&;
 }
 
-Array<T>get: proc<T>(array: *Array<T>, index: u64)->Option<T> = {
+Array<T>get: proc<T>(array: *Array<T>, index: u64) -> Option<T> = {
     if (array == null or index >= array[0].length) {
         return Option<T>none();
     }
     return Option<T>some(array[0].data[index]);
 }
 
-Array<T>is_empty: proc<T>(array: *Array<T>)->b32 = {
+Array<T>is_empty: proc<T>(array: *Array<T>) -> b32 = {
     return array == null or array[0].length == 0;
 }
