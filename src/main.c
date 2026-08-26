@@ -575,6 +575,11 @@ struct Expr {
     ExprKind kind;
     string8 name;
     string8 number;
+    /* `x<>` is written as `x_reflect` by the parser, which cannot know
+       whether `x` is a type or a value. This keeps the identifier so the
+       type phase, which does know, can rewrite a value's `<>` to its
+       type's reflection record. Empty for `Type<>`. */
+    string8 reflect_base;
     string8 string_lit;
     Vec_voidptr args;      // Expr*
     Vec_voidptr type_args; // TypeExpr*
@@ -2083,7 +2088,8 @@ static string8 type_mangle_concrete(memops_arena *arena, TypeExpr *type) {
    The bracket is where `external` belongs, because it says something about the
    *declaration* -- do not emit it, C already has it -- while the braces are
    where fields and statements go. Putting it inside the body made
-   `FILE: struct = { external; }` read as a struct with one strange member, and
+   `FILE: struct = { external; }` -- the old spelling, since replaced by
+   `struct[external]` -- read as a struct with one strange member, and
    left procs and structs marking the same concept two different ways.
 
    The old spellings still parse, so the tree can migrate a file at a time.
@@ -2646,6 +2652,7 @@ static Expr *parse_primary(Parser *p) {
             parser_next(p);
             Expr *e = expr_new(p->arena, Expr_Name);
             e->name = concat_name2(p->arena, name, "_", string8_from_cstr(p->arena, "reflect"));
+            e->reflect_base = name;
             e->line = t->line;
             e->col = t->col;
             return parse_postfix(p, e);
@@ -4525,6 +4532,11 @@ static void semantic_check_expr(Expr *e, Scope *scope, Vec_string8 *known_types,
         if (scope_has(&scope->locals, e->name)) return;
         if (scope_has(&scope->globals, e->name)) return;
         if (scope_has(&scope->procs, e->name)) return;
+        if (e->reflect_base.data &&
+            (scope_has(&scope->locals, e->reflect_base) ||
+             scope_has(&scope->globals, e->reflect_base))) {
+            return; /* `value<>`; resolved against the value's type below */
+        }
         semantic_error_name("use of undeclared identifier", e->name, e->line, e->col);
     }
     if (e->kind == Expr_Addr) {
@@ -9073,6 +9085,30 @@ static TypeExpr *infer_expr_type(Expr *e, TypeScope *scope, Program *prog, memop
             ptr_t->elem = void_t;
             return ptr_t;
         }
+        /* `x<>` where x is a value, not a type. The parser writes every `<>` as
+           `<name>_reflect` because it cannot tell the two apart; here the type
+           is known, so a value's `<>` becomes its type's record. Guarded on the
+           written name being absent, which leaves `Type<>` alone -- that name
+           already resolves. Cleared afterwards so the rewrite happens once. */
+        if (e->reflect_base.data && !type_scope_lookup(scope, e->name)) {
+            TypeExpr *base = type_scope_lookup(scope, e->reflect_base);
+            if (base) {
+                base = type_scope_apply_sub(scope, arena, base);
+            }
+            if (base && (base->kind == Type_Name || base->kind == Type_Generic)) {
+                /* A generic's record is under its monomorphised name --
+                   `Box<i32>` reflects as `Box_i32_reflect` -- and type_mangle
+                   is what produces that name everywhere else. This is the only
+                   convenient way to reach it: `Box<i32><>` is not a spelling,
+                   so before this the mangled global had to be written by hand. */
+                string8 owner = base->kind == Type_Generic
+                                    ? type_mangle(arena, base, (TypeSub){0})
+                                    : base->name;
+                e->name = concat_name2(arena, owner, "_",
+                                       string8_from_cstr(arena, "reflect"));
+                e->reflect_base = (string8){0};
+            }
+        }
         TypeExpr *scope_type = type_scope_lookup(scope, e->name);
         if (scope_type) return type_scope_apply_sub(scope, arena, scope_type);
         EnumDecl *enum_decl = lookup_enum_constant_decl(arena, prog, e->name);
@@ -10617,7 +10653,7 @@ static void type_error_call_undeclared(
             message,
             sizeof(message),
             "call to undeclared proc '%.*s'; declare it, or add "
-            "`%.*s: proc(...)->T = { external; }` if it comes from C",
+            "`%.*s: proc[external](...) -> T = {}` if it comes from C",
             (int)name.length,
             name.data,
             (int)name.length,
@@ -10629,7 +10665,7 @@ static void type_error_call_undeclared(
     }
     printf(
         "%s:%d:%d: type error: call to undeclared proc '%.*s'; declare it, or add "
-        "`%.*s: proc(...)->T = { external; }` if it comes from C\n",
+        "`%.*s: proc[external](...) -> T = {}` if it comes from C\n",
         g_diag_source_path ? g_diag_source_path : g_source_path,
         line,
         col,

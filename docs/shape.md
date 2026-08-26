@@ -813,6 +813,21 @@ one bracket. Still open: whether attributes take *arguments*, which is what
 
 Recorded so they do not get re-litigated:
 
+- **Errors are a status enum per domain**, the value returned through an
+  out-parameter, and the message produced by reflection rather than a
+  hand-written table. `Result<T>` is not the direction: it does not remove
+  cross-domain conversion (Rust's `?` still needs a declared `From`), it returns
+  values by copy in a language with no moves, and it is only *safe* after
+  must-use and exhaustive matching exist. Full reasoning in
+  [`whats-missing.md`](whats-missing.md) section 1.
+
+- **`<>` works on a value, not only a type.** `e<>` is the reflection record of
+  `e`'s type. The parser cannot tell a type from a value, so it writes every
+  `<>` as `<name>_reflect` and the type phase rewrites a value's. Generic
+  instances resolve through their monomorphised name, which makes this the only
+  convenient way to reach one -- `Box<i32><>` is not a spelling. Covered by
+  `reflect_of_value`.
+
 - **There will be no methods.** No `P.get: proc(self: *P)`, no receiver syntax,
   no proc bound to a type in any form. Permanent, not deferred. The consequence
   is that module namespaces (§10) are the only remaining answer to njinn's 91%

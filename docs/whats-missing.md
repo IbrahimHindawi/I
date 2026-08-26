@@ -23,7 +23,7 @@ Worth stating first, because it changes what the gaps cost.
 - **Diagnostics report more than the first error** and map back to the `.i`
   line through `#line`.
 
-## 1. Discarded results, and the open question behind them
+## 1. Error handling, and discarded results
 
 ### The measurement
 
@@ -40,46 +40,72 @@ That much is a plain gap, independent of anything below, and it sharpens the
 error model already in use rather than proposing a different one. The marker can
 be an attribute (`proc[must_use]`), which the slot already supports.
 
-### `Result<T>`: open, not decided
+### Error handling: decided
 
-`std` has one. njinn uses it three times, against 303 procs returning `b32` and
-199 `gin_fatal` / `gin_require` sites. The temptation is to read that as the
-language failing the codebase. It is at least as likely to be the opposite:
-`i-soul.md` says ilang keeps C's directness, C's error model *is* bool, sentinel
-or abort, and for a game where a missing mesh is unrecoverable, aborting with a
-message is the right answer -- wrapping it in a `Result` you would unwrap and
-then abort on is ceremony.
+**A status enum per domain, the value through an out-parameter, the message from
+reflection.** `Result<T>` is not the direction.
 
-So njinn is weak evidence either way. It is one codebase in one domain, and that
-domain happens to be the one where C's model works best. Code where failures are
-*recoverable and need context* -- tools, servers, anything with a caller that can
-do something useful with "why" -- is where the answer would differ, and ilang has
-none of that yet.
+    mesh_status: enum = { success, file_not_found, bad_magic, truncated, }
 
-**Why it is unused today**, regardless of which way the question falls:
+    mesh_load: proc(mesh: *geo_mesh) -> mesh_status { ... }
 
-- **Nothing forces a check.** `is_ok` is a function you may skip; `.value` reads
-  fine without looking at `.ok`. Without must-use, `Result` is a convention,
-  which is most of what separates it from C.
-- **No propagation form.** Rust's `?` and Zig's `try` are what make this survive
-  contact with real code. Without one, every call site is four lines -- and 303
-  procs chose a bool instead.
-- **`unwrap` calls `exit(1)`**, which is fine in a program and unusable in a
-  library.
-- **The error is an `i32`.** No message, no context, no chain.
+    e: mesh_status = mesh_load(mesh.&);
+    if (e != mesh_status.success) {
+        printfmt("load failed: {}\n",
+                 reflect_name_from_value(e<>.&, cast(e, i32)));
+        return -1;
+    }
 
-### The cheap way to find out
+What it gets right:
 
-Do **must-use** first. It is worth having on its own evidence -- 145 discarded
-statuses -- and it happens to remove the first and largest of the four blockers
-above. Then look again: if `Result` is still unused with checking enforced, that
-is a real answer rather than a guess. If it starts getting used, the propagation
-form has earned its argument.
+- **The enums are nominally typed.** `mesh_status` and `file_status` cannot be
+  compared -- the compiler rejects it. Better than C's `int` codes and better
+  than the `b32` used 303 times in njinn, where every failure looks alike.
+- **The message is derived, not written.** Reflection produces the member name,
+  so adding `truncated` makes `"truncated"` print with nothing else to update.
+  Every C codebase has a hand-written `switch (err)` returning strings that
+  goes stale; this one cannot.
+- **It costs nothing.** It is an int, and it compiles to an int.
+- **The out-parameter avoids a copy.** `Result<geo_mesh, E>` returns the mesh by
+  value, and ilang has no moves, so that is a copy of everything in it.
 
-That ordering costs nothing and decides the question with evidence instead of
-taste. The expensive piece is the propagation form, because it is a control-flow
-construct and changes the language's character; it is also the piece that should
-be decided last.
+### Why not `Result<T, E>`
+
+Worth writing down, because the obvious argument for it does not survive
+contact.
+
+`Result` does *not* remove cross-domain conversion. Rust's `?` requires
+`impl From<FileError> for MeshError` -- you still write the mapping, `?` just
+calls it. The gain is that it is declared once per pair rather than spelled at
+each call site. Real, but modest.
+
+What actually makes errors compose in Rust is **payload-carrying enums**
+(`enum MeshError { File(FileError), BadMagic }`), which is a separate feature
+from `Result`. And ilang can already express that by hand -- a struct with a
+tag field and a payload:
+
+    mesh_status: struct = {
+        kind: mesh_kind;
+        file: file_status;   // meaningful when kind == from_file
+    }
+
+More verbose, and nothing checks that `file` is read only when `kind` says so,
+but it works today with no new feature.
+
+So `Result` would buy three things, and two of them are not `Result`: value and
+error travelling together (needs exhaustive matching to enforce), composition in
+expressions (needs a propagation form), and forced handling (needs must-use).
+Without those it is a struct whose value can be read after a failure -- which is
+what `std/Result.i` is, and why it has three uses.
+
+### What would strengthen the decided design
+
+**Enum exhaustiveness in `switch`** -- item 1 in the order below, and now with a
+concrete motivation rather than an abstract one. Handle a `mesh_status` with a
+`switch`, add `truncated` to the enum, and every handler that does not cover it
+fails to compile. That is the property people actually want from `Result` plus
+`match`, on a plain enum, with no generics, no propagation operator and no
+copies.
 
 ## 2. No `defer`
 
@@ -113,8 +139,10 @@ answer to a tax every declaration in the codebase pays.
 
 - **No `for (v in xs)`.** njinn has **238 index-style loops**. Iteration over an
   array whose length is in its type is decidable and mechanical.
-- **No multiple return values.** Combined with no `Result`, anything returning
-  both a value and a status uses an out-parameter.
+- **No multiple return values.** Anything returning both a value and a status
+  uses an out-parameter -- which is the decided error-handling shape (§1), so
+  this is less a gap than it first looks. It still bites for a genuine pair of
+  results that are not value-plus-status.
 
 ## 5. Cheap correctness checks that do not exist
 
@@ -162,6 +190,6 @@ off that is.
 
 **Decided, not deferred:** no methods, in any form.
 
-**Open, and deliberately last:** whether `Result<T>` becomes the way errors are
-done, and whether that brings a propagation form and a richer error type. Item 2
-is the cheap experiment that would answer it -- see §1.
+**Decided:** errors are a status enum per domain, the value comes back through
+an out-parameter, and the message comes from reflection. `Result<T>` is not the
+direction, and neither is a propagation form. Reasoning in §1.

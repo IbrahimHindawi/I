@@ -4251,6 +4251,49 @@ main:proc()->i32 = {
         return 1
     print("ok lsp_tables_in_sync")
 
+    # `<>` on a value, not just on a type. The parser writes every `<>` as
+    # `<name>_reflect` because it cannot tell a type from a value; the type
+    # phase knows, so a value resolves to its type's record.
+    #
+    # The generic case is the one that pays for itself: `Box<i32><>` is not a
+    # spelling, so reaching that record previously meant writing the
+    # monomorphised `Box_i32_reflect` by hand.
+    refval_i = TEST_DIR / "reflect_of_value.i"
+    refval_c = TEST_DIR / "reflect_of_value.c"
+    refval_exe = TEST_DIR / "reflect_of_value.exe"
+    refval_i.write_text(
+        "import \"std/Print.i\"\nColour: enum = { red, green, blue, }\nP: struct = { x: i32; y: f32; }\nBox: struct<T> = { v: T; }\ng_point: P = {};\nmain: proc() -> i32 {\n    c: Colour = Colour.green;\n    p: P = {};\n    b: Box<i32> = {};\n    printfmt(\"{} {} {} {} {}\",\n        c<>.name, p<>.count, g_point<>.name, b<>.name, P<>.name);\n    return 0;\n}\n",
+        encoding="utf-8", newline="\n")
+    gen = run([str(I_EXE), "compile", str(refval_i), "-o", str(refval_c), "--no-header"])
+    if gen.returncode != 0:
+        print("reflect_of_value: should compile")
+        print(gen.stdout)
+        return 1
+    built = run(["clang.exe", str(refval_c), "-I", "src", "-I", "src/std",
+                 "-o", str(refval_exe)])
+    if built.returncode != 0:
+        print("reflect_of_value: generated C did not build")
+        print(built.stdout)
+        return 1
+    ran = run([str(refval_exe)])
+    # a value reaches the same record its type does, and the generic
+    # resolves to its monomorphised name
+    if ran.stdout.strip() != "Colour 2 P Box_i32 P":
+        print(f"reflect_of_value: expected 'Colour 2 P Box_i32 P', got {ran.stdout.strip()!r}")
+        return 1
+
+    # A name that is neither a type nor a value is still an error -- the
+    # fallback must not turn every unknown `x<>` into something.
+    refval_i.write_text(
+        "main: proc() -> i32 {\n    n: u64 = nothing_at_all<>.count;\n    return 0;\n}\n",
+        encoding="utf-8", newline="\n")
+    res = run([str(I_EXE), "check", str(refval_i)])
+    if res.returncode == 0 or "undeclared identifier" not in res.stdout:
+        print("reflect_of_value: an unknown name must still be rejected")
+        print(res.stdout)
+        return 1
+    print("ok reflect_of_value")
+
     line_map_i = TEST_DIR / "generated_line_map.i"
     line_map_c = TEST_DIR / "generated_line_map.c"
     line_map_h = TEST_DIR / "generated_line_map.h"
