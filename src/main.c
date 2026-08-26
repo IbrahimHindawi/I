@@ -177,6 +177,23 @@ static bool file_exists_cstr(const char *path) {
     return true;
 }
 
+/* `std` is the compiler's own library and lives beside the executable. Two
+   things go wrong quietly without a check, and both cost a long detour before
+   anyone suspects the import system:
+
+     * a broken install, where `std` is simply not there. Every `import "std/..."`
+       then falls through to some other candidate, or to a path that does not
+       exist, and the error names a file the author never wrote.
+
+     * a `std` directory sitting next to the *source*. Imports resolve
+       source-relative first, so that copy silently wins over the compiler's --
+       and edits to the real one appear to do nothing at all.
+
+   Both are now hard errors. `--no-std` turns the checks off for a program that
+   deliberately does not use the shipped library. */
+static bool g_no_std = false;
+static const char *g_exe_import_root = null;
+
 static void add_import_dir(const char *dir) {
     if (!dir || !dir[0]) return;
     if (g_import_dir_count >= 64) return;
@@ -4344,6 +4361,52 @@ static const char *exe_import_root(memops_arena *arena, const char *argv0) {
     return canonicalize_path(arena, dir);
 }
 
+static void std_fatal(const char *message, const char *detail, const char *detail2,
+                      const char *hint) {
+    if (g_diag_json) {
+        char text[2048];
+        snprintf(text, sizeof(text), "%s: %s%s%s", message, detail ? detail : "",
+                 detail2 ? "; " : "", detail2 ? detail2 : "");
+        diag_json_error("<std>", 0, 0, "std", text);
+        diag_json_finish();
+        exit(1);
+    }
+    printf("i: error: %s\n", message);
+    if (detail && detail[0]) printf("  %s\n", detail);
+    if (detail2 && detail2[0]) printf("  %s\n", detail2);
+    if (hint && hint[0]) printf("  %s\n", hint);
+    exit(1);
+}
+
+/* Joins the compiler's own directory to an import path, which is where the
+   shipped library lives. */
+static const char *import_candidate(memops_arena *arena, const char *dir, string8 import_path) {
+    string8 base = string8_from_cstr(arena, dir);
+    u64 needs_slash = 0;
+    if (base.length > 0) {
+        u8 last = base.data[base.length - 1];
+        needs_slash = (last != '/' && last != '\\');
+    }
+    string8 out = string8_reserve(arena, base.length + needs_slash + import_path.length + 1);
+    string8_append_bytes(arena, &out, base.data, base.length);
+    if (needs_slash) string8_append_byte(arena, &out, '/');
+    string8_append_bytes(arena, &out, import_path.data, import_path.length);
+    return canonicalize_path(arena, out);
+}
+
+static bool files_have_same_contents(memops_arena *arena, const char *a, const char *b) {
+    string8 left = string8_read_file(arena, a);
+    string8 right = string8_read_file(arena, b);
+    if (!left.data || !right.data) return false;
+    if (left.length != right.length) return false;
+    return memcmp(left.data, right.data, left.length) == 0;
+}
+
+static const char *std_path_for(memops_arena *arena, string8 import_path) {
+    if (!g_exe_import_root) return null;
+    return import_candidate(arena, g_exe_import_root, import_path);
+}
+
 static const char *resolve_import_path(memops_arena *arena, string8 import_lit) {
     string8 import_path = string_lit_inner(arena, import_lit);
     if (import_path.length >= 2 && import_path.data[1] == ':') {
@@ -4367,23 +4430,52 @@ static const char *resolve_import_path(memops_arena *arena, string8 import_lit) 
     string8_append_bytes(arena, &out, (u8 *)source, dir_len);
     string8_append_bytes(arena, &out, import_path.data, import_path.length);
     const char *source_relative = canonicalize_path(arena, out);
+
+    /* An `import "std/..."` always means the library beside the compiler. It is
+       resolved here rather than by the search below, so that a `std` directory
+       next to the source cannot quietly take its place -- that shadowing is
+       reported instead of preferred. */
+    bool is_std_import = import_path.length > 4 &&
+                         (memcmp(import_path.data, "std/", 4) == 0 ||
+                          memcmp(import_path.data, "std\\", 4) == 0);
+    if (is_std_import && !g_no_std) {
+        const char *own = std_path_for(arena, import_path);
+        if (!own || !file_exists_cstr(own)) {
+            std_fatal("std module not found beside the compiler",
+                      own ? own : "the compiler's own directory could not be determined",
+                      null,
+                      "reinstall, or pass --no-std to compile without the shipped library");
+        }
+        const char *shadow = null;
+        if (file_exists_cstr(source_relative) && !cstr_equals(source_relative, own) &&
+            !files_have_same_contents(arena, source_relative, own)) {
+            shadow = source_relative;
+        }
+        for (i32 i = 0; !shadow && i < g_import_dir_count; i++) {
+            const char *candidate = import_candidate(arena, g_import_dirs[i], import_path);
+            if (file_exists_cstr(candidate) && !cstr_equals(candidate, own) &&
+                !files_have_same_contents(arena, candidate, own)) {
+                shadow = candidate;
+            }
+        }
+        if (shadow) {
+            char found[1024];
+            char shipped[1024];
+            snprintf(found, sizeof(found), "found first: %s", shadow);
+            snprintf(shipped, sizeof(shipped), "shipped with the compiler: %s", own);
+            std_fatal("a different std/ module shadows the compiler's own",
+                      found, shipped,
+                      "rename that directory, or pass --no-std to use it instead");
+        }
+        return own;
+    }
+
     if (file_exists_cstr(source_relative)) {
         return source_relative;
     }
 
     for (i32 i = 0; i < g_import_dir_count; i++) {
-        string8 dir = string8_from_cstr(arena, g_import_dirs[i]);
-        u64 needs_slash = 0;
-        if (dir.length > 0) {
-            u8 last = dir.data[dir.length - 1];
-            needs_slash = (last != '/' && last != '\\');
-        }
-
-        string8 candidate = string8_reserve(arena, dir.length + needs_slash + import_path.length + 1);
-        string8_append_bytes(arena, &candidate, dir.data, dir.length);
-        if (needs_slash) string8_append_byte(arena, &candidate, '/');
-        string8_append_bytes(arena, &candidate, import_path.data, import_path.length);
-        const char *canonical = canonicalize_path(arena, candidate);
+        const char *canonical = import_candidate(arena, g_import_dirs[i], import_path);
         if (file_exists_cstr(canonical)) {
             return canonical;
         }
@@ -6458,6 +6550,7 @@ static const char *g_reflect_runtime_names[] = {
     "reflect_kind_struct",
     "reflect_kind_union",
     "reflect_name_from_value",
+    "reflect_name_from_value_or",
     "reflect_next_field_with_attr",
     "reflect_next_field_with_kind",
     "reflect_type_kind",
@@ -15544,7 +15637,7 @@ static void cli_print_usage(void) {
         "  I [input.i] --lsp=json\n"
         "\n"
         "commands:\n"
-        "  compile   transpile I to C and optionally a generated header\n"
+        "  compile   transpile ilang to C and optionally a generated header\n"
         "  check     parse, import, validate, and type-check only\n"
         "  symbols   emit compiler symbol metadata as JSON\n"
         "  lsp       emit diagnostics plus compiler symbol metadata as JSON\n"
@@ -15554,7 +15647,7 @@ static void cli_print_usage(void) {
         "  -o, --output <file>       output C file for compile\n"
         "  -H, --header <file>       output header file for compile\n"
         "  --no-header               skip generated header emission\n"
-        "  -I, --importdir <dir>     add an I import search directory\n"
+        "  -I, --importdir <dir>     add an ilang import search directory\n"
         "  --check                   legacy check mode\n"
         "  --diagnostics=json        emit diagnostics as JSON\n"
         "  --symbols=json            legacy symbols JSON mode\n"
@@ -15562,6 +15655,7 @@ static void cli_print_usage(void) {
         "  --profile                 print compiler phase timings to stderr\n"
         "  --stdin                   read input source from stdin\n"
         "  --stdin-path <file>       override a source file with stdin text\n"
+        "  --no-std                  do not require the std shipped beside the compiler\n"
         "  -h, --help                print this help\n"
         "  --version                 print compiler version\n"
     );
@@ -15696,6 +15790,10 @@ i32 main(i32 argc, char *argv[]) {
         }
         if (cstr_equals(arg, "--emit-all-line-directives")) {
             g_emit_all_line_directives = true;
+            continue;
+        }
+        if (cstr_equals(arg, "--no-std")) {
+            g_no_std = true;
             continue;
         }
         if (cstr_equals(arg, "--check")) {
@@ -15984,7 +16082,22 @@ i32 main(i32 argc, char *argv[]) {
     memops_arena arena = {0};
     memops_arena_initialize(&arena);
     g_index_arena = &arena;
-    add_import_dir(exe_import_root(&arena, argv[0]));
+    g_exe_import_root = exe_import_root(&arena, argv[0]);
+    add_import_dir(g_exe_import_root);
+
+    /* A missing std is a broken installation, and finding out about it one
+       import at a time -- as an error naming a file the author never wrote --
+       is a poor way to learn that. core.h is the probe because everything the
+       compiler emits includes it. */
+    if (!g_no_std) {
+        const char *probe = std_path_for(&arena, string8_from_cstr(&arena, "std/core.h"));
+        if (!probe || !file_exists_cstr(probe)) {
+            std_fatal("the compiler cannot find its own std",
+                      probe ? probe : "the compiler's own directory could not be determined",
+                      null,
+                      "std must sit beside I.exe; reinstall, or pass --no-std");
+        }
+    }
 
     const char *canonical_input_path = canonicalize_path(&arena, string8_from_cstr(&arena, input_path));
     if (stdin_override_path_arg) {

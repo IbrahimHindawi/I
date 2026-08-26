@@ -245,6 +245,28 @@ reflect_value_from_name: proc(type: *const reflect, name: *const char, fallback:
     return found != null ? found[0].value : fallback;
 }
 
+// Same as reflect_name_from_value, but never returns null.
+//
+// The plain version returns null when nothing matches, which is right for code
+// that wants to test the result and wrong for the common use -- printing the
+// name of a status enum. Passing null to a `%s` is undefined behaviour; clang's
+// runtime happens to print `(null)` and MSVC's does not have to.
+//
+// This is the direction a status enum is usually read in:
+//
+//     e: mesh_status = mesh_load(mesh.&);
+//     if (e != mesh_status.success) {
+//         printfmt("load failed: {}\n",
+//                  reflect_name_from_value_or(mesh_status<>.&, cast(e, i32), "?"));
+//     }
+//
+// A miss is not necessarily a bug: an enum value can arrive from a file or a
+// socket and hold anything that fits in the underlying type.
+reflect_name_from_value_or: proc(type: *const reflect, value: i32, fallback: *const char) -> *const char = {
+    found: *const reflect_value = reflect_find_value_by_value(type, value);
+    return found != null ? found[0].name : fallback;
+}
+
 
 // ---------------------------------------------------------------------------
 // Field shape

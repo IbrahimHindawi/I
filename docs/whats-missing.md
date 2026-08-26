@@ -52,7 +52,7 @@ reflection.** `Result<T>` is not the direction.
     e: mesh_status = mesh_load(mesh.&);
     if (e != mesh_status.success) {
         printfmt("load failed: {}\n",
-                 reflect_name_from_value(e<>.&, cast(e, i32)));
+                 reflect_name_from_value_or(e<>.&, cast(e, i32), "?"));
         return -1;
     }
 
@@ -68,6 +68,13 @@ What it gets right:
 - **It costs nothing.** It is an int, and it compiles to an int.
 - **The out-parameter avoids a copy.** `Result<geo_mesh, E>` returns the mesh by
   value, and ilang has no moves, so that is a copy of everything in it.
+
+Two pieces of the pattern live in the language rather than in each project.
+`reflect_name_from_value_or` is in `std/reflect.i` -- the plain version returns
+null when nothing matches, which is right for code that tests the result and
+wrong for the common use, since passing null to a `%s` is undefined. And `<>`
+works on a *value*, not only a type, so the status variable names its own
+record. Covered by `status_enum_errors` and `reflect_of_value`.
 
 ### Why not `Result<T, E>`
 

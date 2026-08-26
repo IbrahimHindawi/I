@@ -1450,7 +1450,7 @@ main:proc()->i32 = {
     print("ok cli_no_header_command")
 
     cli_importdir_root = TEST_DIR / "cli_importdir_root"
-    cli_importdir_std = cli_importdir_root / "std"
+    cli_importdir_std = cli_importdir_root / "vendor"
     cli_importdir_std.mkdir(parents=True, exist_ok=True)
     (cli_importdir_std / "importdir_smoke.i").write_text(r'''
 ImportDirPayload:struct = {
@@ -1464,7 +1464,7 @@ importdir_value:proc()->i32 = {
 '''.strip() + "\n", encoding="utf-8", newline="\n")
     cli_importdir_i = TEST_DIR / "cli_importdir.i"
     cli_importdir_i.write_text(r'''
-import "std/importdir_smoke.i"
+import "vendor/importdir_smoke.i"
 
 main:proc()->i32 = {
     return importdir_value();
@@ -3956,6 +3956,84 @@ main:proc()->i32 = {
             return 1
     print("ok external_spelling")
 
+    # std is the compiler's own library and lives beside the executable. Both
+    # ways of losing it are silent by default, and both cost a long detour
+    # before anyone suspects the import system: a missing std sends every
+    # `import "std/..."` down some other path, and a std next to the *source*
+    # wins the source-relative lookup, so edits to the real one do nothing.
+    std_i = TEST_DIR / "std_guard.i"
+    std_i.write_text(
+        'import "std/reflect.i"\nmain: proc() -> i32 = { return 0; }\n',
+        encoding="utf-8", newline="\n")
+
+    shadow_dir = TEST_DIR / "std"
+    shutil.rmtree(shadow_dir, ignore_errors=True)
+    shadow_dir.mkdir(parents=True)
+    shipped = (ROOT / "src" / "std" / "reflect.i").read_text(encoding="utf-8")
+    try:
+        # An identical copy is not a shadow in any sense worth stopping for --
+        # the author gets the same code either way. The compiler's own repo is
+        # exactly this case, since the shipped std is a copy of src/std.
+        (shadow_dir / "reflect.i").write_text(shipped, encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(std_i)])
+        if res.returncode != 0:
+            print("std_guard: a byte-identical copy must not be treated as shadowing")
+            print(res.stdout)
+            return 1
+
+        # A copy that has drifted is the bug this guard exists for: edits to the
+        # real std appear to do nothing, and nothing points at the reason.
+        (shadow_dir / "reflect.i").write_text(
+            shipped + "\nshadow_marker: proc() -> i32 = { return 1; }\n",
+            encoding="utf-8", newline="\n")
+        res = run([str(I_EXE), "check", str(std_i)])
+        if res.returncode == 0 or "shadows the compiler's own" not in res.stdout:
+            print("std_guard: a std next to the source must be rejected")
+            print(res.stdout)
+            return 1
+        # Both files are named, since knowing which two are in play is the
+        # whole difficulty.
+        if str(shadow_dir) not in res.stdout:
+            print("std_guard: the diagnostic should name the shadowing file")
+            print(res.stdout)
+            return 1
+        # --no-std is the deliberate opt-out and must not trip the guard.
+        res = run([str(I_EXE), "check", str(std_i), "--no-std"])
+        if "shadows the compiler's own" in res.stdout:
+            print("std_guard: --no-std must suppress the shadowing error")
+            print(res.stdout)
+            return 1
+    finally:
+        shutil.rmtree(shadow_dir, ignore_errors=True)
+
+    # A missing std is a broken install, reported once at startup rather than
+    # as an error naming a file the author never wrote.
+    bare = TEST_DIR / "bare_install"
+    shutil.rmtree(bare, ignore_errors=True)
+    bare.mkdir(parents=True)
+    shutil.copy(I_EXE, bare / "I.exe")
+    try:
+        res = run([str(bare / "I.exe"), "check", str(std_i)])
+        if res.returncode == 0 or "cannot find its own std" not in res.stdout:
+            print("std_guard: a missing std must be rejected")
+            print(res.stdout)
+            return 1
+        res = run([str(bare / "I.exe"), "check", str(std_i), "--no-std"])
+        if "cannot find its own std" in res.stdout:
+            print("std_guard: --no-std must suppress the missing-std error")
+            print(res.stdout)
+            return 1
+    finally:
+        shutil.rmtree(bare, ignore_errors=True)
+
+    # And the ordinary case still resolves.
+    res = run([str(I_EXE), "check", str(std_i)])
+    if res.returncode != 0:
+        print("std_guard: a plain std import must still work")
+        print(res.stdout)
+        return 1
+    print("ok std_guard")
+
     # The declaration grammar is
     #
     #     name : kind [attributes] <generics> (params) -> ReturnType = { body }
@@ -4293,6 +4371,39 @@ main:proc()->i32 = {
         print(res.stdout)
         return 1
     print("ok reflect_of_value")
+
+    # The decided error-handling shape, end to end: a status enum, a value
+    # through an out-parameter, and the message derived from reflection rather
+    # than a hand-written table that goes stale. See whats-missing.md section 1.
+    #
+    # `reflect_name_from_value` returns null on a miss, which is right for code
+    # that tests the result and wrong for the common use -- printing it. Passing
+    # null to a `%s` is undefined; clang happens to print `(null)` and MSVC does
+    # not have to. Hence the `_or` variant, which mirrors the fallback that
+    # reflect_value_from_name already took in the other direction.
+    status_i = TEST_DIR / "status_enum_errors.i"
+    status_c = TEST_DIR / "status_enum_errors.c"
+    status_exe = TEST_DIR / "status_enum_errors.exe"
+    status_i.write_text(
+        "import \"std/Print.i\"\nimport \"std/reflect.i\"\nmesh_status: enum = { success, file_not_found, bad_magic, }\ngeo_mesh: struct = { points: i32; }\nmesh_load: proc(mesh: *geo_mesh) -> mesh_status {\n    return mesh_status.bad_magic;\n}\nmain: proc() -> i32 {\n    mesh: geo_mesh = {};\n    e: mesh_status = mesh_load(mesh.&);\n    if (e != mesh_status.success) {\n        printfmt(\"{} {}\",\n            reflect_name_from_value_or(e<>.&, cast(e, i32), \"?\"),\n            reflect_name_from_value_or(e<>.&, 99, \"<unknown>\"));\n    }\n    return 0;\n}\n",
+        encoding="utf-8", newline="\n")
+    gen = run([str(I_EXE), "compile", str(status_i), "-o", str(status_c), "--no-header"])
+    if gen.returncode != 0:
+        print("status_enum_errors: should compile")
+        print(gen.stdout)
+        return 1
+    built = run(["clang.exe", str(status_c), "-I", "src", "-I", "src/std",
+                 "-o", str(status_exe)])
+    if built.returncode != 0:
+        print("status_enum_errors: generated C did not build")
+        print(built.stdout)
+        return 1
+    ran = run([str(status_exe)])
+    # the member name from reflection, and the fallback rather than null
+    if ran.stdout.strip() != "bad_magic <unknown>":
+        print(f"status_enum_errors: expected 'bad_magic <unknown>', got {ran.stdout.strip()!r}")
+        return 1
+    print("ok status_enum_errors")
 
     line_map_i = TEST_DIR / "generated_line_map.i"
     line_map_c = TEST_DIR / "generated_line_map.c"
